@@ -3,12 +3,15 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::database::{Database, Project};
 use super::event::Event;
+use super::http_agent::HttpAgent;
 use super::message::{Message, Payload};
 
 pub struct Application {
     handle: Handle,
 
     mailbox: mpsc::Receiver<Message>,
+
+    http_agent: HttpAgent,
 }
 
 impl Application {
@@ -18,6 +21,8 @@ impl Application {
 
         let database = Database::open().await?;
 
+        let http_agent = HttpAgent::new();
+
         Ok(Self {
             handle: Handle {
                 database,
@@ -26,6 +31,8 @@ impl Application {
             },
 
             mailbox: mailbox_rx,
+
+            http_agent,
         })
     }
 
