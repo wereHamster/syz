@@ -2,3 +2,5 @@
 data/
 result/
 target/
+
+.env

@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod application;
+pub mod clients;
 pub mod database;
 pub mod engine;
 pub mod event;

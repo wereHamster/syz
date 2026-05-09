@@ -17,12 +17,12 @@ pub trait ProjectRepositoryView: Send + Sync {
     async fn get_revision(&self, branch_name: &str) -> Result<String>;
 
     /// Returns an atomic view of the repository at the given revision.
-    fn snapshot(&self, revision: &str) -> Box<dyn ProjectRepositoryViewRepositorySnapshot>;
+    fn snapshot(&self, revision: &str) -> Box<dyn ProjectRepositorySnapshot>;
 }
 
 /// An atomic view on a project (at a specific revision).
 #[async_trait]
-pub trait ProjectRepositoryViewRepositorySnapshot: Send + Sync {
+pub trait ProjectRepositorySnapshot: Send + Sync {
     async fn list_files(&self) -> Result<Vec<String>>;
 
     /// Returns Err() if the file doesn't exist.
