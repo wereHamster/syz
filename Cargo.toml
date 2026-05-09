@@ -1,0 +1,15 @@
+[package]
+name = "syz"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "syzd"
+path = "src/bin/syzd.rs"
+
+[dependencies]
+tokio = { version = "1.50.0", features = ["full", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tracing-journald = "0.3.2"
+anyhow = "1.0.102"
