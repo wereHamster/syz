@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
 
+use super::clients::github::GitHub;
 use super::database::{Database, Project};
 use super::event::Event;
 use super::http_agent::HttpAgent;
@@ -12,6 +13,7 @@ pub struct Application {
     mailbox: mpsc::Receiver<Message>,
 
     http_agent: HttpAgent,
+    github: GitHub,
 }
 
 impl Application {
@@ -22,6 +24,7 @@ impl Application {
         let database = Database::open().await?;
 
         let http_agent = HttpAgent::new();
+        let github = GitHub::new().await?;
 
         Ok(Self {
             handle: Handle {
@@ -33,6 +36,7 @@ impl Application {
             mailbox: mailbox_rx,
 
             http_agent,
+            github,
         })
     }
 
@@ -56,6 +60,30 @@ impl Application {
 
     pub fn query(&self) -> Query {
         self.handle().query()
+    }
+
+    pub async fn project_repository_view(
+        &self,
+        project_id: &str,
+    ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryView>> {
+        let project = self.query().project(project_id.to_string()).await?;
+
+        match project.platform.as_str() {
+            "github" => {
+                let parts: Vec<&str> = project.repository.split('/').collect();
+                if parts.len() != 2 {
+                    anyhow::bail!("Repository must be in the format owner/repo");
+                }
+                let owner = parts[0].to_string();
+                let repo = parts[1].to_string();
+
+                let view = self.github.project_repository_view(owner, repo).await?;
+                Ok(Box::new(view))
+            }
+            _ => {
+                anyhow::bail!("Unsupported project platform: {}", project.platform);
+            }
+        }
     }
 
     async fn run(mut self) -> Result<()> {
