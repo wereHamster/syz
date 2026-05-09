@@ -1,4 +1,5 @@
 use anyhow::Result;
+use syz::core::{database::pk, message::Payload};
 use tracing_subscriber::prelude::*;
 
 #[tokio::main]
@@ -9,6 +10,24 @@ async fn main() -> Result<()> {
 
     let application = syz::core::application::Application::new().await?;
     let handle = application.start();
+
+    let query = handle.query();
+    let projects = query.list_projects().await?;
+
+    for project in projects {
+        tracing::info!("project {}", project.id);
+
+        handle
+            .send(
+                pk().into(),
+                Payload::AnalyzeProjectDependencies {
+                    project_id: project.id,
+                },
+            )
+            .await?;
+    }
+
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     Ok(())
 }

@@ -1,3 +1,7 @@
 #[derive(Clone)]
-pub struct Event {
+pub enum Event {
+    Trace {
+        level: tracing::Level,
+        message: String,
+    },
 }

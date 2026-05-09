@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use rand::Rng;
-use std::sync::Arc;
 use turso::{Builder, Connection};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct Database {
-    db: Arc<turso::Database>,
+    db: turso::Database,
 }
 
 impl Database {
@@ -15,7 +15,7 @@ impl Database {
             .await
             .context("Failed to build turso database")?;
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self { db })
     }
 
     pub fn conn(&self) -> Result<Connection> {
@@ -29,4 +29,11 @@ pub fn pk() -> String {
     let mut buf = [0u8; 32];
     rand::rng().fill_bytes(&mut buf);
     bs58::encode(buf).into_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub platform: String,
+    pub repository: String,
 }

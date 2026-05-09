@@ -1597,6 +1597,7 @@ dependencies = [
  "anyhow",
  "bs58",
  "rand 0.10.1",
+ "serde",
  "tokio",
  "tracing",
  "tracing-journald",
