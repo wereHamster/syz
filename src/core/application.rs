@@ -50,17 +50,24 @@ impl Application {
         handle
     }
 
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    pub fn query(&self) -> Query {
+        self.handle().query()
+    }
+
     async fn run(mut self) -> Result<()> {
         while let Some(msg) = self.mailbox.recv().await {
             tracing::info!("Processing message {}", msg.message_id);
 
-            match msg.payload {
-                Payload::AnalyzeProjectDependencies { project_id } => {
-                    tracing::info!("AnalyzeProjectDependencies {}", project_id);
-                }
-                _ => todo!(),
+            if let Err(e) = msg.payload.execute(&self).await {
+                tracing::warn!("Failed to process message {}: {}", msg.message_id, e);
             }
         }
+
+        tracing::error!("Application loop is unexpectedly exiting");
 
         Ok(())
     }
@@ -124,5 +131,25 @@ impl Query {
         }
 
         Ok(projects)
+    }
+
+    pub async fn project(&self, project_id: String) -> Result<Project> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT id, platform, repository FROM project WHERE id = ?1")
+            .await?;
+
+        let mut rows = stmt.query((project_id,)).await?;
+
+        if let Some(row) = rows.next().await? {
+            return Ok(Project {
+                id: row.get(0).unwrap_or_default(),
+                platform: row.get(1).unwrap_or_default(),
+                repository: row.get(2).unwrap_or_default(),
+            });
+        }
+
+        Err(anyhow::anyhow!("Project not found"))
     }
 }

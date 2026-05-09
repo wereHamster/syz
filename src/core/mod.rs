@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod application;
 pub mod database;
 pub mod event;
