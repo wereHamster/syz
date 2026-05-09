@@ -2472,6 +2472,7 @@ name = "syz"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bs58",
  "bytes",
  "rand 0.10.1",
