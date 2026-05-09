@@ -6,6 +6,10 @@ use tracing_subscriber::prelude::*;
 async fn main() -> Result<()> {
     init_tracing_subscriber();
 
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     tracing::info!("starting...");
 
     let application = syz::core::application::Application::new().await?;
