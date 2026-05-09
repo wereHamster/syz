@@ -115,6 +115,7 @@ pub enum UpdateType {
     Unknown,
 }
 
+#[derive(Clone)]
 pub struct ProposedBump {
     pub target_version: String,
     pub head_version: String,
@@ -123,6 +124,7 @@ pub struct ProposedBump {
 }
 
 /// Describes how a dependency can be updated.
+#[derive(Clone)]
 pub struct DependencyUpdateOption {
     pub package_info: PackageInfo,
     pub bumps: Vec<ProposedBump>,

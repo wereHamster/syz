@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use super::actions::analyze_project_dependencies::AnalyzedProjectDependencies;
 use super::application::Application;
 
 #[derive(Clone)]
@@ -18,6 +19,10 @@ pub enum Payload {
     /// Scan the project source code, identify which dependencies it has, check which
     /// dependencies are outdated, and update the local database with the information.
     AnalyzeProjectDependencies { project_id: String },
+    PersistAnalyzedProjectDependencies {
+        project_id: String,
+        scan_result: AnalyzedProjectDependencies,
+    },
 }
 
 impl Payload {
@@ -25,6 +30,13 @@ impl Payload {
         match self {
             Payload::AnalyzeProjectDependencies { project_id } => {
                 super::actions::analyze_project_dependencies::run(app, project_id.clone()).await
+            }
+            Payload::PersistAnalyzedProjectDependencies {
+                project_id,
+                scan_result,
+            } => {
+                app.persist_analyzed_project_dependencies(project_id, scan_result.clone())
+                    .await
             }
         }
     }

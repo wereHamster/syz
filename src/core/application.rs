@@ -113,7 +113,7 @@ impl Application {
         Ok(view.snapshot(revision.as_str()))
     }
 
-    pub async fn persist_analyzed_project_pependencies(
+    pub async fn persist_analyzed_project_dependencies(
         &self,
         project_id: &str,
         scan_result: AnalyzedProjectDependencies,
@@ -155,7 +155,7 @@ impl Application {
 
         let mut bump_cache: HashMap<(String, bool), String> = HashMap::new();
 
-        for res in scan_result.analyzed_project_pependencies {
+        for res in scan_result.analyzed_project_dependencies {
             let group_name = res.group_name();
 
             let AnalyzedProjectDependency {
