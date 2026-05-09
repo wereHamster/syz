@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures::future;
 
 use crate::core::application::Application;
 
@@ -10,14 +11,18 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let revision = view.get_revision(default_branch.as_str()).await?;
     let snapshot = view.snapshot(revision.as_str());
 
-    let files = snapshot.list_files().await?;
-    for file in files {
-        tracing::info!("file: {}", file);
+    let scanners = app.ecosystems();
+    let futures = scanners
+        .iter()
+        .map(|scanner| scanner.discover_project_dependencies(snapshot.as_ref()));
+
+    let results = future::try_join_all(futures).await?;
+    let deps: Vec<_> = results.into_iter().flatten().collect();
+
+    for dep in deps {
+        tracing::info!("Dep {}", dep.purl);
     }
 
-    // Initialize ecosystem scanners and apply each to the snapshot to discover
-    // project dependencies. Run the discovery in parallel.
-    //
     // Once all project dependencies are known, query the ecosystem for dependency update
     // options.
     //

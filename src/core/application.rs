@@ -3,6 +3,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::clients::github::GitHub;
 use super::database::{Database, Project};
+use super::engine::ecosystems::{npm::Npm, Ecosystem};
 use super::event::Event;
 use super::http_agent::HttpAgent;
 use super::message::{Message, Payload};
@@ -56,6 +57,10 @@ impl Application {
 
     pub fn handle(&self) -> Handle {
         self.handle.clone()
+    }
+
+    pub fn ecosystems(&self) -> Vec<Box<dyn Ecosystem>> {
+        vec![Box::new(Npm::new())]
     }
 
     pub fn query(&self) -> Query {

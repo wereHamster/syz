@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
             .await?;
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
     Ok(())
 }

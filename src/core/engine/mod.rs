@@ -4,7 +4,7 @@ pub mod repository;
 /// Pacakge URL
 ///
 /// See https://packageurl.org/
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PURL {
     /// Called 'type' in Package-URL specification, but that's a reserved word
     /// so we have to use a different name.
@@ -29,12 +29,29 @@ pub struct PURL {
     pub version: Option<String>,
 }
 
+impl std::fmt::Display for PURL {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pkg:{}", self.ecosystem)?;
+        if let Some(namespace) = &self.namespace {
+            write!(f, "/{}", namespace)?;
+        }
+        write!(f, "/{}", self.name)?;
+        if let Some(version) = &self.version {
+            write!(f, "@{}", version)?;
+        }
+        if let Some(subpath) = &self.subpath {
+            write!(f, "#{}", subpath)?;
+        }
+        Ok(())
+    }
+}
+
 /// Represents a dependency discovered during a repository scan.
 ///
 /// This struct only contains information that was extracted from the
 /// repository. It does not contain data or metadata for which the
 /// dependency ecosystem registry need to be queried.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DiscoveredDependency {
     /// The dependency as defined by its Package-URL.
     pub purl: PURL,
