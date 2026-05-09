@@ -3095,6 +3095,7 @@ dependencies = [
  "reqwest-retry",
  "reqwest-tracing",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "serde_yml",

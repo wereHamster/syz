@@ -18,20 +18,20 @@ async fn main() -> Result<()> {
     let query = handle.query();
     let projects = query.list_projects().await?;
 
-    for project in projects {
-        tracing::info!("project {}", project.id);
+    for project in [projects.get(0).unwrap()] {
+        tracing::info!("project {}", project.id.clone());
 
         handle
             .send(
                 pk().into(),
                 Payload::AnalyzeProjectDependencies {
-                    project_id: project.id,
+                    project_id: project.id.clone(),
                 },
             )
             .await?;
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
 
     Ok(())
 }

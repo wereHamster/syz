@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rand::Rng;
-use turso::{Builder, Connection};
 use serde::{Deserialize, Serialize};
+use turso::{Builder, Connection};
 
 #[derive(Clone)]
 pub struct Database {

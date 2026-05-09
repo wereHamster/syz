@@ -26,11 +26,9 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
     let workspace_yaml = repo.read_file("pnpm-workspace.yaml").await?;
 
     let mut minimum_release_age = None;
-    if let ref w_content = workspace_yaml {
-        if let Ok(config) = serde_yml::from_str::<WorkspaceConfig>(w_content) {
-            if let Some(age) = config.minimum_release_age {
-                minimum_release_age = Some(chrono::Duration::minutes(age));
-            }
+    if let Ok(config) = serde_yml::from_str::<WorkspaceConfig>(&workspace_yaml) {
+        if let Some(age) = config.minimum_release_age {
+            minimum_release_age = Some(chrono::Duration::minutes(age));
         }
     }
 

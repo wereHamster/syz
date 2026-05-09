@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::core::engine::{repository::ProjectRepositorySnapshot, DiscoveredDependency};
+use crate::core::engine::{
+    repository::ProjectRepositorySnapshot, DependencyUpdateOption, DiscoveredDependency,
+};
 
 pub mod npm;
 
@@ -12,4 +14,13 @@ pub trait Ecosystem: Send + Sync {
         &self,
         repo: &dyn ProjectRepositorySnapshot,
     ) -> Result<Vec<DiscoveredDependency>>;
+
+    /// Computes options how the given dependency can be updated.
+    ///
+    /// The result includes information about different versions (minor and
+    /// major) that we can update the dependency to.
+    async fn query_dependency_update_options(
+        &self,
+        dependency: &DiscoveredDependency,
+    ) -> Result<DependencyUpdateOption>;
 }

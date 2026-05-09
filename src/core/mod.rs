@@ -6,3 +6,4 @@ pub mod engine;
 pub mod event;
 pub mod http_agent;
 pub mod message;
+pub mod version_resolver;

@@ -1,8 +1,15 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::collections::HashMap;
 use tokio::sync::{broadcast, mpsc};
+use turso::params;
 
+use crate::core::clients;
+
+use super::actions::analyze_project_dependencies::{
+    AnalyzedProjectDependencies, AnalyzedProjectDependency,
+};
 use super::clients::github::GitHub;
-use super::database::{Database, Project};
+use super::database::{pk, Database, Project};
 use super::engine::ecosystems::{npm::Npm, Ecosystem};
 use super::event::Event;
 use super::http_agent::HttpAgent;
@@ -60,7 +67,9 @@ impl Application {
     }
 
     pub fn ecosystems(&self) -> Vec<Box<dyn Ecosystem>> {
-        vec![Box::new(Npm::new())]
+        vec![Box::new(Npm::new(clients::npm::Npm::new(
+            self.http_agent.clone(),
+        )))]
     }
 
     pub fn query(&self) -> Query {
@@ -89,6 +98,164 @@ impl Application {
                 anyhow::bail!("Unsupported project platform: {}", project.platform);
             }
         }
+    }
+
+    pub async fn project_repository_snapshot(
+        &self,
+        project_id: &str,
+    ) -> Result<Box<dyn super::engine::repository::ProjectRepositorySnapshot>> {
+        let view = self.project_repository_view(&project_id).await?;
+        let default_branch = view.get_default_branch().await?;
+        let revision = view.get_revision(default_branch.as_str()).await?;
+        Ok(view.snapshot(revision.as_str()))
+    }
+
+    pub async fn persist_analyzed_project_pependencies(
+        &self,
+        project_id: &str,
+        scan_result: AnalyzedProjectDependencies,
+    ) -> Result<()> {
+        let scan_id = pk();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let conn = self.handle.database.conn()?;
+
+        conn.execute(
+            "INSERT INTO scan (id, project_id, create_time) VALUES (?, ?, ?)",
+            params![scan_id.clone(), project_id.to_string(), now],
+        )
+        .await
+        .context("Failed to insert scan")?;
+
+        let mut success_count = 0;
+
+        let mut existing_bumps_query = conn
+            .query(
+                "SELECT id, name, major FROM bump WHERE project_id = ?",
+                params![project_id.to_string()],
+            )
+            .await?;
+        let mut existing_bumps = HashMap::new();
+        let mut bump_ids_to_wipe = Vec::new();
+        while let Some(row) = existing_bumps_query.next().await? {
+            let id = row.get_value(0)?.as_text().unwrap().to_string();
+            let name = row.get_value(1)?.as_text().unwrap().to_string();
+            let major = *row.get_value(2)?.as_integer().unwrap_or(&0) != 0;
+            existing_bumps.insert((name, major), id.clone());
+            bump_ids_to_wipe.push(id);
+        }
+
+        for b_id in bump_ids_to_wipe {
+            conn.execute("DELETE FROM bumpdep WHERE bump_id = ?", params![b_id])
+                .await?;
+        }
+
+        let mut bump_cache: HashMap<(String, bool), String> = HashMap::new();
+
+        for res in scan_result.analyzed_project_pependencies {
+            let group_name = res.group_name();
+
+            let AnalyzedProjectDependency {
+                discovered_dependency,
+                dependency_update_options,
+            } = res;
+
+            let r#type = &discovered_dependency.purl.ecosystem;
+            let namespace = &discovered_dependency.purl.namespace;
+            let db_name = &discovered_dependency.purl.name;
+            let subpath = &discovered_dependency.purl.subpath;
+            let locked_version = &discovered_dependency.purl.version;
+            let req = &discovered_dependency.requirement;
+            let min_release_age = discovered_dependency.minimum_release_age;
+
+            {
+                let mut latest_allowed = "0.0.0".to_string();
+                if let Some(first_bump) = dependency_update_options.bumps.first() {
+                    latest_allowed = first_bump.target_version.clone();
+                }
+
+                let pkg_version = locked_version.clone().unwrap_or(latest_allowed.clone());
+                let eco_name = &r#type;
+                let mut pkg_query = conn.query(
+                    "SELECT id FROM package WHERE type = ? AND namespace IS ? AND name = ? AND subpath IS ? AND version = ?",
+                    params![eco_name.to_string(), namespace.clone(), db_name.clone(), subpath.clone(), pkg_version.clone()]
+                ).await?;
+
+                let pkg_id = if let Some(row) = pkg_query.next().await? {
+                    row.get_value(0)?
+                        .as_text()
+                        .context("package id should be text")?
+                        .clone()
+                } else {
+                    let new_pkg_id = pk();
+                    conn.execute(
+                        "INSERT INTO package (id, type, namespace, name, subpath, version) VALUES (?, ?, ?, ?, ?, ?)",
+                        params![new_pkg_id.clone(), eco_name.to_string(), namespace.clone(), db_name.clone(), subpath.clone(), pkg_version.clone()]
+                    ).await?;
+                    new_pkg_id
+                };
+
+                let dep_id = pk();
+                conn.execute(
+                    "INSERT INTO dependency (id, scan_id, specifier, package_id) VALUES (?, ?, ?, ?)",
+                    params![dep_id.clone(), scan_id.clone(), req.clone(), pkg_id],
+                )
+                .await?;
+
+                success_count += 1;
+
+                let mut bumps_to_process = Vec::new();
+                for bump in &dependency_update_options.bumps {
+                    let bump_version = if discovered_dependency.purl.ecosystem == "github-actions" {
+                        bump.target_version.clone()
+                    } else {
+                        bump.target_version.clone()
+                    };
+                    bumps_to_process.push((bump_version, bump.is_major, bump.head_version.clone()));
+                }
+
+                for (bump_version, bump_is_major, head_ver) in bumps_to_process {
+                    let bump_id = if let Some(id) =
+                        existing_bumps.get(&(group_name.clone(), bump_is_major))
+                    {
+                        id.clone()
+                    } else if let Some(id) = bump_cache.get(&(group_name.clone(), bump_is_major)) {
+                        id.clone()
+                    } else {
+                        let new_bump_id = pk();
+                        conn.execute(
+                            "INSERT INTO bump (id, project_id, name, major, approved) VALUES (?, ?, ?, ?, 0)",
+                            params![new_bump_id.clone(), project_id.to_string(), group_name.clone(), bump_is_major]
+                        ).await?;
+                        bump_cache.insert((group_name.clone(), bump_is_major), new_bump_id.clone());
+                        new_bump_id
+                    };
+
+                    let target_ver = bump_version.clone();
+                    let min_age_mins = min_release_age.map(|d| d.num_minutes());
+
+                    conn.execute(
+                        "INSERT INTO bumpdep (bump_id, dependency_id, target_version, head_version, minimum_release_age) VALUES (?, ?, ?, ?, ?)",
+                        params![bump_id, dep_id.clone(), target_ver, head_ver, min_age_mins]
+                    ).await?;
+                }
+            }
+        }
+
+        conn.execute(
+            "DELETE FROM bump WHERE project_id = ? AND id NOT IN (SELECT bump_id FROM bumpdep)",
+            params![project_id.to_string()],
+        )
+        .await?;
+
+        let msg = format!(
+            "Scan complete. Inserted {} dependencies (found {} potential bumps).",
+            success_count,
+            bump_cache.len() + existing_bumps.len()
+        );
+        tracing::info!("{}", msg);
+
+        Ok(())
     }
 
     async fn run(mut self) -> Result<()> {
