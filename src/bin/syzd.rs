@@ -5,7 +5,10 @@ use tracing_subscriber::prelude::*;
 async fn main() -> Result<()> {
     init_tracing_subscriber();
 
-    tracing::info!("syzd");
+    tracing::info!("starting...");
+
+    let application = syz::core::application::Application::new().await?;
+    let handle = application.start();
 
     Ok(())
 }
