@@ -10,7 +10,7 @@ use super::actions::analyze_project_dependencies::{
 };
 use super::clients::github::GitHub;
 use super::database::{pk, Database, Project};
-use super::engine::ecosystems::{npm::Npm, Ecosystem};
+use super::engine::ecosystems::{cargo::Cargo, npm::Npm, Ecosystem};
 use super::event::Event;
 use super::http_agent::HttpAgent;
 use super::message::{Message, Payload};
@@ -55,7 +55,7 @@ impl Application {
             tracing::info!("Event loop active");
 
             if let Err(e) = self.run().await {
-                tracing::error!("Application loop exited with error: {}", e);
+                tracing::error!("Application loop exited with error: {:#}", e);
             }
         });
 
@@ -67,9 +67,12 @@ impl Application {
     }
 
     pub fn ecosystems(&self) -> Vec<Box<dyn Ecosystem>> {
-        vec![Box::new(Npm::new(clients::npm::Npm::new(
-            self.http_agent.clone(),
-        )))]
+        vec![
+            Box::new(Cargo::new(clients::crates::Crates::new(
+                self.http_agent.clone(),
+            ))),
+            Box::new(Npm::new(clients::npm::Npm::new(self.http_agent.clone()))),
+        ]
     }
 
     pub fn query(&self) -> Query {
@@ -80,7 +83,7 @@ impl Application {
         &self,
         project_id: &str,
     ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryView>> {
-        let project = self.query().project(project_id.to_string()).await?;
+        let project = self.query().project(project_id).await?;
 
         match project.platform.as_str() {
             "github" => {
@@ -263,7 +266,7 @@ impl Application {
             tracing::info!("Processing message {}", msg.message_id);
 
             if let Err(e) = msg.payload.execute(&self).await {
-                tracing::warn!("Failed to process message {}: {}", msg.message_id, e);
+                tracing::warn!("Failed to process message {}: {:#}", msg.message_id, e);
             }
         }
 
@@ -333,7 +336,7 @@ impl Query {
         Ok(projects)
     }
 
-    pub async fn project(&self, project_id: String) -> Result<Project> {
+    pub async fn project(&self, project_id: &str) -> Result<Project> {
         let conn = self.database.conn()?;
 
         let mut stmt = conn

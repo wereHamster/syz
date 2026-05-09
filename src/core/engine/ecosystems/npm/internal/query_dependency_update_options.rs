@@ -22,7 +22,7 @@ pub async fn run(
         .purl
         .version
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("missing version"))?;
+        .ok_or_else(|| anyhow::anyhow!("missing version for {}", full_name))?;
 
     let versions = npm_client
         .get_versions(&full_name, &version, dependency.minimum_release_age.clone())

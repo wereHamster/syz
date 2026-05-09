@@ -5,6 +5,7 @@ use crate::core::engine::{
     repository::ProjectRepositorySnapshot, DependencyUpdateOption, DiscoveredDependency,
 };
 
+pub mod cargo;
 pub mod npm;
 
 #[async_trait]

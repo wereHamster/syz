@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let query = handle.query();
     let projects = query.list_projects().await?;
 
-    for project in [projects.get(0).unwrap()] {
+    for project in projects {
         tracing::info!("project {}", project.id.clone());
 
         handle

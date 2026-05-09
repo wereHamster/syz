@@ -23,12 +23,17 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
         return Ok(Vec::new());
     }
 
-    let workspace_yaml = repo.read_file("pnpm-workspace.yaml").await?;
+    let workspace_yaml = match repo.read_file("pnpm-workspace.yaml").await {
+        Ok(yaml) => Some(yaml),
+        Err(_) => None,
+    };
 
     let mut minimum_release_age = None;
-    if let Ok(config) = serde_yml::from_str::<WorkspaceConfig>(&workspace_yaml) {
-        if let Some(age) = config.minimum_release_age {
-            minimum_release_age = Some(chrono::Duration::minutes(age));
+    if let Some(workspace_yaml) = workspace_yaml {
+        if let Ok(config) = serde_yml::from_str::<WorkspaceConfig>(&workspace_yaml) {
+            if let Some(age) = config.minimum_release_age {
+                minimum_release_age = Some(chrono::Duration::minutes(age));
+            }
         }
     }
 
@@ -79,7 +84,10 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
     }
 
     for pkg_json_path in pkg_json_paths {
-        let pkg_json_opt = repo.read_file(&pkg_json_path).await?;
+        let pkg_json_opt = match repo.read_file(&pkg_json_path).await {
+            Ok(json) => json,
+            Err(_) => continue,
+        };
         let pkg_json_str = pkg_json_opt;
 
         let pkg: Value = match serde_json::from_str(&pkg_json_str) {
