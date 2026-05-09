@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
 
+use super::database::Database;
 use super::event::Event;
 use super::message::Message;
 
@@ -12,6 +13,8 @@ pub struct Application {
 
 #[derive(Clone)]
 pub struct Handle {
+    database: Database,
+
     /// Clients send messages to this mailbox, which are then processed sequentially by
     /// the application.
     mailbox: mpsc::Sender<Message>,
@@ -25,8 +28,11 @@ impl Application {
         let (mailbox_tx, mailbox_rx) = mpsc::channel(100);
         let (events, _) = broadcast::channel(1000);
 
+        let database = Database::open().await?;
+
         Ok(Self {
             handle: Handle {
+                database,
                 mailbox: mailbox_tx,
                 events,
             },

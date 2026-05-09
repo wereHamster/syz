@@ -13,3 +13,6 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tracing-journald = "0.3.2"
 anyhow = "1.0.102"
+turso = "0.5.3"
+rand = "0.10.1"
+bs58 = "0.5.1"
