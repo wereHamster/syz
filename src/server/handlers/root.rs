@@ -1,6 +1,6 @@
-use axum::response::IntoResponse;
-use axum::http::StatusCode;
 use axum::http::header;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 
 pub async fn ascii_art() -> impl IntoResponse {
     let art = r#"

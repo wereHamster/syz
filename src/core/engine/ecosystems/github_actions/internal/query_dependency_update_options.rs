@@ -5,7 +5,10 @@ use serde::Deserialize;
 
 use crate::core::{
     clients::{self, github::GitHub},
-    engine::{DependencyUpdateOption, DiscoveredDependency, PackageInfo, RequirementVersion, ProposedBump, VersionData},
+    engine::{
+        DependencyUpdateOption, DiscoveredDependency, PackageInfo, ProposedBump,
+        RequirementVersion, VersionData,
+    },
     version_resolver::{self, AvailableRelease},
 };
 

@@ -5,8 +5,8 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::core::{database::pk, message::Payload};
 use super::AppState;
+use crate::core::{database::pk, message::Payload};
 
 pub async fn post(
     State(state): State<AppState>,
@@ -16,9 +16,15 @@ pub async fn post(
     let auth = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing authorization header".to_string()))?;
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing authorization header".to_string(),
+        ))?;
 
-    let token = auth.strip_prefix("Bearer ").ok_or((StatusCode::UNAUTHORIZED, "Invalid authorization format".to_string()))?;
+    let token = auth.strip_prefix("Bearer ").ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Invalid authorization format".to_string(),
+    ))?;
 
     if token != state.token {
         return Err((StatusCode::UNAUTHORIZED, "Invalid token".to_string()));

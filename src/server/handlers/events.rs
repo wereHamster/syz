@@ -16,11 +16,15 @@ pub async fn get(
     let auth = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing authorization header".to_string()))?;
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing authorization header".to_string(),
+        ))?;
 
-    let token = auth
-        .strip_prefix("Bearer ")
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid authorization format".to_string()))?;
+    let token = auth.strip_prefix("Bearer ").ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Invalid authorization format".to_string(),
+    ))?;
 
     if token != state.token {
         return Err((StatusCode::UNAUTHORIZED, "Invalid token".to_string()));

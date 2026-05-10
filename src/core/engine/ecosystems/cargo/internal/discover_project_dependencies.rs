@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use toml_edit::{DocumentMut, Item};
 
-use crate::core::engine::{DiscoveredDependency, PURL, repository::ProjectRepositorySnapshot};
+use crate::core::engine::{repository::ProjectRepositorySnapshot, DiscoveredDependency, PURL};
 
 pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredDependency>> {
     let toml_opt = match repo.read_file("Cargo.toml").await {
