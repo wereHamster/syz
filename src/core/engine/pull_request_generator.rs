@@ -1,26 +1,66 @@
 use crate::core::engine::UpdateTarget;
 use anyhow::Result;
+use async_trait::async_trait;
 
+#[async_trait]
 pub trait PullRequestGenerator: Send + Sync {
-    fn generate_pull_request_title(
+    async fn generate_pull_request_title(
         &self,
         package_group: &str,
         targets: &[UpdateTarget],
         is_major: bool,
     ) -> Result<String>;
 
-    fn generate_pull_request_body(
+    async fn generate_pull_request_body(
         &self,
         package_group: &str,
+        ecosystem: &str,
         targets: &[UpdateTarget],
         is_major: bool,
     ) -> Result<String>;
 }
 
-pub struct DefaultPullRequestGenerator;
+pub struct DefaultPullRequestGenerator {
+    registry_router: crate::core::engine::ecosystems::registry_router::RegistryRouter,
+    advisory_resolver: Box<dyn crate::core::engine::advisories::AdvisoryResolver>,
+    github: crate::core::clients::github::GitHub,
+}
 
+impl DefaultPullRequestGenerator {
+    pub fn new(
+        registry_router: crate::core::engine::ecosystems::registry_router::RegistryRouter,
+        advisory_resolver: Box<dyn crate::core::engine::advisories::AdvisoryResolver>,
+        github: crate::core::clients::github::GitHub,
+    ) -> Self {
+        Self {
+            registry_router,
+            advisory_resolver,
+            github,
+        }
+    }
+
+    fn release_notes_resolver(
+        &self,
+        package_name: &str,
+        repo_url: &str,
+    ) -> Option<Box<dyn crate::core::engine::releases::ReleaseNotesResolver>> {
+        if repo_url.contains("github.com") {
+            Some(Box::new(
+                crate::core::clients::github_release_notes::GithubReleaseNotesResolver::new(
+                    self.github.clone(),
+                    package_name.to_string(),
+                    repo_url.to_string(),
+                ),
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+#[async_trait]
 impl PullRequestGenerator for DefaultPullRequestGenerator {
-    fn generate_pull_request_title(
+    async fn generate_pull_request_title(
         &self,
         package_group: &str,
         targets: &[UpdateTarget],
@@ -79,19 +119,133 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
         Ok(title)
     }
 
-    fn generate_pull_request_body(
+    async fn generate_pull_request_body(
         &self,
         package_group: &str,
+        ecosystem: &str,
         targets: &[UpdateTarget],
         _is_major: bool,
     ) -> Result<String> {
-        let mut body = format!("Update {} dependencies.\n\n", package_group);
+        let mut body = format!("This PR updates {} dependencies.\n\n", package_group);
 
         for target in targets {
             body.push_str(&format!(
                 "- `{}`: {} -> {}\n",
                 target.name, target.current_version.version, target.target_version.version
             ));
+        }
+        body.push_str("\n");
+
+        let mut advisories_md = String::new();
+        let mut seen_advisories = std::collections::HashSet::new();
+
+        for target in targets {
+            if let Ok(advs) = self
+                .advisory_resolver
+                .resolve_advisories(
+                    ecosystem,
+                    &target.name,
+                    &target.current_version.version,
+                    &target.target_version.version,
+                )
+                .await
+            {
+                for adv in advs {
+                    if seen_advisories.insert(adv.id.clone()) {
+                        advisories_md
+                            .push_str(&format!("> - [{}]({}): {}\n", adv.id, adv.url, adv.title));
+                    }
+                }
+            }
+        }
+
+        if !advisories_md.is_empty() {
+            body.push_str(
+                "> [!CAUTION]\n> This update resolves the following security advisories:\n",
+            );
+            body.push_str(&advisories_md);
+            body.push_str("\n");
+        }
+
+        for target in targets {
+            if target.latest_version != target.target_version.version
+                && target.minimum_release_age.is_some()
+            {
+                body.push_str(&format!(
+                    "> [!IMPORTANT]\n> A more recent version of `{}` is released ({}). However, it is not approved yet by policy.\n\n",
+                    target.name, target.latest_version
+                ));
+            }
+        }
+
+        body.push_str("# Release History\n\n");
+
+        for target in targets {
+            let mut repo_url = target.package_info.repo_url.clone().unwrap_or_default();
+            if repo_url.is_empty() {
+                if let Ok(info) = self
+                    .registry_router
+                    .fetch_package_info(ecosystem, &target.name)
+                    .await
+                {
+                    repo_url = info.repo_url.unwrap_or_default();
+                }
+            }
+
+            if let Ok(history) = self
+                .registry_router
+                .fetch_release_history(
+                    ecosystem,
+                    &target.name,
+                    &target.current_version.version,
+                    &target.target_version.version,
+                )
+                .await
+            {
+                if history.is_empty() {
+                    continue;
+                }
+
+                if targets.len() > 1 {
+                    body.push_str(&format!("## `{}`\n\n", target.name));
+                }
+
+                let resolver = if !repo_url.is_empty() {
+                    self.release_notes_resolver(&target.name, &repo_url)
+                } else {
+                    None
+                };
+
+                let mut current_length = body.len();
+
+                for release in history {
+                    let mut time_str = "Published ".to_string();
+                    let now = chrono::Utc::now();
+                    let diff = now.signed_duration_since(release.publish_time);
+                    let days = diff.num_days();
+                    if days > 0 {
+                        time_str.push_str(&format!("{} days ago", days));
+                    } else {
+                        time_str.push_str("today");
+                    }
+
+                    body.push_str(&format!("### {}\n{}\n\n", release.version, time_str));
+
+                    if current_length > 60_000 {
+                        body.push_str("> *Changelog truncated due to GitHub PR size limits.*\n\n");
+                        continue;
+                    }
+
+                    if let Some(res) = &resolver {
+                        if let Ok(Some((_, md))) = res.resolve_release_notes(&release.version).await
+                        {
+                            body.push_str(&md);
+                            body.push_str("\n\n");
+                            current_length = body.len();
+                        }
+                    }
+                }
+            }
         }
 
         Ok(body)

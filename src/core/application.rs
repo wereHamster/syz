@@ -393,33 +393,23 @@ impl Application {
         }
     }
 
-    pub fn advisory_resolver(
-        &self,
-    ) -> Box<dyn crate::core::engine::advisories::AdvisoryResolver> {
+    pub fn advisory_resolver(&self) -> Box<dyn crate::core::engine::advisories::AdvisoryResolver> {
         let osv_client = crate::core::clients::osv::OsvClient::new(self.http_agent.clone());
-        Box::new(crate::core::engine::advisories::OsvAdvisoryResolver::new(osv_client))
+        Box::new(crate::core::engine::advisories::OsvAdvisoryResolver::new(
+            osv_client,
+        ))
     }
 
     pub fn pull_request_generator(
         &self,
     ) -> Box<dyn crate::core::engine::pull_request_generator::PullRequestGenerator> {
-        Box::new(crate::core::engine::pull_request_generator::DefaultPullRequestGenerator)
-    }
-
-    pub fn release_notes_resolver(
-        &self,
-        package_name: &str,
-        repo_url: &str,
-    ) -> Option<Box<dyn crate::core::engine::releases::ReleaseNotesResolver>> {
-        if repo_url.contains("github.com") {
-            Some(Box::new(crate::core::clients::github_release_notes::GithubReleaseNotesResolver::new(
+        Box::new(
+            crate::core::engine::pull_request_generator::DefaultPullRequestGenerator::new(
+                self.registry_router(),
+                self.advisory_resolver(),
                 self.github.clone(),
-                package_name.to_string(),
-                repo_url.to_string(),
-            )))
-        } else {
-            None
-        }
+            ),
+        )
     }
 
     pub fn patcher(

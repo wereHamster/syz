@@ -130,8 +130,8 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         let branch_name = format!("syz/update-{}", safe_branch_name);
 
         let pr_url_opt = match async {
-            let title = pr_generator.generate_pull_request_title(&bump_name, &targets, is_major)?;
-            let body = pr_generator.generate_pull_request_body(&bump_name, &targets, is_major)?;
+            let title = pr_generator.generate_pull_request_title(&bump_name, &targets, is_major).await?;
+            let body = pr_generator.generate_pull_request_body(&bump_name, &eco_type, &targets, is_major).await?;
 
             // 4. Commit changes
             if let Some(_sha) = mutator
