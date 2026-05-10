@@ -25,18 +25,30 @@ pub enum Payload {
 
     /// Scan the project source code, identify which dependencies it has, check which
     /// dependencies are outdated, and update the local database with the information.
-    AnalyzeProjectDependencies { project_id: String },
+    AnalyzeProjectDependencies {
+        project_id: String,
+    },
 
     /// Approve a Bump to be processed. This only updates the database but does not
     /// schedule the actual update task.
-    ApproveBump { bump_id: String },
+    ApproveBump {
+        bump_id: String,
+    },
 
     /// Retract previous approval of a bump. This only updates the database but does not
     /// cancel any inflight updates.
-    RetractBumpApproval { bump_id: String },
+    RetractBumpApproval {
+        bump_id: String,
+    },
 
     /// For the gien Bump, create (or update) the branch and pull request.
-    ProcessBump { bump_id: String },
+    ProcessBump {
+        bump_id: String,
+    },
+
+    UpdateTransitiveDependencies {
+        project_id: String,
+    },
 
     #[serde(skip)]
     PersistBumpResult {
@@ -153,6 +165,10 @@ impl Payload {
 
             Payload::ProcessBump { bump_id } => {
                 super::actions::process_bump::run(app, bump_id.clone()).await
+            }
+
+            Payload::UpdateTransitiveDependencies { project_id } => {
+                super::actions::update_transitive_dependencies::run(app, project_id.clone()).await
             }
 
             Payload::PersistBumpResult {

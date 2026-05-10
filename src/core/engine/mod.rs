@@ -169,3 +169,8 @@ pub struct Advisory {
     pub url: String,
     pub severity: String,
 }
+
+pub struct TransitiveUpdateResult {
+    pub modifications: Vec<crate::core::engine::repository::FileModification>,
+    pub summary: String,
+}

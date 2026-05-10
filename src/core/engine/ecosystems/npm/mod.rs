@@ -205,4 +205,386 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
 
         Ok(tree_items)
     }
+
+    async fn update_transitive_dependencies(
+        &self,
+        snapshot: &dyn ProjectRepositorySnapshot,
+        temp_dir: &std::path::Path,
+    ) -> Result<Option<crate::core::engine::TransitiveUpdateResult>> {
+        let workspace = snapshot.read_file("pnpm-workspace.yaml").await.ok();
+        let lockfile = snapshot.read_file("pnpm-lock.yaml").await.ok();
+
+        if lockfile.is_none() {
+            tracing::info!(
+                "No pnpm-lock.yaml found. Transitive bump currently only supports pnpm."
+            );
+            return Ok(None);
+        }
+
+        tracing::info!("Fetching repository tree...");
+        let files = snapshot.list_files().await?;
+
+        let mut pkg_json_paths_vec = Vec::new();
+        for path in &files {
+            if path.ends_with("package.json") {
+                pkg_json_paths_vec.push(path.to_string());
+            }
+        }
+
+        if pkg_json_paths_vec.is_empty() {
+            tracing::info!("No package.json found.");
+            return Ok(None);
+        }
+
+        let mut original_pkg_jsons = std::collections::HashMap::new();
+        let mut mutable_pkg_jsons = std::collections::HashMap::new();
+
+        for path in &pkg_json_paths_vec {
+            if let Ok(content) = snapshot.read_file(path).await {
+                original_pkg_jsons.insert(path.clone(), content.clone());
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    mutable_pkg_jsons.insert(path.clone(), val);
+                }
+            }
+        }
+
+        if let Some(ref w) = workspace {
+            fs::write(temp_dir.join("pnpm-workspace.yaml"), w)?;
+        }
+        if let Some(ref l) = lockfile {
+            fs::write(temp_dir.join("pnpm-lock.yaml"), l)?;
+        }
+
+        let mut project_exact_versions: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, String>,
+        > = std::collections::HashMap::new();
+        if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(&lockfile.clone().unwrap()) {
+            if let Some(importers) = lock_val.get("importers").and_then(|i| i.as_mapping()) {
+                for (k, v) in importers {
+                    if let Some(project_path) = k.as_str() {
+                        let mut deps = std::collections::HashMap::new();
+                        for dep_type in ["dependencies", "devDependencies", "optionalDependencies"]
+                        {
+                            if let Some(dep_map) = v.get(dep_type).and_then(|d| d.as_mapping()) {
+                                for (pkg_name, pkg_info) in dep_map {
+                                    if let (Some(name), Some(info)) =
+                                        (pkg_name.as_str(), pkg_info.as_mapping())
+                                    {
+                                        if let Some(version_val) = info
+                                            .get(&serde_yml::Value::String("version".to_string()))
+                                        {
+                                            if let Some(version_str) = version_val.as_str() {
+                                                let clean_version = version_str
+                                                    .split('(')
+                                                    .next()
+                                                    .unwrap_or("")
+                                                    .to_string();
+                                                deps.insert(name.to_string(), clean_version);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        project_exact_versions.insert(project_path.to_string(), deps);
+                    }
+                }
+            }
+        }
+
+        let is_workspace = workspace.is_some();
+
+        tracing::info!("Phase 1: Removing all dependencies from package.json files");
+        for (path, pkg_json) in mutable_pkg_jsons.iter_mut() {
+            if let Some(obj) = pkg_json.as_object_mut() {
+                obj.remove("dependencies");
+                obj.remove("devDependencies");
+                obj.remove("optionalDependencies");
+                obj.remove("peerDependencies");
+            }
+            let full_path = temp_dir.join(path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&full_path, serde_json::to_string_pretty(pkg_json)? + "\n")?;
+        }
+
+        run_pnpm_install(temp_dir, is_workspace, true)?;
+
+        tracing::info!("Phase 2: Adding dependencies with exact versions");
+        for (path, pkg_json) in mutable_pkg_jsons.iter_mut() {
+            let original_content = original_pkg_jsons.get(path).unwrap();
+            let original_val: serde_json::Value = serde_json::from_str(original_content).unwrap();
+
+            let project_key = if path == "package.json" {
+                ".".to_string()
+            } else {
+                path.strip_suffix("/package.json")
+                    .unwrap_or(path)
+                    .to_string()
+            };
+
+            let exact_deps = project_exact_versions
+                .get(&project_key)
+                .cloned()
+                .unwrap_or_default();
+
+            if let Some(obj) = pkg_json.as_object_mut() {
+                for dep_type in ["dependencies", "devDependencies", "optionalDependencies"] {
+                    if let Some(orig_deps) = original_val.get(dep_type).and_then(|d| d.as_object())
+                    {
+                        let mut new_deps = serde_json::Map::new();
+                        for (pkg_name, _) in orig_deps {
+                            if let Some(exact_ver) = exact_deps.get(pkg_name) {
+                                new_deps.insert(
+                                    pkg_name.clone(),
+                                    serde_json::Value::String(exact_ver.clone()),
+                                );
+                            } else {
+                                new_deps.insert(
+                                    pkg_name.clone(),
+                                    orig_deps.get(pkg_name).unwrap().clone(),
+                                );
+                            }
+                        }
+                        if !new_deps.is_empty() {
+                            obj.insert(dep_type.to_string(), serde_json::Value::Object(new_deps));
+                        }
+                    }
+                }
+            }
+
+            let full_path = temp_dir.join(path);
+            fs::write(&full_path, serde_json::to_string_pretty(pkg_json)? + "\n")?;
+        }
+
+        run_pnpm_install(temp_dir, is_workspace, true)?;
+
+        tracing::info!("Phase 3: Restoring original package.json specs");
+        for (path, original_content) in &original_pkg_jsons {
+            let full_path = temp_dir.join(path);
+            fs::write(&full_path, original_content)?;
+        }
+
+        run_pnpm_install(temp_dir, is_workspace, false)?;
+
+        tracing::info!("Running pnpm dedupe to consolidate transitive dependencies...");
+        let mut dedupe_cmd = Command::new("pnpm");
+        dedupe_cmd.arg("dedupe").arg("--ignore-scripts");
+
+        let dedupe_status = dedupe_cmd.current_dir(temp_dir).status()?;
+        if !dedupe_status.success() {
+            tracing::warn!("pnpm dedupe failed, continuing anyway...");
+        }
+
+        let new_lockfile = fs::read_to_string(temp_dir.join("pnpm-lock.yaml"))?;
+        let lockfile_content = lockfile.unwrap();
+        if new_lockfile == lockfile_content {
+            tracing::info!("No transitive dependencies needed updating.");
+            return Ok(None);
+        }
+
+        tracing::info!("Transitive updates found!");
+
+        let old_versions = extract_versions_from_lock(&lockfile_content);
+        let new_versions = extract_versions_from_lock(&new_lockfile);
+
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        let mut major_bumps = Vec::new();
+        let mut minor_bumps = Vec::new();
+
+        let all_modules: std::collections::HashSet<String> = old_versions
+            .keys()
+            .chain(new_versions.keys())
+            .cloned()
+            .collect();
+
+        for module in all_modules {
+            let old_set = old_versions.get(&module);
+            let new_set = new_versions.get(&module);
+
+            match (old_set, new_set) {
+                (None, Some(new_vers)) => {
+                    let vers: Vec<_> = new_vers.iter().cloned().collect();
+                    added.push((module, vers.join(", ")));
+                }
+                (Some(old_vers), None) => {
+                    let vers: Vec<_> = old_vers.iter().cloned().collect();
+                    removed.push((module, vers.join(", ")));
+                }
+                (Some(old_vers), Some(new_vers)) => {
+                    if old_vers != new_vers {
+                        let mut old_sorted: Vec<_> = old_vers.iter().cloned().collect();
+                        let mut new_sorted: Vec<_> = new_vers.iter().cloned().collect();
+                        old_sorted.sort();
+                        new_sorted.sort();
+
+                        let mut old_majors = std::collections::HashSet::new();
+                        for o in &old_sorted {
+                            if let Ok(ver) = semver::Version::parse(o) {
+                                if ver.major == 0 {
+                                    old_majors.insert((0, ver.minor));
+                                } else {
+                                    old_majors.insert((ver.major, 0));
+                                }
+                            }
+                        }
+
+                        let mut is_major = false;
+                        for n in &new_sorted {
+                            if let Ok(ver) = semver::Version::parse(n) {
+                                let major_key = if ver.major == 0 {
+                                    (0, ver.minor)
+                                } else {
+                                    (ver.major, 0)
+                                };
+
+                                if !old_majors.contains(&major_key) {
+                                    is_major = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        let label =
+                            format!("`{}` -> `{}`", old_sorted.join(", "), new_sorted.join(", "));
+                        if is_major {
+                            major_bumps.push((module, label));
+                        } else {
+                            minor_bumps.push((module, label));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        added.sort_by(|a, b| a.0.cmp(&b.0));
+        removed.sort_by(|a, b| a.0.cmp(&b.0));
+        major_bumps.sort_by(|a, b| a.0.cmp(&b.0));
+        minor_bumps.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut pr_body = "This pull request automatically bumps all transitive dependencies to their latest versions.\n\n".to_string();
+
+        if !major_bumps.is_empty() {
+            pr_body.push_str("### Major Version Bumps\n");
+            for (module, desc) in major_bumps {
+                pr_body.push_str(&format!("- `{}`: {}\n", module, desc));
+            }
+            pr_body.push('\n');
+        }
+
+        if !minor_bumps.is_empty() {
+            pr_body.push_str("### Minor & Patch Bumps\n");
+            for (module, desc) in minor_bumps {
+                pr_body.push_str(&format!("- `{}`: {}\n", module, desc));
+            }
+            pr_body.push('\n');
+        }
+
+        if !added.is_empty() {
+            pr_body.push_str("### Added Dependencies\n");
+            for (module, desc) in added {
+                pr_body.push_str(&format!("- `{}`: `{}`\n", module, desc));
+            }
+            pr_body.push('\n');
+        }
+
+        if !removed.is_empty() {
+            pr_body.push_str("### Removed Dependencies\n");
+            for (module, desc) in removed {
+                pr_body.push_str(&format!("- `{}`: `{}`\n", module, desc));
+            }
+            pr_body.push('\n');
+        }
+
+        let modifications = vec![FileModification {
+            path: "pnpm-lock.yaml".to_string(),
+            state: crate::core::engine::repository::FileState::Write(new_lockfile),
+        }];
+
+        Ok(Some(crate::core::engine::TransitiveUpdateResult {
+            modifications,
+            summary: pr_body,
+        }))
+    }
+}
+
+fn run_pnpm_install(dir_path: &std::path::Path, is_workspace: bool, silent: bool) -> Result<()> {
+    let mut cmd = Command::new("pnpm");
+    cmd.arg("install")
+        .arg("--lockfile-only")
+        .arg("--ignore-scripts");
+
+    if silent {
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
+
+    if is_workspace {
+        cmd.arg("--recursive");
+    }
+
+    if !cmd.current_dir(dir_path).status()?.success() {
+        tracing::warn!("pnpm install failed, continuing anyway...");
+    }
+
+    Ok(())
+}
+
+pub(crate) fn extract_versions_from_lock(
+    lock_content: &str,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut module_versions = std::collections::HashMap::new();
+    if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(lock_content) {
+        if let Some(packages) = lock_val.get("packages").and_then(|p| p.as_mapping()) {
+            for (k, _) in packages {
+                if let Some(path) = k.as_str() {
+                    if path.starts_with('/') {
+                        let parts: Vec<&str> = path[1..].split('@').collect();
+                        if parts.len() == 2 {
+                            let name = parts[0];
+                            let version = parts[1].split('(').next().unwrap_or("").to_string();
+                            module_versions
+                                .entry(name.to_string())
+                                .or_insert_with(std::collections::HashSet::new)
+                                .insert(version);
+                        } else {
+                            let parts: Vec<&str> = path[1..].split('/').collect();
+                            if parts.len() >= 2 {
+                                let version = parts
+                                    .last()
+                                    .unwrap()
+                                    .split('(')
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_string();
+                                let name = parts[0..parts.len() - 1].join("/");
+                                module_versions
+                                    .entry(name)
+                                    .or_insert_with(std::collections::HashSet::new)
+                                    .insert(version);
+                            }
+                        }
+                    } else if let Some(at_idx) = path.rfind('@') {
+                        if at_idx > 0 {
+                            let name = &path[0..at_idx];
+                            let version = path[at_idx + 1..]
+                                .split('(')
+                                .next()
+                                .unwrap_or("")
+                                .to_string();
+                            module_versions
+                                .entry(name.to_string())
+                                .or_insert_with(std::collections::HashSet::new)
+                                .insert(version);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    module_versions
 }

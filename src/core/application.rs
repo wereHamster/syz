@@ -437,6 +437,21 @@ impl Application {
         )
     }
 
+    pub fn patchers(
+        &self,
+    ) -> Vec<(
+        &'static str,
+        Box<dyn crate::core::engine::ecosystems::Patcher>,
+    )> {
+        vec![
+            (
+                "npm",
+                Box::new(crate::core::engine::ecosystems::npm::NpmPatcher),
+            ),
+            // cargo doesn't have a patcher yet in application.rs, but we can add it later if needed
+        ]
+    }
+
     pub fn patcher(
         &self,
         ecosystem: &str,

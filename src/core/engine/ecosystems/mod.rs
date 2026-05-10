@@ -69,4 +69,13 @@ pub trait Patcher: Send + Sync {
         temp_dir: &std::path::Path,
         targets: &[UpdateTarget],
     ) -> Result<Vec<crate::core::engine::repository::FileModification>>;
+
+    /// Updates all transitive dependencies to their latest compatible versions.
+    async fn update_transitive_dependencies(
+        &self,
+        _snapshot: &dyn ProjectRepositorySnapshot,
+        _temp_dir: &std::path::Path,
+    ) -> Result<Option<crate::core::engine::TransitiveUpdateResult>> {
+        Ok(None)
+    }
 }
