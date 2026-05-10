@@ -317,6 +317,13 @@ impl Handle {
         self.events.subscribe()
     }
 
+    pub fn broadcast(&self, event: Event) -> Result<()> {
+        self.events
+            .send(event)
+            .map_err(|_| anyhow::anyhow!("Failed to broadcast event"))?;
+        Ok(())
+    }
+
     pub async fn send(&self, message_id: String, payload: Payload) -> Result<()> {
         let message = Message {
             message_id,
