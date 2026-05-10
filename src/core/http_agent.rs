@@ -92,4 +92,40 @@ impl HttpAgent {
 
         Ok(json)
     }
+
+    pub async fn post_json_body<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        body: &B,
+    ) -> anyhow::Result<T> {
+        let body_str = serde_json::to_string(body)?;
+        let cache_key = format!("POST {} {}", url, body_str);
+
+        {
+            let cache = self.cache.read().await;
+            if let Some(bytes) = cache.get(&cache_key) {
+                let json = serde_json::from_slice(bytes)?;
+                return Ok(json);
+            }
+        }
+
+        let _permit = self.semaphore.acquire().await?;
+        tracing::info!("POST {}", url);
+
+        let response = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body_str.clone())
+            .send()
+            .await?;
+        let bytes = response.bytes().await?;
+
+        let mut cache = self.cache.write().await;
+        cache.insert(cache_key, bytes.clone());
+
+        let json = serde_json::from_slice(&bytes)?;
+
+        Ok(json)
+    }
 }

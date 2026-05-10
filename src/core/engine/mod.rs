@@ -1,3 +1,4 @@
+pub mod advisories;
 pub mod ecosystems;
 pub mod groups;
 pub mod pull_request_generator;

@@ -393,6 +393,13 @@ impl Application {
         }
     }
 
+    pub fn advisory_resolver(
+        &self,
+    ) -> Box<dyn crate::core::engine::advisories::AdvisoryResolver> {
+        let osv_client = crate::core::clients::osv::OsvClient::new(self.http_agent.clone());
+        Box::new(crate::core::engine::advisories::OsvAdvisoryResolver::new(osv_client))
+    }
+
     pub fn pull_request_generator(
         &self,
     ) -> Box<dyn crate::core::engine::pull_request_generator::PullRequestGenerator> {
