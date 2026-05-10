@@ -37,3 +37,47 @@ pub struct Project {
     pub platform: String,
     pub repository: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Scan {
+    pub id: String,
+    pub project_id: String,
+    pub create_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dependency {
+    pub id: String,
+    pub scan_id: String,
+    pub specifier: Option<String>,
+    pub package_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Package {
+    pub id: String,
+    pub r#type: String,
+    pub namespace: Option<String>,
+    pub name: String,
+    pub version: String,
+    pub subpath: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bump {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub major: bool,
+    pub approved: bool,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BumpDep {
+    pub bump_id: String,
+    pub dependency_id: String,
+    pub target_version: String,
+    pub head_version: String,
+    pub minimum_release_age: Option<i64>,
+}
