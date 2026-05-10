@@ -15,17 +15,12 @@ pub async fn run(
         None => dependency.purl.name.clone(),
     };
 
-    // In the npm ecosystem we can assume that we have a known, concrete version for each
-    // discovered dependency. We do not support processing project repositories without
-    // lock files (the concrete versions are extracted from lock files).
-    let version = dependency
-        .purl
-        .version
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("missing version for {}", full_name))?;
-
     let versions = npm_client
-        .get_versions(&full_name, &version, dependency.minimum_release_age.clone())
+        .get_versions(
+            &full_name,
+            dependency.purl.version.as_deref(),
+            dependency.minimum_release_age.clone(),
+        )
         .await?;
 
     let mut bumps = Vec::new();

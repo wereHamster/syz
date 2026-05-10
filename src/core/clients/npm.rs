@@ -46,7 +46,7 @@ impl Npm {
     pub async fn get_versions(
         &self,
         package: &str,
-        current_version: &str,
+        current_version: Option<&str>,
         minimum_release_age: Option<chrono::Duration>,
     ) -> Result<VersionData> {
         let response = self.get_registry_response(package).await?;
@@ -63,6 +63,19 @@ impl Npm {
             };
             raw_url.map(|u| clean_repo_url(&u))
         });
+
+        let current_version = match current_version {
+            Some(v) => v,
+            None => {
+                return Ok(VersionData {
+                    target_minor: None,
+                    target_major: None,
+                    head_minor: None,
+                    head_major: None,
+                    repo_url,
+                })
+            }
+        };
 
         let latest_absolute = response
             .dist_tags
