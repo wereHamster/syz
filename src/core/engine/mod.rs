@@ -170,7 +170,33 @@ pub struct Advisory {
     pub severity: String,
 }
 
+pub struct TransitiveUpdateSummary {
+    pub added: Vec<(String, String)>,
+    pub removed: Vec<(String, String)>,
+    pub major_bumps: Vec<(String, String)>,
+    pub minor_bumps: Vec<(String, String)>,
+}
+
 pub struct TransitiveUpdateResult {
     pub modifications: Vec<crate::core::engine::repository::FileModification>,
-    pub summary: String,
+    pub summary: TransitiveUpdateSummary,
+}
+
+pub struct ResolvedAdvisoryBump {
+    pub before_versions: Vec<String>,
+    pub after_versions: Vec<String>,
+    pub advisories: Vec<serde_json::Value>,
+}
+
+pub struct SecurityUpdateSummary {
+    pub resolved_advisories: std::collections::HashMap<String, ResolvedAdvisoryBump>,
+    pub blocked_by_age:
+        std::collections::HashMap<String, Vec<(semver::Version, chrono::DateTime<chrono::Utc>)>>,
+    pub unfixable_vulnerabilities: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    pub minimum_release_age: Option<chrono::Duration>,
+}
+
+pub struct SecurityUpdateResult {
+    pub modifications: Vec<crate::core::engine::repository::FileModification>,
+    pub summary: SecurityUpdateSummary,
 }

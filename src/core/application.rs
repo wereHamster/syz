@@ -437,6 +437,18 @@ impl Application {
         )
     }
 
+    pub fn transitive_pull_request_generator(
+        &self,
+    ) -> Box<dyn crate::core::engine::pull_request_generator::TransitiveUpdatesPullRequestGenerator> {
+        Box::new(crate::core::engine::pull_request_generator::DefaultTransitiveUpdatesPullRequestGenerator)
+    }
+
+    pub fn audit_pull_request_generator(
+        &self,
+    ) -> Box<dyn crate::core::engine::pull_request_generator::AuditPullRequestGenerator> {
+        Box::new(crate::core::engine::pull_request_generator::DefaultAuditPullRequestGenerator)
+    }
+
     pub fn patchers(
         &self,
     ) -> Vec<(

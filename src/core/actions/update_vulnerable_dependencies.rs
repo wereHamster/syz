@@ -12,9 +12,11 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let mutator = app.project_repository_mutator(&project.id).await?;
     let snapshot = view.snapshot(&base_revision);
 
+    let pr_generator = app.audit_pull_request_generator();
+
     tokio::spawn(async move {
         let mut all_modifications = Vec::new();
-        let mut combined_pr_body = String::from("This pull request automatically resolves known security vulnerabilities by bumping affected dependencies.\n\n");
+        let mut combined_pr_body = String::new();
         let mut has_changes = false;
 
         for (ecosystem_name, patcher) in patchers {
@@ -39,7 +41,18 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                         if has_changes {
                             combined_pr_body.push_str("\n\n---\n\n");
                         }
-                        combined_pr_body.push_str(&result.summary);
+
+                        let body = match pr_generator
+                            .generate_pull_request_body(&result.summary)
+                            .await
+                        {
+                            Ok(b) => b,
+                            Err(e) => {
+                                tracing::error!("Failed to generate audit PR body: {}", e);
+                                String::from("Failed to generate PR body.")
+                            }
+                        };
+                        combined_pr_body.push_str(&body);
                         has_changes = true;
                     }
                 }
