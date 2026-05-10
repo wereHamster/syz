@@ -102,11 +102,28 @@ impl PullRequestSectionGenerator for HistorySection {
                 }
             }
 
-            if let Ok(history) = ctx
+            if let Ok(mut history) = ctx
                 .registry_router
                 .fetch_release_history(ctx.ecosystem, &target.name, hist_current, hist_target)
                 .await
             {
+                let target_is_pre = semver::Version::parse(hist_target)
+                    .map(|v| !v.pre.is_empty())
+                    .unwrap_or(false);
+                let current_is_pre = semver::Version::parse(hist_current)
+                    .map(|v| !v.pre.is_empty())
+                    .unwrap_or(false);
+
+                if !target_is_pre && !current_is_pre {
+                    history.retain(|r| {
+                        if let Ok(v) = semver::Version::parse(&r.version) {
+                            v.pre.is_empty()
+                        } else {
+                            true
+                        }
+                    });
+                }
+
                 if history.is_empty() {
                     continue;
                 }
@@ -147,9 +164,26 @@ impl PullRequestSectionGenerator for HistorySection {
                     None
                 };
 
+                let notes_futures: Vec<_> = history
+                    .iter()
+                    .map(|release| {
+                        let resolver = &resolver;
+                        let version = release.version.clone();
+                        async move {
+                            if let Some(res) = resolver {
+                                res.resolve_release_notes(&version).await
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                    })
+                    .collect();
+
+                let notes_results = futures::future::join_all(notes_futures).await;
+
                 let mut current_length = body.len();
 
-                for release in history {
+                for (release, notes_res) in history.into_iter().zip(notes_results.into_iter()) {
                     let mut time_str = "Published ".to_string();
                     let now = chrono::Utc::now();
                     let diff = now.signed_duration_since(release.publish_time);
@@ -164,13 +198,9 @@ impl PullRequestSectionGenerator for HistorySection {
                     let mut fetched_md = None;
                     let mut display_tag = None;
 
-                    if let Some(res) = &resolver {
-                        if let Ok(Some((tag, md))) =
-                            res.resolve_release_notes(&release.version).await
-                        {
-                            display_tag = Some(tag);
-                            fetched_md = Some(md);
-                        }
+                    if let Ok(Some((tag, md))) = notes_res {
+                        display_tag = Some(tag);
+                        fetched_md = Some(md);
                     }
 
                     let tag_for_url = display_tag.unwrap_or_else(|| {
