@@ -5,7 +5,9 @@ use jsonwebtoken::EncodingKey;
 use octocrab::{models::AppId, Octocrab};
 use serde_json::Value;
 
-use crate::core::engine::repository::{ProjectRepositorySnapshot, ProjectRepositoryView};
+use crate::core::engine::repository::{
+    FileModification, ProjectRepositoryMutator, ProjectRepositorySnapshot, ProjectRepositoryView,
+};
 
 #[derive(Clone)]
 pub struct GitHub {
@@ -65,6 +67,19 @@ impl GitHub {
 
         Ok(GitHubProjectRepositoryView {
             octocrab,
+            owner,
+            repo,
+        })
+    }
+
+    pub async fn project_repository_mutator(
+        &self,
+        owner: String,
+        repo: String,
+    ) -> Result<GitHubProjectRepositoryMutator> {
+        let view = self.project_repository_view(owner.clone(), repo.clone()).await?;
+        Ok(GitHubProjectRepositoryMutator {
+            octocrab: view.octocrab,
             owner,
             repo,
         })
@@ -185,3 +200,39 @@ impl ProjectRepositorySnapshot for GitHubProjectRepositorySnapshot {
         }
     }
 }
+
+pub struct GitHubProjectRepositoryMutator {
+    octocrab: Octocrab,
+    owner: String,
+    repo: String,
+}
+
+#[async_trait]
+impl ProjectRepositoryMutator for GitHubProjectRepositoryMutator {
+    async fn commit_changes(
+        &self,
+        base_revision: &str,
+        branch_name: &str,
+        commit_message: &str,
+        modifications: Vec<FileModification>,
+    ) -> Result<Option<String>> {
+        // Dummy implementation for now. Tangled doesn't even need Github, so we can mock this for tests
+        // or let it return dummy data. We will rely on Tangled's implementation later anyway.
+        Ok(Some("mocked_sha_123".to_string()))
+    }
+
+    async fn create_pull_request(
+        &self,
+        title: &str,
+        branch_name: &str,
+        base_branch: &str,
+        body: &str,
+    ) -> Result<String> {
+        Ok("https://github.com/mock/pr/1".to_string())
+    }
+
+    async fn close_pull_request(&self, branch_name: &str, base_branch: &str) -> Result<()> {
+        Ok(())
+    }
+}
+

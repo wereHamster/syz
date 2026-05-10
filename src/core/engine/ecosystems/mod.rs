@@ -33,6 +33,18 @@ pub trait Registry: Send + Sync {
 
 #[async_trait]
 pub trait Patcher: Send + Sync {
+    /// Computes the new version requirement string if an update is needed.
+    /// Returns `Some(new_requirement)` if the dependency should be updated,
+    /// or `None` if it is already satisfied / equivalent.
+    fn updated_requirement(&self, old_req: &str, target_version: &str) -> Option<String> {
+        let new_req = target_version.to_string();
+        if old_req != new_req {
+            Some(new_req)
+        } else {
+            None
+        }
+    }
+
     /// Materializes necessary files from `snapshot` into `temp_dir`, runs ecosystem-specific 
     /// update tools (e.g., `cargo update`, `npm install`), and computes the differences.
     async fn apply_updates(

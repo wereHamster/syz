@@ -367,6 +367,47 @@ impl Application {
 
         Ok(())
     }
+
+    pub async fn project_repository_mutator(
+        &self,
+        project_id: &str,
+    ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryMutator>> {
+        let project = self.query().project(project_id).await?;
+
+        match project.platform.as_str() {
+            "github" => {
+                let parts: Vec<&str> = project.repository.split('/').collect();
+                if parts.len() != 2 {
+                    anyhow::bail!("Repository must be in the format owner/repo");
+                }
+                let owner = parts[0].to_string();
+                let repo = parts[1].to_string();
+
+                let mutator = self.github.project_repository_mutator(owner, repo).await?;
+
+                Ok(Box::new(mutator))
+            }
+            _ => {
+                anyhow::bail!("Unsupported project platform: {}", project.platform);
+            }
+        }
+    }
+
+    pub fn pull_request_generator(
+        &self,
+    ) -> Box<dyn crate::core::engine::pull_request_generator::PullRequestGenerator> {
+        Box::new(crate::core::engine::pull_request_generator::DefaultPullRequestGenerator)
+    }
+
+    pub fn patcher(
+        &self,
+        ecosystem: &str,
+    ) -> Option<Box<dyn crate::core::engine::ecosystems::Patcher>> {
+        match ecosystem {
+            "npm" => Some(Box::new(crate::core::engine::ecosystems::npm::NpmPatcher)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -551,4 +592,49 @@ impl Query {
 
         Ok(bumpdeps)
     }
+
+    pub async fn bump_targets(&self, bump_id: &str) -> Result<Vec<BumpTargetData>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.name, d.specifier, p.version, p.type, bd.target_version, bd.head_version, NULL as repo_url, p.namespace, p.subpath
+                 FROM bumpdep bd
+                 JOIN dependency d ON bd.dependency_id = d.id
+                 JOIN package p ON d.package_id = p.id
+                 WHERE bd.bump_id = ?1"
+            )
+            .await?;
+
+        let mut rows = stmt.query((bump_id,)).await?;
+        let mut targets = Vec::new();
+
+        while let Some(row) = rows.next().await? {
+            targets.push(BumpTargetData {
+                name: row.get(0).unwrap_or_default(),
+                specifier: row.get(1).unwrap_or_default(),
+                current_version: row.get(2).unwrap_or_default(),
+                eco_type: row.get(3).unwrap_or_default(),
+                target_version: row.get(4).unwrap_or_default(),
+                head_version: row.get(5).unwrap_or_default(),
+                repo_url: row.get(6).unwrap_or_default(),
+                namespace: row.get(7).unwrap_or_default(),
+                subpath: row.get(8).unwrap_or_default(),
+            });
+        }
+
+        Ok(targets)
+    }
+}
+
+pub struct BumpTargetData {
+    pub name: String,
+    pub specifier: String,
+    pub current_version: String,
+    pub eco_type: String,
+    pub target_version: String,
+    pub head_version: String,
+    pub repo_url: Option<String>,
+    pub namespace: Option<String>,
+    pub subpath: Option<String>,
 }
