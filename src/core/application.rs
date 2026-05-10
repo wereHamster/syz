@@ -161,6 +161,31 @@ impl Application {
         Ok(view.snapshot(revision.as_str()))
     }
 
+    pub async fn persist_bump_result(
+        &self,
+        bump_id: &str,
+        pull_request_url: Option<String>,
+    ) -> Result<()> {
+        let conn = self.handle.database.conn()?;
+        if let Some(url) = pull_request_url {
+            conn.execute(
+                "UPDATE bump SET url = ? WHERE id = ?",
+                turso::params![url, bump_id],
+            )
+            .await?;
+        }
+
+        let bump = self.query().bump(bump_id).await?;
+        self.handle().broadcast(crate::core::event::Event::Commit {
+            ops: vec![crate::core::event::Op::Upsert {
+                path: format!("bump/{}", bump.id),
+                data: serde_json::to_value(bump).unwrap_or_default(),
+            }],
+        })?;
+
+        Ok(())
+    }
+
     pub async fn persist_analyzed_project_dependencies(
         &self,
         project_id: &str,

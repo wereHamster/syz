@@ -35,6 +35,15 @@ pub enum Payload {
     /// cancel any inflight updates.
     RetractBumpApproval { bump_id: String },
 
+    /// For the gien Bump, create (or update) the branch and pull request.
+    ProcessBump { bump_id: String },
+
+    #[serde(skip)]
+    PersistBumpResult {
+        bump_id: String,
+        pull_request_url: Option<String>,
+    },
+
     #[serde(skip)]
     PersistAnalyzedProjectDependencies {
         project_id: String,
@@ -132,6 +141,17 @@ impl Payload {
                 })?;
 
                 Ok(())
+            }
+
+            Payload::ProcessBump { bump_id } => {
+                super::actions::process_bump::run(app, bump_id.clone()).await
+            }
+
+            Payload::PersistBumpResult {
+                bump_id,
+                pull_request_url,
+            } => {
+                app.persist_bump_result(bump_id, pull_request_url.clone()).await
             }
 
             Payload::PersistAnalyzedProjectDependencies {

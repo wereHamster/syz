@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::core::engine::{
-    repository::ProjectRepositorySnapshot, DependencyUpdateOption, DiscoveredDependency,
+    repository::ProjectRepositorySnapshot, DependencyUpdateOption, DiscoveredDependency, UpdateTarget,
 };
 
 pub mod cargo;
@@ -29,4 +29,16 @@ pub trait Registry: Send + Sync {
         &self,
         dependency: &DiscoveredDependency,
     ) -> Result<DependencyUpdateOption>;
+}
+
+#[async_trait]
+pub trait Patcher: Send + Sync {
+    /// Materializes necessary files from `snapshot` into `temp_dir`, runs ecosystem-specific 
+    /// update tools (e.g., `cargo update`, `npm install`), and computes the differences.
+    async fn apply_updates(
+        &self,
+        snapshot: &dyn ProjectRepositorySnapshot,
+        temp_dir: &std::path::Path,
+        targets: &[UpdateTarget],
+    ) -> Result<Vec<crate::core::engine::repository::FileModification>>;
 }

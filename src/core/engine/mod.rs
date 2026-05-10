@@ -1,5 +1,6 @@
 pub mod ecosystems;
 pub mod groups;
+pub mod pull_request_generator;
 pub mod repository;
 
 /// Pacakge URL
@@ -89,14 +90,14 @@ pub struct DiscoveredDependency {
 ///
 /// For example, NPM can have something like "^24.0.0" as requirement, and "24.10.1"
 /// as version.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RequirementVersion {
     pub requirement: String,
     pub version: String,
 }
 
 /// Meta information about a package.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PackageInfo {
     pub repo_url: Option<String>,
 }
@@ -136,4 +137,18 @@ pub struct ProposedBump {
 pub struct DependencyUpdateOption {
     pub package_info: PackageInfo,
     pub bumps: Vec<ProposedBump>,
+}
+
+/// Represents a specific dependency update that has been selected for execution.
+///
+/// Unlike `DependencyUpdateOption` which represents possible updates during the evaluation phase,
+/// `UpdateTarget` represents an actionable update containing the exact current and target version details
+/// needed to modify manifests and generate a pull request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateTarget {
+    pub name: String,
+    pub current_version: RequirementVersion,
+    pub target_version: RequirementVersion,
+    pub latest_version: String,
+    pub package_info: PackageInfo,
 }
