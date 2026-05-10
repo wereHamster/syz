@@ -10,7 +10,7 @@ use super::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
 };
 use super::clients::github::GitHub;
-use super::database::{pk, Database, Project};
+use super::database::{pk, Bump, BumpDep, Database, Dependency, Project};
 use super::engine::ecosystems::{cargo::Cargo, npm::Npm, Ecosystem};
 use super::event::Event;
 use super::http_agent::HttpAgent;
@@ -383,5 +383,74 @@ impl Query {
         }
 
         Err(anyhow::anyhow!("Project not found"))
+    }
+
+    pub async fn list_dependencies(&self) -> Result<Vec<Dependency>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT id, scan_id, specifier, package_id FROM dependency")
+            .await?;
+
+        let mut rows = stmt.query(()).await?;
+
+        let mut dependencies = Vec::new();
+        while let Some(row) = rows.next().await? {
+            dependencies.push(Dependency {
+                id: row.get(0).unwrap_or_default(),
+                scan_id: row.get(1).unwrap_or_default(),
+                specifier: row.get(2).unwrap_or_default(),
+                package_id: row.get(3).unwrap_or_default(),
+            });
+        }
+
+        Ok(dependencies)
+    }
+
+    pub async fn list_bumps(&self) -> Result<Vec<Bump>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT id, project_id, name, major, approved, url FROM bump")
+            .await?;
+
+        let mut rows = stmt.query(()).await?;
+
+        let mut bumps = Vec::new();
+        while let Some(row) = rows.next().await? {
+            bumps.push(Bump {
+                id: row.get(0).unwrap_or_default(),
+                project_id: row.get(1).unwrap_or_default(),
+                name: row.get(2).unwrap_or_default(),
+                major: row.get(3).unwrap_or_default(),
+                approved: row.get(4).unwrap_or_default(),
+                url: row.get(5).unwrap_or_default(),
+            });
+        }
+
+        Ok(bumps)
+    }
+
+    pub async fn list_bumpdeps(&self) -> Result<Vec<BumpDep>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT bump_id, dependency_id, target_version, head_version, minimum_release_age FROM bumpdep")
+            .await?;
+
+        let mut rows = stmt.query(()).await?;
+
+        let mut bumpdeps = Vec::new();
+        while let Some(row) = rows.next().await? {
+            bumpdeps.push(BumpDep {
+                bump_id: row.get(0).unwrap_or_default(),
+                dependency_id: row.get(1).unwrap_or_default(),
+                target_version: row.get(2).unwrap_or_default(),
+                head_version: row.get(3).unwrap_or_default(),
+                minimum_release_age: row.get(4).unwrap_or_default(),
+            });
+        }
+
+        Ok(bumpdeps)
     }
 }

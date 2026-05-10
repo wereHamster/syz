@@ -38,13 +38,37 @@ impl Payload {
     pub async fn execute(&self, app: &Application) -> Result<()> {
         match self {
             Payload::Bootstrap => {
-                let projects = app.query().list_projects().await?;
-
                 let mut ops = Vec::new();
+
+                let projects = app.query().list_projects().await?;
                 for project in projects {
                     ops.push(crate::core::event::Op::Upsert {
                         path: format!("project/{}", project.id),
                         data: serde_json::to_value(project).unwrap_or_default(),
+                    });
+                }
+
+                let dependencies = app.query().list_dependencies().await?;
+                for dependency in dependencies {
+                    ops.push(crate::core::event::Op::Upsert {
+                        path: format!("dependency/{}", dependency.id),
+                        data: serde_json::to_value(dependency).unwrap_or_default(),
+                    });
+                }
+
+                let bumps = app.query().list_bumps().await?;
+                for bump in bumps {
+                    ops.push(crate::core::event::Op::Upsert {
+                        path: format!("bump/{}", bump.id),
+                        data: serde_json::to_value(bump).unwrap_or_default(),
+                    });
+                }
+
+                let bumpdeps = app.query().list_bumpdeps().await?;
+                for bumpdep in bumpdeps {
+                    ops.push(crate::core::event::Op::Upsert {
+                        path: format!("bumpdep/{}/{}", bumpdep.bump_id, bumpdep.dependency_id),
+                        data: serde_json::to_value(bumpdep).unwrap_or_default(),
                     });
                 }
 
