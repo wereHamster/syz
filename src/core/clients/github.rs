@@ -6,12 +6,14 @@ use octocrab::{models::AppId, Octocrab};
 use serde_json::Value;
 
 use crate::core::engine::repository::{
-    FileModification, FileState, ProjectRepositoryMutator, ProjectRepositorySnapshot, ProjectRepositoryView,
+    FileModification, FileState, ProjectRepositoryMutator, ProjectRepositorySnapshot,
+    ProjectRepositoryView,
 };
 
 #[derive(Clone)]
 pub struct GitHub {
     octocrab: Octocrab,
+    public_client: Octocrab,
 }
 
 impl GitHub {
@@ -33,7 +35,21 @@ impl GitHub {
             .build()
             .context("Failed to build client")?;
 
-        Ok(GitHub { octocrab })
+        let mut public_client = Octocrab::builder().build().unwrap();
+
+        // Try to fetch installations and use the first one's token for public queries
+        if let Ok(installations) = octocrab.apps().installations().send().await {
+            if let Some(inst) = installations.items.first() {
+                if let Ok(inst_client) = octocrab.installation(inst.id) {
+                    public_client = inst_client;
+                }
+            }
+        }
+
+        Ok(GitHub {
+            octocrab,
+            public_client,
+        })
     }
 
     pub async fn get_release_history(
@@ -69,7 +85,8 @@ impl GitHub {
             semver::Version::parse(s).ok()
         }
 
-        let old_ver = coerce_version(clean_current).unwrap_or_else(|| semver::Version::new(0, 0, 0));
+        let old_ver =
+            coerce_version(clean_current).unwrap_or_else(|| semver::Version::new(0, 0, 0));
         let new_ver = coerce_version(clean_new).unwrap_or_else(|| semver::Version::new(0, 0, 0));
 
         for rel in releases {
@@ -89,10 +106,7 @@ impl GitHub {
         Ok(history)
     }
 
-    pub async fn get_package_info(
-        &self,
-        name: &str,
-    ) -> Result<crate::core::engine::PackageInfo> {
+    pub async fn get_package_info(&self, name: &str) -> Result<crate::core::engine::PackageInfo> {
         let parts: Vec<&str> = name.split('/').collect();
         if parts.len() < 2 {
             return Ok(crate::core::engine::PackageInfo { repo_url: None });
@@ -147,7 +161,9 @@ impl GitHub {
         owner: String,
         repo: String,
     ) -> Result<GitHubProjectRepositoryMutator> {
-        let view = self.project_repository_view(owner.clone(), repo.clone()).await?;
+        let view = self
+            .project_repository_view(owner.clone(), repo.clone())
+            .await?;
         Ok(GitHubProjectRepositoryMutator {
             octocrab: view.octocrab,
             owner,
@@ -156,8 +172,22 @@ impl GitHub {
     }
 
     pub async fn get_json(&self, route: &str) -> Result<serde_json::Value> {
-        let response: serde_json::Value = self.octocrab.get(route, None::<&()>).await?;
-        Ok(response)
+        match self
+            .public_client
+            .get::<serde_json::Value, _, _>(route, None::<&()>)
+            .await
+        {
+            Ok(v) => Ok(v),
+            Err(octocrab::Error::GitHub { source, .. }) => {
+                if source.message.contains("Not Found")
+                    || source.status_code == reqwest::StatusCode::NOT_FOUND
+                {
+                    anyhow::bail!("404 Not Found")
+                }
+                anyhow::bail!("GitHub error: {}", source.message)
+            }
+            Err(e) => anyhow::bail!("Request error: {}", e),
+        }
     }
 
     pub async fn get_foreign_file(
@@ -574,69 +604,69 @@ impl ProjectRepositoryMutator for GitHubProjectRepositoryMutator {
         body: &str,
     ) -> Result<String> {
         let head_param = format!("{}:{}", self.owner, branch_name);
-        let prs = self
-            .octocrab
-            .pulls(&self.owner, &self.repo)
-            .list()
-            .head(&head_param)
-            .state(octocrab::params::State::Open)
-            .send()
-            .await?;
+        let url = format!(
+            "/repos/{}/{}/pulls?head={}&state=open",
+            self.owner, self.repo, head_param
+        );
+        let prs_response: Value = self.octocrab.get(url, None::<&()>).await?;
 
-        if let Some(existing_pr) = prs.items.into_iter().next() {
-            // Update the existing PR with the new title and body
-            let pr_number = existing_pr.number;
-            let url = format!("/repos/{}/{}/pulls/{}", self.owner, self.repo, pr_number);
-            let updated_pr: Value = self
-                .octocrab
-                .patch(
-                    url,
-                    Some(&serde_json::json!({
-                        "title": title,
-                        "body": body
-                    })),
-                )
-                .await?;
+        if let Some(existing_pr) = prs_response.as_array().and_then(|arr| arr.first()) {
+            if let Some(pr_number) = existing_pr["number"].as_u64() {
+                let patch_url = format!("/repos/{}/{}/pulls/{}", self.owner, self.repo, pr_number);
+                let updated_pr: Value = self
+                    .octocrab
+                    .patch(
+                        patch_url,
+                        Some(&serde_json::json!({
+                            "title": title,
+                            "body": body
+                        })),
+                    )
+                    .await?;
 
-            return Ok(updated_pr["html_url"].as_str().unwrap_or("").to_string());
+                return Ok(updated_pr["html_url"].as_str().unwrap_or("").to_string());
+            }
         }
 
-        let pr = self
+        let create_url = format!("/repos/{}/{}/pulls", self.owner, self.repo);
+        let created_pr: Value = self
             .octocrab
-            .pulls(&self.owner, &self.repo)
-            .create(title, branch_name, base_branch)
-            .body(body)
-            .send()
+            .post(
+                create_url,
+                Some(&serde_json::json!({
+                    "title": title,
+                    "head": branch_name,
+                    "base": base_branch,
+                    "body": body
+                })),
+            )
             .await?;
 
-        Ok(pr.html_url.to_string())
+        Ok(created_pr["html_url"].as_str().unwrap_or("").to_string())
     }
 
     async fn close_pull_request(&self, branch_name: &str, base_branch: &str) -> Result<()> {
         let head_param = format!("{}:{}", self.owner, branch_name);
-        let prs = self
-            .octocrab
-            .pulls(&self.owner, &self.repo)
-            .list()
-            .head(&head_param)
-            .base(base_branch)
-            .state(octocrab::params::State::Open)
-            .send()
-            .await?;
+        let url = format!(
+            "/repos/{}/{}/pulls?head={}&base={}&state=open",
+            self.owner, self.repo, head_param, base_branch
+        );
+        let prs_response: Value = self.octocrab.get(url, None::<&()>).await?;
 
-        if let Some(existing_pr) = prs.items.into_iter().next() {
-            let pr_number = existing_pr.number;
-            let url = format!("/repos/{}/{}/pulls/{}", self.owner, self.repo, pr_number);
-            let _: Value = self
-                .octocrab
-                .patch(
-                    url,
-                    Some(&serde_json::json!({
-                        "state": "closed"
-                    })),
-                )
-                .await?;
-            tracing::info!("Closed empty PR #{}", pr_number);
+        if let Some(existing_pr) = prs_response.as_array().and_then(|arr| arr.first()) {
+            if let Some(pr_number) = existing_pr["number"].as_u64() {
+                let patch_url = format!("/repos/{}/{}/pulls/{}", self.owner, self.repo, pr_number);
+                let _: Value = self
+                    .octocrab
+                    .patch(
+                        patch_url,
+                        Some(&serde_json::json!({
+                            "state": "closed"
+                        })),
+                    )
+                    .await?;
+                tracing::info!("Closed empty PR #{}", pr_number);
+            }
         }
 
         let _ = self.delete_branch(branch_name).await;
