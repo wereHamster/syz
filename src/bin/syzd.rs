@@ -31,7 +31,9 @@ async fn main() -> Result<()> {
             .await?;
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+    syz::server::start().await?;
+
+    tracing::info!("exiting...");
 
     Ok(())
 }

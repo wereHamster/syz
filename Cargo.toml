@@ -34,3 +34,4 @@ regex = "1.12.3"
 futures = "0.3.32"
 semver = "1.0.28"
 toml_edit = "0.25.11"
+axum = { version = "0.8.9", features = ["tokio"] }
