@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use regex::Regex;
 
 use crate::core::clients::github::GitHub;
 use crate::core::engine::releases::ReleaseNotesResolver;
@@ -73,7 +74,10 @@ impl GithubReleaseNotesResolver {
 
         if self.package_name.contains('/') {
             let pkg_parts: Vec<&str> = self.package_name.split('/').collect();
-            let short_name = pkg_parts.last().copied().unwrap_or(self.package_name.as_str());
+            let short_name = pkg_parts
+                .last()
+                .copied()
+                .unwrap_or(self.package_name.as_str());
 
             candidate_tags = vec![
                 format!("{}@{}", self.package_name, version),
@@ -102,7 +106,10 @@ impl GithubReleaseNotesResolver {
 
         for tag in candidate_tags {
             let encoded_tag = Self::percent_encode(&tag);
-            let route = format!("/repos/{}/{}/releases/tags/{}", self.owner, self.repo, encoded_tag);
+            let route = format!(
+                "/repos/{}/{}/releases/tags/{}",
+                self.owner, self.repo, encoded_tag
+            );
 
             match self.client.get_json(&route).await {
                 Ok(release) => {
@@ -113,10 +120,13 @@ impl GithubReleaseNotesResolver {
                 Err(e) => {
                     let err_str = e.to_string().to_lowercase();
                     if err_str.contains("rate limit")
-                        || err_str.contains("forbidden")
-                        || err_str.contains("403")
+                        || (err_str.contains("forbidden") && !err_str.contains("404"))
+                        || (err_str.contains("403") && !err_str.contains("404"))
                     {
                         return Err(anyhow::anyhow!("GitHub API rate limit exceeded (403 Forbidden) via authenticated client"));
+                    }
+                    if err_str.contains("not found") || err_str.contains("404") {
+                        continue;
                     }
                     continue;
                 }
@@ -131,7 +141,10 @@ impl GithubReleaseNotesResolver {
             return Ok(None);
         }
 
-        let route = format!("/repos/{}/{}/git/trees/HEAD?recursive=1", self.owner, self.repo);
+        let route = format!(
+            "/repos/{}/{}/git/trees/HEAD?recursive=1",
+            self.owner, self.repo
+        );
         let tree_data = match self.client.get_json(&route).await {
             Ok(data) => data,
             Err(e) => {
@@ -163,7 +176,11 @@ impl GithubReleaseNotesResolver {
         }
 
         let pkg_parts: Vec<&str> = self.package_name.split('/').collect();
-        let short_name = pkg_parts.last().copied().unwrap_or(self.package_name.as_str()).to_lowercase();
+        let short_name = pkg_parts
+            .last()
+            .copied()
+            .unwrap_or(self.package_name.as_str())
+            .to_lowercase();
 
         changelog_paths.sort_by(|a, b| {
             let a_contains = a.to_lowercase().contains(&short_name);
@@ -178,7 +195,11 @@ impl GithubReleaseNotesResolver {
         let paths_to_check: Vec<String> = changelog_paths.into_iter().take(3).collect();
 
         for path in paths_to_check {
-            let markdown = match self.client.get_foreign_file(&self.owner, &self.repo, &path).await {
+            let markdown = match self
+                .client
+                .get_foreign_file(&self.owner, &self.repo, &path)
+                .await
+            {
                 Ok(Some(content)) => content,
                 Ok(None) => continue,
                 Err(e) => return Err(e),
@@ -368,19 +389,158 @@ pub fn shift_markdown_headings(markdown: &str, target_top_level: usize, version:
     final_out
 }
 
+pub fn sanitize_markdown(markdown: &str) -> String {
+    let mut out = markdown
+        .replace("https://github.com/", "https://redirect.github.com/")
+        .replace("http://github.com/", "https://redirect.github.com/");
+
+    let re_mention = Regex::new(r"@([a-zA-Z0-9-]+)").unwrap();
+    out = re_mention
+        .replace_all(&out, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap();
+            let start = m.start();
+            let end = m.end();
+
+            let mut skip = false;
+            if start > 0 {
+                let prev_char = out[..start].chars().last().unwrap();
+                if prev_char.is_ascii_alphanumeric() || prev_char == '_' {
+                    skip = true;
+                }
+            }
+            if end < out.len() {
+                let next_char = out[end..].chars().next().unwrap();
+                if next_char == '/' {
+                    skip = true;
+                }
+            }
+
+            if skip {
+                caps[0].to_string()
+            } else {
+                format!("@&#8203;{}", &caps[1])
+            }
+        })
+        .to_string();
+
+    let re_issue = Regex::new(r"#([0-9]+)").unwrap();
+    out = re_issue
+        .replace_all(&out, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap();
+            let start = m.start();
+
+            let mut skip = false;
+            if start > 0 {
+                let prefix = &out[..start];
+                let prev_char = prefix.chars().last().unwrap();
+
+                if prev_char == '_' || prev_char == '&' {
+                    skip = true;
+                }
+
+                if prefix.ends_with("](")
+                    || prefix.ends_with("href=\"")
+                    || prefix.ends_with("href='")
+                    || prefix.ends_with("=\"")
+                    || prefix.ends_with("='")
+                {
+                    skip = true;
+                }
+            }
+
+            if skip {
+                caps[0].to_string()
+            } else {
+                format!("#&#8203;{}", &caps[1])
+            }
+        })
+        .to_string();
+
+    out
+}
+
 #[async_trait]
 impl ReleaseNotesResolver for GithubReleaseNotesResolver {
     async fn resolve_release_notes(&self, version: &str) -> Result<Option<(String, String)>> {
         if let Ok(Some((tag, md))) = self.try_github_releases(version).await {
             let shifted = shift_markdown_headings(&md, 3, version);
-            return Ok(Some((tag, shifted)));
+            let rewritten = sanitize_markdown(&shifted);
+            return Ok(Some((tag, rewritten)));
         }
 
         if let Ok(Some((tag, md))) = self.try_markdown_file(version).await {
             let shifted = shift_markdown_headings(&md, 3, version);
-            return Ok(Some((tag, shifted)));
+            let rewritten = sanitize_markdown(&shifted);
+            return Ok(Some((tag, rewritten)));
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn get_test_client() -> GitHub {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        GitHub::new().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_knip_release_notes() {
+        let client = get_test_client().await;
+        let resolver = GithubReleaseNotesResolver::new(
+            client,
+            "knip".to_string(),
+            "https://github.com/webpro-nl/knip".to_string(),
+        );
+
+        let result = resolver.resolve_release_notes("6.12.2").await.unwrap();
+        assert!(result.is_some(), "Should find knip release notes");
+        let (tag, md) = result.unwrap();
+        assert_eq!(tag, "knip@6.12.2");
+        assert!(md.contains("Fix symbol reporter file paths"));
+    }
+
+    #[tokio::test]
+    async fn test_sentry_release_notes() {
+        let client = get_test_client().await;
+        let resolver = GithubReleaseNotesResolver::new(
+            client,
+            "@sentry/core".to_string(),
+            "https://github.com/getsentry/sentry-javascript".to_string(),
+        );
+
+        let result = resolver.resolve_release_notes("7.114.0").await.unwrap();
+        assert!(result.is_some(), "Should find @sentry/core release notes");
+        let (tag, md) = result.unwrap();
+        println!("Sentry TAG: {}", tag);
+        println!("Sentry MD:\n{}", md);
+        assert_eq!(tag, "7.114.0");
+        assert!(md.contains("fix(browser/v7)"));
+    }
+
+    #[tokio::test]
+    async fn test_exifreader_release_notes() {
+        let client = get_test_client().await;
+        let resolver = GithubReleaseNotesResolver::new(
+            client,
+            "exifreader".to_string(),
+            "https://github.com/mattiasw/ExifReader".to_string(),
+        );
+
+        let result = resolver.resolve_release_notes("4.37.0").await.unwrap();
+        assert!(result.is_some(), "Should find exifreader release notes");
+        let (tag, _md) = result.unwrap();
+        assert_eq!(tag, "v4.37.0");
+    }
+
+    #[test]
+    fn test_sanitize_markdown() {
+        let input = "Fixed by @alice and @bob in #123. See also https://github.com/foo/bar. @apollo/server #456 [link](#789) <a href=\"#000\">#111</a> `code #222` `code @user` owner/repo#999";
+        let expected = "Fixed by @&#8203;alice and @&#8203;bob in #&#8203;123. See also https://redirect.github.com/foo/bar. @apollo/server #&#8203;456 [link](#789) <a href=\"#000\">#&#8203;111</a> `code #&#8203;222` `code @&#8203;user` owner/repo#&#8203;999";
+        assert_eq!(sanitize_markdown(input), expected);
     }
 }
