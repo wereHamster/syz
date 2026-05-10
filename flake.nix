@@ -26,6 +26,8 @@
             rustfmt
             clippy
             rust-analyzer
+
+            turso
           ];
         };
       }
