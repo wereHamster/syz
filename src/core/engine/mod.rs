@@ -115,6 +115,14 @@ pub enum UpdateType {
     Unknown,
 }
 
+pub struct VersionData {
+    pub target_minor: Option<String>,
+    pub target_major: Option<String>,
+    pub head_minor: Option<String>,
+    pub head_major: Option<String>,
+    pub repo_url: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ProposedBump {
     pub target_version: String,

@@ -4,6 +4,7 @@ use tokio::sync::{broadcast, mpsc};
 use turso::params;
 
 use crate::core::clients;
+use crate::core::engine::ecosystems;
 
 use super::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
@@ -72,6 +73,7 @@ impl Application {
                 self.http_agent.clone(),
             ))),
             Box::new(Npm::new(clients::npm::Npm::new(self.http_agent.clone()))),
+            Box::new(ecosystems::github_actions::GitHub::new(self.github.clone())),
         ]
     }
 

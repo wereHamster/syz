@@ -6,6 +6,7 @@ use crate::core::engine::{
 };
 
 pub mod cargo;
+pub mod github_actions;
 pub mod npm;
 
 #[async_trait]

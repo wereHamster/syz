@@ -14,15 +14,8 @@ pub struct RegistryResponse {
     pub repository: Option<serde_json::Value>,
 }
 
-pub struct VersionData {
-    pub target_minor: Option<String>,
-    pub target_major: Option<String>,
-    pub head_minor: Option<String>,
-    pub head_major: Option<String>,
-    pub repo_url: Option<String>,
-}
-
 use crate::core::{
+    engine::VersionData,
     http_agent::HttpAgent,
     version_resolver::{resolve_updates, AvailableRelease},
 };

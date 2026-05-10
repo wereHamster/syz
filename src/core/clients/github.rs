@@ -69,6 +69,11 @@ impl GitHub {
             repo,
         })
     }
+
+    pub async fn get_json(&self, route: &str) -> Result<serde_json::Value> {
+        let response: serde_json::Value = self.octocrab.get(route, None::<&()>).await?;
+        Ok(response)
+    }
 }
 
 pub struct GitHubProjectRepositoryView {

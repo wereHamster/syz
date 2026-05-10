@@ -1,4 +1,4 @@
-use crate::core::clients::npm::VersionData;
+use crate::core::engine::VersionData;
 use crate::core::http_agent::HttpAgent;
 use anyhow::Result;
 use semver::{Version, VersionReq};
