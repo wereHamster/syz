@@ -1,4 +1,5 @@
-use crate::core::application::Application;
+use crate::core::application::{Application, BumpTargetData};
+use crate::core::engine::ecosystems::Patcher;
 use crate::core::engine::{PackageInfo, RequirementVersion, UpdateTarget};
 use crate::core::message::Payload;
 use anyhow::Result;
@@ -23,35 +24,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         }
     };
 
-    let mut targets = Vec::new();
-    for row in bump_targets_data {
-        let mut full_name = match row.namespace {
-            Some(ns) => format!("{}/{}", ns, row.name),
-            None => row.name,
-        };
-        if let Some(sp) = row.subpath {
-            full_name = format!("{}/{}", full_name, sp);
-        }
-
-        if let Some(new_req) = patcher.updated_requirement(&row.specifier, &row.target_version) {
-            targets.push(UpdateTarget {
-                name: full_name,
-                current_version: RequirementVersion {
-                    requirement: row.specifier,
-                    version: row.current_version,
-                },
-                target_version: RequirementVersion {
-                    requirement: new_req,
-                    version: row.target_version,
-                },
-                latest_version: row.head_version,
-                package_info: PackageInfo {
-                    repo_url: row.repo_url,
-                },
-                minimum_release_age: row.minimum_release_age,
-            });
-        }
-    }
+    let targets = build_update_targets(patcher.as_ref(), bump_targets_data);
 
     if targets.is_empty() {
         tracing::info!(
@@ -174,7 +147,43 @@ fn generate_branch_name(bump_name: &str, is_major: bool) -> String {
     } else {
         safe_branch_name
     };
+
     format!("syz/update-{}", safe_branch_name)
+}
+
+fn build_update_targets(patcher: &dyn Patcher, rows: Vec<BumpTargetData>) -> Vec<UpdateTarget> {
+    let mut targets = Vec::new();
+
+    for row in rows {
+        let mut full_name = match row.namespace {
+            Some(ns) => format!("{}/{}", ns, row.name),
+            None => row.name,
+        };
+        if let Some(sp) = row.subpath {
+            full_name = format!("{}/{}", full_name, sp);
+        }
+
+        if let Some(new_req) = patcher.updated_requirement(&row.specifier, &row.target_version) {
+            targets.push(UpdateTarget {
+                name: full_name,
+                current_version: RequirementVersion {
+                    requirement: row.specifier,
+                    version: row.current_version,
+                },
+                target_version: RequirementVersion {
+                    requirement: new_req,
+                    version: row.target_version,
+                },
+                latest_version: row.head_version,
+                package_info: PackageInfo {
+                    repo_url: row.repo_url,
+                },
+                minimum_release_age: row.minimum_release_age,
+            });
+        }
+    }
+
+    targets
 }
 
 #[cfg(test)]

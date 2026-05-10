@@ -474,7 +474,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         major_bumps.sort_by(|a, b| a.0.cmp(&b.0));
         minor_bumps.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut modifications = vec![FileModification {
+        let modifications = vec![FileModification {
             path: "pnpm-lock.yaml".to_string(),
             state: crate::core::engine::repository::FileState::Write(new_lockfile),
         }];
