@@ -5,5 +5,6 @@ pub mod database;
 pub mod engine;
 pub mod event;
 pub mod http_agent;
+pub mod logger;
 pub mod message;
 pub mod version_resolver;

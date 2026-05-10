@@ -52,13 +52,29 @@ impl Application {
     pub fn start(self) -> Handle {
         let handle = self.handle.clone();
 
-        tokio::spawn(async move {
-            tracing::info!("Event loop active");
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-            if let Err(e) = self.run().await {
-                tracing::error!("Application loop exited with error: {:#}", e);
+        let log_layer = super::logger::CoreLogLayer::new(handle.events.clone());
+
+        use tracing_subscriber::layer::SubscriberExt;
+        let subscriber = tracing_subscriber::registry()
+            .with(filter)
+            .with(log_layer)
+            .with(tracing_subscriber::fmt::layer());
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        use tracing::instrument::WithSubscriber;
+        tokio::spawn(
+            async move {
+                tracing::info!("Event loop active");
+
+                if let Err(e) = self.run().await {
+                    tracing::error!("Application loop exited with error: {:#}", e);
+                }
             }
-        });
+            .with_subscriber(dispatch),
+        );
 
         handle
     }
