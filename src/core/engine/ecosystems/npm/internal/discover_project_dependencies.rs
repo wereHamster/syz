@@ -119,7 +119,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
                             version,
                         },
                         requirement: req_str.to_string(),
-                        minimum_release_age: minimum_release_age.clone(),
+                        minimum_release_age: minimum_release_age,
                     });
                 }
             }
@@ -149,7 +149,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
                             version,
                         },
                         requirement: req_str.to_string(),
-                        minimum_release_age: minimum_release_age.clone(),
+                        minimum_release_age: minimum_release_age,
                     });
                 }
             }

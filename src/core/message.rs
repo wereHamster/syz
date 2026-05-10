@@ -68,7 +68,7 @@ pub enum Payload {
 }
 
 impl Payload {
-    pub async fn execute(&self, app: &Application) -> Result<()> {
+    pub async fn execute(self, app: &Application) -> Result<()> {
         match self {
             Payload::Bootstrap => {
                 let mut ops = Vec::new();
@@ -136,13 +136,13 @@ impl Payload {
             }
 
             Payload::AnalyzeProjectDependencies { project_id } => {
-                super::actions::analyze_project_dependencies::run(app, project_id.clone()).await
+                super::actions::analyze_project_dependencies::run(app, project_id).await
             }
 
             Payload::ApproveBump { bump_id } => {
-                app.approve_bump(bump_id).await?;
+                app.approve_bump(&bump_id).await?;
 
-                let bump = app.query().bump(bump_id).await?;
+                let bump = app.query().bump(&bump_id).await?;
                 app.handle().broadcast(crate::core::event::Event::Commit {
                     ops: vec![crate::core::event::Op::Upsert {
                         path: format!("bump/{}", bump.id),
@@ -154,9 +154,9 @@ impl Payload {
             }
 
             Payload::RetractBumpApproval { bump_id } => {
-                app.retract_bump_approval(bump_id).await?;
+                app.retract_bump_approval(&bump_id).await?;
 
-                let bump = app.query().bump(bump_id).await?;
+                let bump = app.query().bump(&bump_id).await?;
                 app.handle().broadcast(crate::core::event::Event::Commit {
                     ops: vec![crate::core::event::Op::Upsert {
                         path: format!("bump/{}", bump.id),
@@ -168,30 +168,27 @@ impl Payload {
             }
 
             Payload::ProcessBump { bump_id } => {
-                super::actions::process_bump::run(app, bump_id.clone()).await
+                super::actions::process_bump::run(app, bump_id).await
             }
 
             Payload::UpdateTransitiveDependencies { project_id } => {
-                super::actions::update_transitive_dependencies::run(app, project_id.clone()).await
+                super::actions::update_transitive_dependencies::run(app, project_id).await
             }
 
             Payload::UpdateVulnerableDependencies { project_id } => {
-                super::actions::update_vulnerable_dependencies::run(app, project_id.clone()).await
+                super::actions::update_vulnerable_dependencies::run(app, project_id).await
             }
 
             Payload::PersistBumpResult {
                 bump_id,
                 pull_request_url,
-            } => {
-                app.persist_bump_result(bump_id, pull_request_url.clone())
-                    .await
-            }
+            } => app.persist_bump_result(&bump_id, pull_request_url).await,
 
             Payload::PersistAnalyzedProjectDependencies {
                 project_id,
                 scan_result,
             } => {
-                app.persist_analyzed_project_dependencies(project_id, scan_result.clone())
+                app.persist_analyzed_project_dependencies(&project_id, scan_result)
                     .await
             }
         }

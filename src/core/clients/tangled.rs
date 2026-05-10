@@ -737,7 +737,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
                 .com
                 .atproto
                 .repo
-                .put_record(put_params.clone().into())
+                .put_record(put_params.into())
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to update PR record: {:?}", e))?;
 

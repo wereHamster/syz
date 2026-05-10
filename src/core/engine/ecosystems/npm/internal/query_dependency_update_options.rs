@@ -19,7 +19,7 @@ pub async fn run(
         .get_versions(
             &full_name,
             dependency.purl.version.as_deref(),
-            dependency.minimum_release_age.clone(),
+            dependency.minimum_release_age,
         )
         .await?;
 

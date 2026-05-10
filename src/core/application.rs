@@ -211,7 +211,7 @@ impl Application {
 
         conn.execute(
             "INSERT INTO scan (id, project_id, create_time) VALUES (?, ?, ?)",
-            params![scan_id.clone(), project_id.to_string(), now],
+            params![scan_id.as_str(), project_id, now],
         )
         .await
         .context("Failed to insert scan")?;
@@ -221,16 +221,16 @@ impl Application {
         let mut existing_bumps_query = conn
             .query(
                 "SELECT id, name, major FROM bump WHERE project_id = ?",
-                params![project_id.to_string()],
+                params![project_id],
             )
             .await?;
-        let mut existing_bumps = HashMap::new();
+        let mut existing_bumps: HashMap<String, [Option<String>; 2]> = HashMap::new();
         let mut bump_ids_to_wipe = Vec::new();
         while let Some(row) = existing_bumps_query.next().await? {
             let id = row.get_value(0)?.as_text().unwrap().to_string();
             let name = row.get_value(1)?.as_text().unwrap().to_string();
             let major = *row.get_value(2)?.as_integer().unwrap_or(&0) != 0;
-            existing_bumps.insert((name, major), id.clone());
+            existing_bumps.entry(name).or_insert([None, None])[major as usize] = Some(id.clone());
             bump_ids_to_wipe.push(id);
         }
 
@@ -239,7 +239,7 @@ impl Application {
                 .await?;
         }
 
-        let mut bump_cache: HashMap<(String, bool), String> = HashMap::new();
+        let mut bump_cache: HashMap<String, [Option<String>; 2]> = HashMap::new();
 
         for res in scan_result.analyzed_project_dependencies {
             let group_name = res.group_name();
@@ -267,19 +267,19 @@ impl Application {
                 let eco_name = &r#type;
                 let mut pkg_query = conn.query(
                     "SELECT id FROM package WHERE type = ? AND namespace IS ? AND name = ? AND subpath IS ? AND version = ?",
-                    params![eco_name.to_string(), namespace.clone(), db_name.clone(), subpath.clone(), pkg_version.clone()]
+                    params![eco_name.as_str(), namespace.as_deref(), db_name.as_str(), subpath.as_deref(), pkg_version.as_str()]
                 ).await?;
 
                 let pkg_id = if let Some(row) = pkg_query.next().await? {
                     row.get_value(0)?
                         .as_text()
                         .context("package id should be text")?
-                        .clone()
+                        .to_string()
                 } else {
                     let new_pkg_id = pk();
                     conn.execute(
                         "INSERT INTO package (id, type, namespace, name, subpath, version) VALUES (?, ?, ?, ?, ?, ?)",
-                        params![new_pkg_id.clone(), eco_name.to_string(), namespace.clone(), db_name.clone(), subpath.clone(), pkg_version.clone()]
+                        params![new_pkg_id.as_str(), eco_name.as_str(), namespace.as_deref(), db_name.as_str(), subpath.as_deref(), pkg_version.as_str()]
                     ).await?;
                     new_pkg_id
                 };
@@ -287,7 +287,7 @@ impl Application {
                 let dep_id = pk();
                 conn.execute(
                     "INSERT INTO dependency (id, scan_id, specifier, package_id) VALUES (?, ?, ?, ?)",
-                    params![dep_id.clone(), scan_id.clone(), req.clone(), pkg_id],
+                    params![dep_id.as_str(), scan_id.as_str(), req.as_str(), pkg_id],
                 )
                 .await?;
 
@@ -295,28 +295,29 @@ impl Application {
 
                 let mut bumps_to_process = Vec::new();
                 for bump in &dependency_update_options.bumps {
-                    let bump_version = if discovered_dependency.purl.ecosystem == "github-actions" {
-                        bump.target_version.clone()
-                    } else {
-                        bump.target_version.clone()
-                    };
+                    let bump_version = bump.target_version.clone();
                     bumps_to_process.push((bump_version, bump.is_major, bump.head_version.clone()));
                 }
 
                 for (bump_version, bump_is_major, head_ver) in bumps_to_process {
-                    let bump_id = if let Some(id) =
-                        existing_bumps.get(&(group_name.clone(), bump_is_major))
+                    let bump_id = if let Some(id) = existing_bumps
+                        .get(group_name.as_str())
+                        .and_then(|m| m[bump_is_major as usize].as_ref())
                     {
                         id.clone()
-                    } else if let Some(id) = bump_cache.get(&(group_name.clone(), bump_is_major)) {
+                    } else if let Some(id) = bump_cache
+                        .get(group_name.as_str())
+                        .and_then(|m| m[bump_is_major as usize].as_ref())
+                    {
                         id.clone()
                     } else {
                         let new_bump_id = pk();
                         conn.execute(
                             "INSERT INTO bump (id, project_id, name, major, approved) VALUES (?, ?, ?, ?, 0)",
-                            params![new_bump_id.clone(), project_id.to_string(), group_name.clone(), bump_is_major]
+                            params![new_bump_id.as_str(), project_id, group_name.as_str(), bump_is_major]
                         ).await?;
-                        bump_cache.insert((group_name.clone(), bump_is_major), new_bump_id.clone());
+                        bump_cache.entry(group_name.clone()).or_insert([None, None])
+                            [bump_is_major as usize] = Some(new_bump_id.clone());
                         new_bump_id
                     };
 
@@ -325,7 +326,7 @@ impl Application {
 
                     conn.execute(
                         "INSERT INTO bumpdep (bump_id, dependency_id, target_version, head_version, minimum_release_age) VALUES (?, ?, ?, ?, ?)",
-                        params![bump_id, dep_id.clone(), target_ver, head_ver, min_age_mins]
+                        params![bump_id, dep_id.as_str(), target_ver, head_ver, min_age_mins]
                     ).await?;
                 }
             }
@@ -333,7 +334,7 @@ impl Application {
 
         conn.execute(
             "DELETE FROM bump WHERE project_id = ? AND id NOT IN (SELECT bump_id FROM bumpdep)",
-            params![project_id.to_string()],
+            params![project_id],
         )
         .await?;
 
@@ -351,7 +352,7 @@ impl Application {
         let conn = self.handle.database.conn()?;
         conn.execute(
             "UPDATE bump SET approved = 1 WHERE id = ?",
-            params![bump_id.to_string()],
+            params![bump_id],
         )
         .await?;
         Ok(())
@@ -361,7 +362,7 @@ impl Application {
         let conn = self.handle.database.conn()?;
         conn.execute(
             "UPDATE bump SET approved = 0 WHERE id = ?",
-            params![bump_id.to_string()],
+            params![bump_id],
         )
         .await?;
         Ok(())
@@ -439,7 +440,8 @@ impl Application {
 
     pub fn transitive_pull_request_generator(
         &self,
-    ) -> Box<dyn crate::core::engine::pull_request_generator::TransitiveUpdatesPullRequestGenerator> {
+    ) -> Box<dyn crate::core::engine::pull_request_generator::TransitiveUpdatesPullRequestGenerator>
+    {
         Box::new(crate::core::engine::pull_request_generator::DefaultTransitiveUpdatesPullRequestGenerator)
     }
 

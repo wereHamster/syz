@@ -27,7 +27,7 @@ pub async fn run(
         &github_client,
         &full_name,
         &dependency.requirement,
-        dependency.minimum_release_age.clone(),
+        dependency.minimum_release_age,
     )
     .await?;
 
@@ -89,11 +89,9 @@ pub async fn run(
         }
     }
 
-    let latest_minor_base = versions.head_minor.unwrap_or_else(|| "0.0.0".to_string());
-
-    let mut latest_minor = latest_minor_base.clone();
-    if latest_minor_base != "0.0.0" {
-        let clean_latest = latest_minor_base.trim_start_matches('v');
+    let mut latest_minor = versions.head_minor.unwrap_or_else(|| "0.0.0".to_string());
+    if latest_minor != "0.0.0" {
+        let clean_latest = latest_minor.trim_start_matches('v');
         let v_tag = format!("v{}", clean_latest);
         let no_v_tag = clean_latest.to_string();
 
@@ -107,11 +105,9 @@ pub async fn run(
         }
     }
 
-    let latest_major_base = versions.head_major.unwrap_or_else(|| "0.0.0".to_string());
-
-    let mut latest_major = latest_major_base.clone();
-    if latest_major_base != "0.0.0" {
-        let clean_latest = latest_major_base.trim_start_matches('v');
+    let mut latest_major = versions.head_major.unwrap_or_else(|| "0.0.0".to_string());
+    if latest_major != "0.0.0" {
+        let clean_latest = latest_major.trim_start_matches('v');
         let v_tag = format!("v{}", clean_latest);
         let no_v_tag = clean_latest.to_string();
 
@@ -307,7 +303,7 @@ async fn get_versions_internal(
                 .iter()
                 .find(|r| {
                     let ver_str = r.tag_name.trim_start_matches('v');
-                    coerce_version(ver_str) == Some(ver.clone())
+                    coerce_version(ver_str).as_ref() == Some(&ver)
                 })
                 .map(|r| r.tag_name.clone())
         })

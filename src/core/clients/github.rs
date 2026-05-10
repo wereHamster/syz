@@ -161,13 +161,11 @@ impl GitHub {
         owner: String,
         repo: String,
     ) -> Result<GitHubProjectRepositoryMutator> {
-        let view = self
-            .project_repository_view(owner.clone(), repo.clone())
-            .await?;
+        let view = self.project_repository_view(owner, repo).await?;
         Ok(GitHubProjectRepositoryMutator {
             octocrab: view.octocrab,
-            owner,
-            repo,
+            owner: view.owner,
+            repo: view.repo,
         })
     }
 

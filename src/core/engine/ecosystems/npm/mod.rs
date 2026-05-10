@@ -267,7 +267,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             String,
             std::collections::HashMap<String, String>,
         > = std::collections::HashMap::new();
-        if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(&lockfile.clone().unwrap()) {
+        if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(lockfile.as_ref().unwrap()) {
             if let Some(importers) = lock_val.get("importers").and_then(|i| i.as_mapping()) {
                 for (k, v) in importers {
                     if let Some(project_path) = k.as_str() {
@@ -611,7 +611,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         for (module, vulnerable_list) in module_to_vulnerable_versions {
             match self
                 .npm_client
-                .resolve_mature_version(&module, &vulnerable_list, minimum_release_age.clone())
+                .resolve_mature_version(&module, &vulnerable_list, minimum_release_age)
                 .await
             {
                 Ok(resolution) => {
@@ -718,7 +718,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         let clean_pkg_jsons: std::collections::HashMap<String, serde_json::Value> =
             mutable_pkg_jsons.clone();
 
-        let before_versions = extract_versions_from_lock(&lockfile.clone().unwrap_or_default());
+        let before_versions = extract_versions_from_lock(lockfile.as_deref().unwrap_or_default());
         let mut injected_transitive = false;
         let mut package_json_modifications: Vec<FileModification> = Vec::new();
 
