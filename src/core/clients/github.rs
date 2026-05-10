@@ -420,8 +420,8 @@ impl ProjectRepositoryMutator for GitHubProjectRepositoryMutator {
             });
         }
 
-        let new_tree_sha = self.create_tree(base_revision, tree_items).await?;
         let base_tree_sha = self.get_commit_tree_sha(base_revision).await?;
+        let new_tree_sha = self.create_tree(&base_tree_sha, tree_items).await?;
 
         if new_tree_sha == base_tree_sha {
             // No changes relative to the base revision

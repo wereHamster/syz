@@ -62,8 +62,11 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
 
     let handle = app.handle();
     let pr_generator = app.pull_request_generator();
+    let view = app.project_repository_view(&project.id).await?;
+    let default_branch = view.get_default_branch().await?;
+    let base_revision = view.get_revision(&default_branch).await?;
     let mutator = app.project_repository_mutator(&project.id).await?;
-    let snapshot = app.project_repository_snapshot(&project.id).await?;
+    let snapshot = view.snapshot(&base_revision);
     let is_major = bump.major;
     let bump_name = bump.name.clone();
 
@@ -131,22 +134,22 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
 
             // 4. Commit changes
             if let Some(_sha) = mutator
-                .commit_changes("main", &branch_name, &title, modifications)
+                .commit_changes(&base_revision, &branch_name, &title, modifications)
                 .await?
             {
                 let url = mutator
-                    .create_pull_request(&title, &branch_name, "main", &body)
+                    .create_pull_request(&title, &branch_name, &default_branch, &body)
                     .await?;
                 Ok::<Option<String>, anyhow::Error>(Some(url))
             } else {
                 tracing::info!("Modifications resulted in no changes relative to base branch. Cleaning up empty PRs.");
-                let _ = mutator.close_pull_request(&branch_name, "main").await;
+                let _ = mutator.close_pull_request(&branch_name, &default_branch).await;
                 Ok(None)
             }
         }.await {
             Ok(url) => url,
             Err(e) => {
-                tracing::error!("Failed to process branch/PR generation: {}", e);
+                tracing::error!("Failed to process branch/PR generation: {:?}", e);
                 None
             }
         };
