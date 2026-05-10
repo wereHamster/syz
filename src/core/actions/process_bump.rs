@@ -108,26 +108,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         }
 
         // 3. Form branch name and PR details
-        let safe_branch_name = bump_name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>();
-        let safe_branch_name = safe_branch_name
-            .replace("--", "-")
-            .trim_matches('-')
-            .to_string();
-        let safe_branch_name = if is_major {
-            format!("{}-major", safe_branch_name)
-        } else {
-            safe_branch_name
-        };
-        let branch_name = format!("syz/update-{}", safe_branch_name);
+        let branch_name = generate_branch_name(&bump_name, is_major);
 
         let pr_url_opt = match async {
             let title = pr_generator.generate_pull_request_title(&bump_name, &targets, is_major).await?;
@@ -170,4 +151,58 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     });
 
     Ok(())
+}
+
+fn generate_branch_name(bump_name: &str, is_major: bool) -> String {
+    let safe_branch_name = bump_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let mut safe_branch_name = safe_branch_name;
+    while safe_branch_name.contains("--") {
+        safe_branch_name = safe_branch_name.replace("--", "-");
+    }
+    let safe_branch_name = safe_branch_name.trim_matches('-').to_string();
+    let safe_branch_name = if is_major {
+        format!("{}-major", safe_branch_name)
+    } else {
+        safe_branch_name
+    };
+    format!("syz/update-{}", safe_branch_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_branch_name() {
+        assert_eq!(
+            generate_branch_name("actix-web", false),
+            "syz/update-actix-web"
+        );
+        assert_eq!(
+            generate_branch_name("actix-web", true),
+            "syz/update-actix-web-major"
+        );
+        assert_eq!(generate_branch_name("Foo@Bar", false), "syz/update-foo-bar");
+        assert_eq!(
+            generate_branch_name("foo---bar", false),
+            "syz/update-foo-bar"
+        );
+        assert_eq!(
+            generate_branch_name("Foo@Bar", true),
+            "syz/update-foo-bar-major"
+        );
+        assert_eq!(
+            generate_branch_name("foo---bar", true),
+            "syz/update-foo-bar-major"
+        );
+    }
 }
