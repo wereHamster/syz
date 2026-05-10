@@ -6,6 +6,22 @@ pub enum Event {
         level: tracing::Level,
         message: String,
     },
+
+    Commit {
+        ops: Vec<Op>,
+    },
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum Op {
+    Upsert {
+        path: String,
+        data: serde_json::Value,
+    },
+    Delete {
+        path: String,
+    },
 }
 
 mod level_serde {

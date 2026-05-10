@@ -17,6 +17,9 @@ pub struct Message {
 #[derive(Clone, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum Payload {
+    /// Broadcast current state of the application to all clients.
+    Bootstrap,
+
     /// Lists all projects and sends an AnalyzeProjectDependencies message for each one.
     AnalyzeAllProjectsDependencies,
 
@@ -34,6 +37,23 @@ pub enum Payload {
 impl Payload {
     pub async fn execute(&self, app: &Application) -> Result<()> {
         match self {
+            Payload::Bootstrap => {
+                let projects = app.query().list_projects().await?;
+
+                let mut ops = Vec::new();
+                for project in projects {
+                    ops.push(crate::core::event::Op::Upsert {
+                        path: format!("project/{}", project.id),
+                        data: serde_json::to_value(project).unwrap_or_default(),
+                    });
+                }
+
+                app.handle()
+                    .broadcast(crate::core::event::Event::Commit { ops })?;
+
+                Ok(())
+            }
+
             Payload::AnalyzeAllProjectsDependencies => {
                 let projects = app.query().list_projects().await?;
                 for project in projects {
