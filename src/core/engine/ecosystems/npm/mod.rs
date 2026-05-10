@@ -518,6 +518,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             summary: pr_body,
         }))
     }
+
     async fn update_vulnerable_dependencies(
         &self,
         snapshot: &dyn ProjectRepositorySnapshot,
@@ -635,7 +636,8 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         for (module, vulnerable_list) in module_to_vulnerable_versions {
-            match self.npm_client
+            match self
+                .npm_client
                 .resolve_mature_version(&module, &vulnerable_list, minimum_release_age.clone())
                 .await
             {
@@ -683,9 +685,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             return Ok(None);
         }
 
-        tracing::info!("Applying fixes to package.json files...");
-
-        let mut all_modifications = Vec::new();
+        tracing::info!("Applying direct fixes to package.json files...");
 
         for (path, pkg_json) in mutable_pkg_jsons.iter_mut() {
             let mut file_updated = false;
@@ -720,7 +720,10 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                                         ""
                                     };
                                     let new_req = format!("{}{}", prefix, mature_version);
-                                    deps.insert(module.to_string(), serde_json::Value::String(new_req));
+                                    deps.insert(
+                                        module.to_string(),
+                                        serde_json::Value::String(new_req),
+                                    );
                                     file_updated = true;
                                 } else {
                                     tracing::warn!("Skipping direct dependency bump for {} in {} because no mature fix exists in major version {}", module, path, current_ver.major);
@@ -735,82 +738,96 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                 let updated_pkg_json_str = serde_json::to_string_pretty(pkg_json)? + "\n";
                 let full_path = temp_dir.join(path);
                 fs::write(&full_path, &updated_pkg_json_str)?;
-                all_modifications.push(FileModification {
-                    path: path.clone(),
-                    state: crate::core::engine::repository::FileState::Write(updated_pkg_json_str),
-                });
             }
         }
 
+        // Snapshot the clean state with first-party bumps (but before forced transitive overrides)
+        let clean_pkg_jsons: std::collections::HashMap<String, serde_json::Value> =
+            mutable_pkg_jsons.clone();
+
         let before_versions = extract_versions_from_lock(&lockfile.clone().unwrap_or_default());
+        let mut injected_transitive = false;
+        let mut package_json_modifications: Vec<FileModification> = Vec::new();
 
         if let Some(root_pkg) = mutable_pkg_jsons.get_mut("package.json") {
             let mut file_updated = false;
             if let Some(obj) = root_pkg.as_object_mut() {
-                let mut dev_deps = obj
-                    .remove("devDependencies")
-                    .unwrap_or_else(|| serde_json::json!({}));
-                if let Some(dev_deps_map) = dev_deps.as_object_mut() {
-                    for (module, mature_versions) in &overrides {
-                        let active_majors = if let Some(vers) = before_versions.get(module) {
-                            let mut majors = std::collections::HashSet::new();
-                            for v in vers {
-                                if let Ok(ver) = semver::Version::parse(v) {
-                                    if ver.major == 0 {
-                                        majors.insert((0, ver.minor));
-                                    } else {
-                                        majors.insert((ver.major, 0));
+                let mut pnpm = obj.remove("pnpm").unwrap_or_else(|| serde_json::json!({}));
+                if let Some(pnpm_map) = pnpm.as_object_mut() {
+                    let mut overrides_node = pnpm_map
+                        .remove("overrides")
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    if let Some(overrides_map) = overrides_node.as_object_mut() {
+                        for (module, mature_versions) in &overrides {
+                            let active_majors = if let Some(vers) = before_versions.get(module) {
+                                let mut majors = std::collections::HashSet::new();
+                                for v in vers {
+                                    if let Ok(ver) = semver::Version::parse(v) {
+                                        if ver.major == 0 {
+                                            majors.insert((0, ver.minor));
+                                        } else {
+                                            majors.insert((ver.major, 0));
+                                        }
                                     }
                                 }
-                            }
-                            majors
-                        } else {
-                            std::collections::HashSet::new()
-                        };
-
-                        for mature_version in mature_versions {
-                            let is_used = if mature_version.major == 0 {
-                                active_majors.contains(&(0, mature_version.minor))
+                                majors
                             } else {
-                                active_majors.contains(&(mature_version.major, 0))
+                                std::collections::HashSet::new()
                             };
 
-                            if is_used {
-                                let alias_name = format!(
-                                    "syz-force-{}-{}",
-                                    module.replace('@', "").replace('/', "-"),
-                                    mature_version
-                                );
-                                dev_deps_map.insert(
-                                    alias_name,
-                                    serde_json::Value::String(format!("npm:{}@^{}", module, mature_version)),
-                                );
-                                file_updated = true;
+                            for mature_version in mature_versions {
+                                let is_used = if mature_version.major == 0 {
+                                    active_majors.contains(&(0, mature_version.minor))
+                                } else {
+                                    active_majors.contains(&(mature_version.major, 0))
+                                };
+
+                                if is_used {
+                                    let req_prefix =
+                                        if mature_version.major == 0 { "~" } else { "^" };
+                                    overrides_map.insert(
+                                        format!("{}@{}", module, mature_version.major),
+                                        serde_json::Value::String(format!(
+                                            "{}{}",
+                                            req_prefix, mature_version
+                                        )),
+                                    );
+                                    file_updated = true;
+                                    injected_transitive = true;
+                                }
                             }
                         }
                     }
+                    pnpm_map.insert("overrides".to_string(), overrides_node);
                 }
-                obj.insert("devDependencies".to_string(), dev_deps);
+                obj.insert("pnpm".to_string(), pnpm);
 
                 if file_updated {
                     let updated_root_str = serde_json::to_string_pretty(&root_pkg)? + "\n";
                     let root_full_path = temp_dir.join("package.json");
                     fs::write(&root_full_path, &updated_root_str)?;
 
-                    // Update or insert modification for package.json
-                    if let Some(m) = all_modifications.iter_mut().find(|m| m.path == "package.json") {
-                        m.state = crate::core::engine::repository::FileState::Write(updated_root_str);
+                    if let Some(m) = package_json_modifications
+                        .iter_mut()
+                        .find(|m| m.path == "package.json")
+                    {
+                        m.state =
+                            crate::core::engine::repository::FileState::Write(updated_root_str);
                     } else {
-                        all_modifications.push(FileModification {
+                        package_json_modifications.push(FileModification {
                             path: "package.json".to_string(),
-                            state: crate::core::engine::repository::FileState::Write(updated_root_str),
+                            state: crate::core::engine::repository::FileState::Write(
+                                updated_root_str,
+                            ),
                         });
                     }
                 }
             }
         }
 
-        tracing::info!("Running pnpm install in temp directory to update lockfile with forced fixes...");
+        tracing::info!(
+            "Running pnpm install in temp directory to update lockfile with forced fixes..."
+        );
         let mut install_cmd = Command::new("pnpm");
         install_cmd
             .arg("install")
@@ -833,9 +850,80 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             tracing::warn!("pnpm dedupe failed, continuing anyway...");
         }
 
+        tracing::info!(
+            "Restoring original package.json files to discard pnpm.overrides changes..."
+        );
+        let mut all_modifications = Vec::new();
+
+        for (path, clean_json) in &clean_pkg_jsons {
+            let full_path = temp_dir.join(path);
+            let updated_pkg_json_str = serde_json::to_string_pretty(clean_json)? + "\n";
+            fs::write(&full_path, &updated_pkg_json_str)?;
+
+            if let Some(original) = original_pkg_jsons.get(path) {
+                if updated_pkg_json_str != *original {
+                    all_modifications.push(FileModification {
+                        path: path.clone(),
+                        state: crate::core::engine::repository::FileState::Write(
+                            updated_pkg_json_str,
+                        ),
+                    });
+                }
+            }
+        }
+
+        if injected_transitive {
+            tracing::info!("Running pnpm install --lockfile-only again to cleanly remove pnpm.overrides from lockfile...");
+            let mut final_install_cmd = Command::new("pnpm");
+            final_install_cmd
+                .arg("install")
+                .arg("--lockfile-only")
+                .arg("--ignore-scripts");
+
+            if workspace.is_some() {
+                final_install_cmd.arg("--recursive");
+            }
+
+            if !final_install_cmd.current_dir(temp_dir).status()?.success() {
+                tracing::warn!("Final pnpm install failed, continuing anyway...");
+            }
+        }
+
+        tracing::info!("Running pnpm audit --json for post-fix comparison...");
+        let after_audit_output = Command::new("pnpm")
+            .arg("audit")
+            .arg("--json")
+            .current_dir(temp_dir)
+            .output()?;
+
+        let after_json: serde_json::Value =
+            serde_json::from_slice(&after_audit_output.stdout).unwrap_or(serde_json::json!({}));
+
+        let mut after_advisories = std::collections::HashSet::new();
+        if let Some(advs) = after_json.get("advisories").and_then(|a| a.as_object()) {
+            for id in advs.keys() {
+                after_advisories.insert(id.clone());
+            }
+        }
+
+        let mut resolved_advisories = Vec::new();
+        for (id, adv) in &baseline_advisories {
+            if !after_advisories.contains(id) {
+                resolved_advisories.push(adv.clone());
+            }
+        }
+
+        if resolved_advisories.is_empty() {
+            tracing::info!("No vulnerabilities could be resolved.");
+            return Ok(None);
+        }
+
         let updated_lock = fs::read_to_string(temp_dir.join("pnpm-lock.yaml")).ok();
 
-        let mut pr_body = String::new();
+        let after_versions =
+            extract_versions_from_lock(updated_lock.as_deref().unwrap_or_default());
+
+        let mut pr_body = "This pull request automatically updates dependencies to resolve known security vulnerabilities.\n\n".to_string();
 
         if !blocked_by_age.is_empty() {
             pr_body.push_str("> [!WARNING]\n> The following vulnerable packages have fixes available, but they have not met the `minimumReleaseAge` requirement yet and were skipped:\n>\n");
@@ -850,27 +938,144 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
 
             for module in sorted_blocked {
                 let blocked_versions = blocked_by_age.get(&module).unwrap();
-                for (_ver, publish_time) in blocked_versions {
+                for (ver, publish_time) in blocked_versions {
                     let available_time = *publish_time + min_age;
                     let remaining = available_time.signed_duration_since(now).num_seconds();
                     let days = (remaining as f64 / 86400.0).ceil() as i64;
+
+                    let availability = if days > 1 {
+                        format!("in {} days", days)
+                    } else {
+                        format!("{} UTC", available_time.format("%A at %H:%M"))
+                    };
+
                     pr_body.push_str(&format!(
-                        "> - `{}`: mature in {} days\n",
-                        module,
-                        days
+                        "> - `{}` (`{}`): available {}\n",
+                        module, ver, availability
                     ));
                 }
             }
             pr_body.push_str("\n---\n\n");
         }
 
-        pr_body.push_str("### Fixed Vulnerabilities\n\n");
-        let mut sorted_overrides: Vec<String> = overrides.keys().cloned().collect();
-        sorted_overrides.sort();
-        for module in sorted_overrides {
-            let vers = overrides.get(&module).unwrap();
-            let vers_str = vers.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
-            pr_body.push_str(&format!("- `{}`: bumped to `{}`\n", module, vers_str));
+        let mut still_vulnerable = std::collections::HashSet::new();
+        for (id, _adv) in &baseline_advisories {
+            if after_advisories.contains(id) {
+                still_vulnerable.insert(id.clone());
+            }
+        }
+
+        if !still_vulnerable.is_empty() {
+            pr_body.push_str("> [!CAUTION]\n> The following packages are still vulnerable because no safe update could be applied (either no patch exists, or it was blocked by policy, or `pnpm dedupe` couldn't resolve the constraint tree):\n>\n");
+
+            let mut unresolved_by_module: std::collections::HashMap<
+                String,
+                Vec<serde_json::Value>,
+            > = std::collections::HashMap::new();
+            for id in &still_vulnerable {
+                if let Some(adv) = baseline_advisories.get(id) {
+                    if let Some(module) = adv.get("module_name").and_then(|m| m.as_str()) {
+                        unresolved_by_module
+                            .entry(module.to_string())
+                            .or_default()
+                            .push(adv.clone());
+                    }
+                }
+            }
+
+            let mut sorted_unresolved: Vec<String> = unresolved_by_module.keys().cloned().collect();
+            sorted_unresolved.sort();
+
+            for module in sorted_unresolved {
+                let advs = unresolved_by_module.get(&module).unwrap();
+                let mut unique_titles = std::collections::HashSet::new();
+                for adv in advs {
+                    if let Some(title) = adv.get("title").and_then(|t| t.as_str()) {
+                        unique_titles.insert(title.to_string());
+                    }
+                }
+
+                let mut titles: Vec<String> = unique_titles.into_iter().collect();
+                titles.sort();
+                let titles_str = titles.join(", ");
+
+                pr_body.push_str(&format!("> - `{}`: {}\n", module, titles_str));
+            }
+            pr_body.push_str("\n---\n\n");
+        }
+
+        let mut resolved_by_module: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+        for adv in resolved_advisories {
+            if let Some(module) = adv.get("module_name").and_then(|m| m.as_str()) {
+                resolved_by_module
+                    .entry(module.to_string())
+                    .or_default()
+                    .push(adv);
+            }
+        }
+
+        let mut sorted_modules: Vec<String> = resolved_by_module.keys().cloned().collect();
+        sorted_modules.sort();
+
+        for module_name in sorted_modules {
+            let advisories = resolved_by_module.get(&module_name).unwrap();
+            pr_body.push_str(&format!("### `{}`\n", module_name));
+
+            let before_set = before_versions.get(&module_name);
+            let after_set = after_versions.get(&module_name);
+
+            let mut before_list: Vec<String> = before_set
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            let mut after_list: Vec<String> = after_set
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            before_list.sort();
+            after_list.sort();
+
+            if before_list.is_empty() && after_list.is_empty() {
+                pr_body.push_str(&format!("- Bumped\n"));
+            } else {
+                let before_str = before_list.join(", ");
+                let after_str = after_list.join(", ");
+                pr_body.push_str(&format!("`{}` -> `{}`\n\n", before_str, after_str));
+            }
+
+            pr_body.push_str("Resolved advisories:\n");
+            let mut seen_advisories = std::collections::HashSet::new();
+            for adv in advisories {
+                let title = adv
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown Advisory");
+
+                let line =
+                    if let Some(gh_id) = adv.get("github_advisory_id").and_then(|i| i.as_str()) {
+                        let url = adv
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("https://github.com/advisories/{}", gh_id));
+                        format!("- [{}]({}) - {}\n", gh_id, url, title)
+                    } else if let Some(id) = adv.get("id").and_then(|i| {
+                        if i.is_number() {
+                            i.as_i64().map(|n| n.to_string())
+                        } else {
+                            i.as_str().map(|s| s.to_string())
+                        }
+                    }) {
+                        let url = adv.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                        format!("- [{}]({}) - {}\n", id, url, title)
+                    } else {
+                        format!("- {}\n", title)
+                    };
+
+                if seen_advisories.insert(line.clone()) {
+                    pr_body.push_str(&line);
+                }
+            }
+            pr_body.push_str("\n");
         }
 
         if let Some(lock) = updated_lock {
