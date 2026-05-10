@@ -9,7 +9,7 @@ use crate::core::engine::{DependencyUpdateOption, DiscoveredDependency};
 pub mod internal;
 
 use crate::core::engine::{UpdateTarget, repository::FileModification};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::fs;
 
 pub struct NpmScanner;
