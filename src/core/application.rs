@@ -399,6 +399,22 @@ impl Application {
         Box::new(crate::core::engine::pull_request_generator::DefaultPullRequestGenerator)
     }
 
+    pub fn release_notes_resolver(
+        &self,
+        package_name: &str,
+        repo_url: &str,
+    ) -> Option<Box<dyn crate::core::engine::releases::ReleaseNotesResolver>> {
+        if repo_url.contains("github.com") {
+            Some(Box::new(crate::core::clients::github_release_notes::GithubReleaseNotesResolver::new(
+                self.github.clone(),
+                package_name.to_string(),
+                repo_url.to_string(),
+            )))
+        } else {
+            None
+        }
+    }
+
     pub fn patcher(
         &self,
         ecosystem: &str,

@@ -159,6 +159,37 @@ impl GitHub {
         let response: serde_json::Value = self.octocrab.get(route, None::<&()>).await?;
         Ok(response)
     }
+
+    pub async fn get_foreign_file(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        let route = format!("/repos/{}/{}/contents/{}", owner, repo, path);
+        let response = match self.get_json(&route).await {
+            Ok(res) => res,
+            Err(e) => {
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("rate limit")
+                    || err_str.contains("forbidden")
+                    || err_str.contains("403")
+                {
+                    return Err(anyhow::anyhow!("GitHub API rate limit exceeded (403 Forbidden) fetching file via authenticated client"));
+                }
+                return Ok(None);
+            }
+        };
+
+        if let Some(content_base64) = response.get("content").and_then(|c| c.as_str()) {
+            let content_cleaned = content_base64.replace('\n', "");
+            let decoded = general_purpose::STANDARD.decode(content_cleaned)?;
+            let text = String::from_utf8(decoded)?;
+            Ok(Some(text))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 pub struct GitHubProjectRepositoryView {

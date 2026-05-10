@@ -1,6 +1,7 @@
 pub mod ecosystems;
 pub mod groups;
 pub mod pull_request_generator;
+pub mod releases;
 pub mod repository;
 
 /// Pacakge URL
