@@ -1,10 +1,6 @@
 use crate::core::engine::UpdateTarget;
 
-pub fn generate_title(
-    package_group: &str,
-    targets: &[UpdateTarget],
-    is_major: bool,
-) -> String {
+pub fn generate_title(package_group: &str, targets: &[UpdateTarget], is_major: bool) -> String {
     let mut title = if targets.len() == 1 {
         let target = &targets[0];
         let clean_new = target.target_version.version.clone();
@@ -61,7 +57,7 @@ pub fn generate_title(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::engine::{RequirementVersion, PackageInfo};
+    use crate::core::engine::{PackageInfo, RequirementVersion};
 
     fn make_target(name: &str, current: &str, target: &str) -> UpdateTarget {
         UpdateTarget {

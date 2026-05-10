@@ -10,11 +10,8 @@ pub mod title;
 
 use context::PullRequestGenerationContext;
 use sections::{
-    advisories::AdvisoriesSection,
-    history::HistorySection,
-    policy::PolicySection,
-    summary::SummarySection,
-    PullRequestSectionGenerator,
+    advisories::AdvisoriesSection, history::HistorySection, policy::PolicySection,
+    summary::SummarySection, PullRequestSectionGenerator,
 };
 
 #[async_trait]

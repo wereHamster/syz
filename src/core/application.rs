@@ -9,6 +9,7 @@ use super::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
 };
 use super::clients::github::GitHub;
+use super::clients::tangled::Tangled;
 use super::database::{pk, Bump, BumpDep, Database, Dependency, Package, Project};
 
 use super::engine::ecosystems::{
@@ -29,6 +30,7 @@ pub struct Application {
 
     http_agent: HttpAgent,
     github: GitHub,
+    tangled: Tangled,
 }
 
 impl Application {
@@ -40,6 +42,7 @@ impl Application {
 
         let http_agent = HttpAgent::new();
         let github = GitHub::new().await?;
+        let tangled = Tangled::new().await?;
 
         Ok(Self {
             handle: Handle {
@@ -52,6 +55,7 @@ impl Application {
 
             http_agent,
             github,
+            tangled,
         })
     }
 
@@ -141,6 +145,17 @@ impl Application {
                 let repo = parts[1].to_string();
 
                 let view = self.github.project_repository_view(owner, repo).await?;
+                Ok(Box::new(view))
+            }
+            "tangled" => {
+                let parts: Vec<&str> = project.repository.split('/').collect();
+                if parts.len() != 2 {
+                    anyhow::bail!("Repository must be in the format owner/repo");
+                }
+                let owner = parts[0].to_string();
+                let repo = parts[1].to_string();
+
+                let view = self.tangled.project_repository_view(owner, repo).await?;
                 Ok(Box::new(view))
             }
             _ => {
@@ -382,6 +397,18 @@ impl Application {
                 let repo = parts[1].to_string();
 
                 let mutator = self.github.project_repository_mutator(owner, repo).await?;
+
+                Ok(Box::new(mutator))
+            }
+            "tangled" => {
+                let parts: Vec<&str> = project.repository.split('/').collect();
+                if parts.len() != 2 {
+                    anyhow::bail!("Repository must be in the format owner/repo");
+                }
+                let owner = parts[0].to_string();
+                let repo = parts[1].to_string();
+
+                let mutator = self.tangled.project_repository_mutator(owner, repo).await?;
 
                 Ok(Box::new(mutator))
             }

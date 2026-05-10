@@ -18,7 +18,11 @@ impl PullRequestSectionGenerator for SummarySection {
             let target = &targets[0];
             let mut repo_url = target.package_info.repo_url.clone().unwrap_or_default();
             if repo_url.is_empty() {
-                if let Ok(info) = ctx.registry_router.fetch_package_info(ecosystem, &target.name).await {
+                if let Ok(info) = ctx
+                    .registry_router
+                    .fetch_package_info(ecosystem, &target.name)
+                    .await
+                {
                     repo_url = info.repo_url.unwrap_or_default();
                 }
             }
@@ -39,9 +43,17 @@ impl PullRequestSectionGenerator for SummarySection {
             }
         } else if !targets.is_empty() {
             let first_target = &targets[0];
-            let mut first_repo_url = first_target.package_info.repo_url.clone().unwrap_or_default();
+            let mut first_repo_url = first_target
+                .package_info
+                .repo_url
+                .clone()
+                .unwrap_or_default();
             if first_repo_url.is_empty() {
-                if let Ok(info) = ctx.registry_router.fetch_package_info(ecosystem, &first_target.name).await {
+                if let Ok(info) = ctx
+                    .registry_router
+                    .fetch_package_info(ecosystem, &first_target.name)
+                    .await
+                {
                     first_repo_url = info.repo_url.unwrap_or_default();
                 }
             }
@@ -78,7 +90,11 @@ impl PullRequestSectionGenerator for SummarySection {
                 for target in targets {
                     let mut repo_url = target.package_info.repo_url.clone().unwrap_or_default();
                     if repo_url.is_empty() {
-                        if let Ok(info) = ctx.registry_router.fetch_package_info(ecosystem, &target.name).await {
+                        if let Ok(info) = ctx
+                            .registry_router
+                            .fetch_package_info(ecosystem, &target.name)
+                            .await
+                        {
                             repo_url = info.repo_url.unwrap_or_default();
                         }
                     }
