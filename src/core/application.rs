@@ -279,6 +279,26 @@ impl Application {
         Ok(())
     }
 
+    pub async fn approve_bump(&self, bump_id: &str) -> Result<()> {
+        let conn = self.handle.database.conn()?;
+        conn.execute(
+            "UPDATE bump SET approved = 1 WHERE id = ?",
+            params![bump_id.to_string()],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn retract_bump_approval(&self, bump_id: &str) -> Result<()> {
+        let conn = self.handle.database.conn()?;
+        conn.execute(
+            "UPDATE bump SET approved = 0 WHERE id = ?",
+            params![bump_id.to_string()],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn run(mut self) -> Result<()> {
         while let Some(msg) = self.mailbox.recv().await {
             tracing::info!("Processing message {}", msg.message_id);
@@ -429,6 +449,29 @@ impl Query {
         }
 
         Ok(bumps)
+    }
+
+    pub async fn bump(&self, bump_id: &str) -> Result<Bump> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT id, project_id, name, major, approved, url FROM bump WHERE id = ?1")
+            .await?;
+
+        let mut rows = stmt.query((bump_id,)).await?;
+
+        if let Some(row) = rows.next().await? {
+            return Ok(Bump {
+                id: row.get(0).unwrap_or_default(),
+                project_id: row.get(1).unwrap_or_default(),
+                name: row.get(2).unwrap_or_default(),
+                major: row.get(3).unwrap_or_default(),
+                approved: row.get(4).unwrap_or_default(),
+                url: row.get(5).unwrap_or_default(),
+            });
+        }
+
+        Err(anyhow::anyhow!("Bump not found"))
     }
 
     pub async fn list_bumpdeps(&self) -> Result<Vec<BumpDep>> {

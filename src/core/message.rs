@@ -27,6 +27,14 @@ pub enum Payload {
     /// dependencies are outdated, and update the local database with the information.
     AnalyzeProjectDependencies { project_id: String },
 
+    /// Approve a Bump to be processed. This only updates the database but does not
+    /// schedule the actual update task.
+    ApproveBump { bump_id: String },
+
+    /// Retract previous approval of a bump. This only updates the database but does not
+    /// cancel any inflight updates.
+    RetractBumpApproval { bump_id: String },
+
     #[serde(skip)]
     PersistAnalyzedProjectDependencies {
         project_id: String,
@@ -96,6 +104,34 @@ impl Payload {
 
             Payload::AnalyzeProjectDependencies { project_id } => {
                 super::actions::analyze_project_dependencies::run(app, project_id.clone()).await
+            }
+
+            Payload::ApproveBump { bump_id } => {
+                app.approve_bump(bump_id).await?;
+
+                let bump = app.query().bump(bump_id).await?;
+                app.handle().broadcast(crate::core::event::Event::Commit {
+                    ops: vec![crate::core::event::Op::Upsert {
+                        path: format!("bump/{}", bump.id),
+                        data: serde_json::to_value(bump).unwrap_or_default(),
+                    }],
+                })?;
+
+                Ok(())
+            }
+
+            Payload::RetractBumpApproval { bump_id } => {
+                app.retract_bump_approval(bump_id).await?;
+
+                let bump = app.query().bump(bump_id).await?;
+                app.handle().broadcast(crate::core::event::Event::Commit {
+                    ops: vec![crate::core::event::Op::Upsert {
+                        path: format!("bump/{}", bump.id),
+                        data: serde_json::to_value(bump).unwrap_or_default(),
+                    }],
+                })?;
+
+                Ok(())
             }
 
             Payload::PersistAnalyzedProjectDependencies {
