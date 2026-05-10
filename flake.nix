@@ -28,6 +28,7 @@
             rust-analyzer
 
             turso
+            pnpm
           ];
         };
       }
