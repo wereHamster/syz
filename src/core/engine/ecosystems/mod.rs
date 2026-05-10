@@ -29,6 +29,21 @@ pub trait Registry: Send + Sync {
         &self,
         dependency: &DiscoveredDependency,
     ) -> Result<DependencyUpdateOption>;
+
+    /// Fetches the metadata for a package, such as its source repository URL.
+    async fn fetch_package_info(&self, _name: &str) -> Result<crate::core::engine::PackageInfo> {
+        Ok(crate::core::engine::PackageInfo { repo_url: None })
+    }
+
+    /// Fetches the timeline of releases between the current and target version.
+    async fn fetch_release_history(
+        &self,
+        _name: &str,
+        _current_version: &str,
+        _target_version: &str,
+    ) -> Result<Vec<crate::core::engine::Release>> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]

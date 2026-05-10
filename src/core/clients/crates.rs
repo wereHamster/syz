@@ -15,6 +15,24 @@ pub struct Crates {
     http_agent: HttpAgent,
 }
 
+#[derive(serde::Deserialize)]
+struct CratesIoResponse {
+    #[serde(rename = "crate")]
+    crate_data: CrateData,
+    versions: Vec<CrateVersion>,
+}
+
+#[derive(serde::Deserialize)]
+struct CrateData {
+    repository: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CrateVersion {
+    num: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
 impl Crates {
     pub fn new(http_agent: HttpAgent) -> Self {
         Self { http_agent }
@@ -62,6 +80,49 @@ impl Crates {
 
         versions.sort();
         Ok(versions)
+    }
+
+    pub async fn get_release_history(
+        &self,
+        name: &str,
+        clean_current: &str,
+        clean_new: &str,
+    ) -> Result<Vec<crate::core::engine::Release>> {
+        let url = format!("https://crates.io/api/v1/crates/{}", name);
+        let data: CratesIoResponse = self.http_agent.json(&url).await?;
+
+        let mut history = Vec::new();
+        let target_ver = semver::Version::parse(clean_new)
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        let current_ver = semver::Version::parse(clean_current)
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+
+        for v in data.versions {
+            if let Ok(parsed) = semver::Version::parse(&v.num) {
+                if parsed >= current_ver && parsed <= target_ver {
+                    history.push(crate::core::engine::Release {
+                        version: v.num,
+                        publish_time: v.created_at,
+                    });
+                }
+            }
+        }
+
+        history.sort_by(|a, b| b.publish_time.cmp(&a.publish_time));
+
+        Ok(history)
+    }
+
+    pub async fn get_package_info(
+        &self,
+        name: &str,
+    ) -> Result<crate::core::engine::PackageInfo> {
+        let url = format!("https://crates.io/api/v1/crates/{}", name);
+        let data: CratesIoResponse = self.http_agent.json(&url).await?;
+
+        Ok(crate::core::engine::PackageInfo {
+            repo_url: data.crate_data.repository,
+        })
     }
 
     pub async fn get_versions(&self, name: &str, req: &str) -> Result<VersionData> {

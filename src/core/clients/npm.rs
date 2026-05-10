@@ -36,12 +36,81 @@ impl Npm {
         Ok(response)
     }
 
+    pub async fn get_release_history(
+        &self,
+        package: &str,
+        current: &str,
+        target: &str,
+    ) -> Result<Vec<crate::core::engine::Release>> {
+        let response = self.get_registry_response(package).await?;
+
+        let current_ver = semver::Version::parse(current.trim_start_matches(['^', '~', '=', 'v']))
+            .context("Failed to parse current version")?;
+        let target_ver = semver::Version::parse(target.trim_start_matches(['^', '~', '=', 'v']))
+            .context("Failed to parse target version")?;
+
+        let mut releases = Vec::new();
+
+        for (version_str, time_str) in &response.time {
+            // Ignore npm tags like 'created', 'modified'
+            if version_str == "created" || version_str == "modified" {
+                continue;
+            }
+
+            if let Ok(ver) = semver::Version::parse(version_str) {
+                if ver >= current_ver && ver <= target_ver {
+                    if let Ok(publish_time) = chrono::DateTime::parse_from_rfc3339(time_str) {
+                        releases.push(crate::core::engine::Release {
+                            version: version_str.clone(),
+                            publish_time: publish_time.with_timezone(&chrono::Utc),
+                        });
+                    }
+                }
+            }
+        }
+
+        releases.sort_by(|a, b| b.publish_time.cmp(&a.publish_time));
+
+        Ok(releases)
+    }
+
+    pub async fn get_package_info(
+        &self,
+        package: &str,
+    ) -> Result<crate::core::engine::PackageInfo> {
+        let response = self.get_registry_response(package).await?;
+
+        let repo_url = response.repository.and_then(|repo| {
+            let raw_url = if let Some(url) = repo.as_str() {
+                Some(url.to_string())
+            } else if let Some(repo_obj) = repo.as_object() {
+                repo_obj
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+
+            raw_url.map(|u| {
+                let mut sanitized = u.replace("git+", "").replace(".git", "");
+                if sanitized.starts_with("git://") {
+                    sanitized = sanitized.replace("git://", "https://");
+                }
+                sanitized
+            })
+        });
+
+        Ok(crate::core::engine::PackageInfo { repo_url })
+    }
+
     pub async fn get_versions(
         &self,
         package: &str,
         current_version: Option<&str>,
         minimum_release_age: Option<chrono::Duration>,
     ) -> Result<VersionData> {
+
         let response = self.get_registry_response(package).await?;
 
         let repo_url = response.repository.and_then(|repo| {

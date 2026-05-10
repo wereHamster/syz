@@ -38,4 +38,19 @@ impl Registry for GitHubRegistry {
     ) -> Result<DependencyUpdateOption> {
         internal::query_dependency_update_options::run(self.github_client.clone(), dependency).await
     }
+
+    async fn fetch_package_info(&self, name: &str) -> Result<crate::core::engine::PackageInfo> {
+        self.github_client.get_package_info(name).await
+    }
+
+    async fn fetch_release_history(
+        &self,
+        name: &str,
+        current_version: &str,
+        target_version: &str,
+    ) -> Result<Vec<crate::core::engine::Release>> {
+        self.github_client
+            .get_release_history(name, current_version, target_version)
+            .await
+    }
 }

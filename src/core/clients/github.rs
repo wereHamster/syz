@@ -36,6 +36,76 @@ impl GitHub {
         Ok(GitHub { octocrab })
     }
 
+    pub async fn get_release_history(
+        &self,
+        name: &str,
+        clean_current: &str,
+        clean_new: &str,
+    ) -> Result<Vec<crate::core::engine::Release>> {
+        let parts: Vec<&str> = name.split('/').collect();
+        if parts.len() < 2 {
+            return Ok(Vec::new());
+        }
+        let owner = parts[0];
+        let repo = parts[1];
+
+        let route = format!("/repos/{}/{}/releases", owner, repo);
+        let res = match self.get_json(&route).await {
+            Ok(v) => v,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        #[derive(serde::Deserialize)]
+        struct GithubRelease {
+            tag_name: String,
+            published_at: Option<chrono::DateTime<chrono::Utc>>,
+        }
+
+        let releases: Vec<GithubRelease> = serde_json::from_value(res)?;
+        let mut history = Vec::new();
+
+        fn coerce_version(ver_str: &str) -> Option<semver::Version> {
+            let s = ver_str.trim_start_matches(['v', '^', '~', '=']);
+            semver::Version::parse(s).ok()
+        }
+
+        let old_ver = coerce_version(clean_current).unwrap_or_else(|| semver::Version::new(0, 0, 0));
+        let new_ver = coerce_version(clean_new).unwrap_or_else(|| semver::Version::new(0, 0, 0));
+
+        for rel in releases {
+            let ver_str = rel.tag_name.trim_start_matches('v');
+            if let Some(ver) = coerce_version(ver_str) {
+                if ver >= old_ver && ver <= new_ver {
+                    history.push(crate::core::engine::Release {
+                        version: rel.tag_name.clone(),
+                        publish_time: rel.published_at.unwrap_or_else(chrono::Utc::now),
+                    });
+                }
+            }
+        }
+
+        history.sort_by(|a, b| b.publish_time.cmp(&a.publish_time));
+
+        Ok(history)
+    }
+
+    pub async fn get_package_info(
+        &self,
+        name: &str,
+    ) -> Result<crate::core::engine::PackageInfo> {
+        let parts: Vec<&str> = name.split('/').collect();
+        if parts.len() < 2 {
+            return Ok(crate::core::engine::PackageInfo { repo_url: None });
+        }
+        let owner = parts[0];
+        let repo = parts[1];
+
+        let url = format!("https://github.com/{}/{}", owner, repo);
+        Ok(crate::core::engine::PackageInfo {
+            repo_url: Some(url),
+        })
+    }
+
     pub async fn project_repository_view(
         &self,
         owner: String,
@@ -543,4 +613,3 @@ impl ProjectRepositoryMutator for GitHubProjectRepositoryMutator {
         Ok(())
     }
 }
-
