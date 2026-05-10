@@ -151,4 +151,19 @@ pub struct UpdateTarget {
     pub target_version: RequirementVersion,
     pub latest_version: String,
     pub package_info: PackageInfo,
+    pub minimum_release_age: Option<chrono::Duration>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Release {
+    pub version: String,
+    pub publish_time: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Advisory {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub severity: String,
 }

@@ -598,7 +598,7 @@ impl Query {
 
         let mut stmt = conn
             .prepare(
-                "SELECT p.name, d.specifier, p.version, p.type, bd.target_version, bd.head_version, NULL as repo_url, p.namespace, p.subpath
+                "SELECT p.name, d.specifier, p.version, p.type, bd.target_version, bd.head_version, NULL as repo_url, p.namespace, p.subpath, bd.minimum_release_age
                  FROM bumpdep bd
                  JOIN dependency d ON bd.dependency_id = d.id
                  JOIN package p ON d.package_id = p.id
@@ -610,6 +610,7 @@ impl Query {
         let mut targets = Vec::new();
 
         while let Some(row) = rows.next().await? {
+            let minimum_release_age_secs: Option<i64> = row.get(9).unwrap_or_default();
             targets.push(BumpTargetData {
                 name: row.get(0).unwrap_or_default(),
                 specifier: row.get(1).unwrap_or_default(),
@@ -620,6 +621,7 @@ impl Query {
                 repo_url: row.get(6).unwrap_or_default(),
                 namespace: row.get(7).unwrap_or_default(),
                 subpath: row.get(8).unwrap_or_default(),
+                minimum_release_age: minimum_release_age_secs.map(chrono::Duration::seconds),
             });
         }
 
@@ -637,4 +639,5 @@ pub struct BumpTargetData {
     pub repo_url: Option<String>,
     pub namespace: Option<String>,
     pub subpath: Option<String>,
+    pub minimum_release_age: Option<chrono::Duration>,
 }

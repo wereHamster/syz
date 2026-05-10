@@ -48,6 +48,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
                 package_info: PackageInfo {
                     repo_url: row.repo_url,
                 },
+                minimum_release_age: row.minimum_release_age,
             });
         }
     }
