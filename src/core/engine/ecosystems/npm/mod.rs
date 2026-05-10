@@ -59,7 +59,15 @@ impl Registry for NpmRegistry {
     }
 }
 
-pub struct NpmPatcher;
+pub struct NpmPatcher {
+    npm_client: clients::npm::Npm,
+}
+
+impl NpmPatcher {
+    pub fn new(npm_client: clients::npm::Npm) -> Self {
+        Self { npm_client }
+    }
+}
 
 #[async_trait]
 impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
@@ -509,6 +517,380 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             modifications,
             summary: pr_body,
         }))
+    }
+    async fn update_vulnerable_dependencies(
+        &self,
+        snapshot: &dyn ProjectRepositorySnapshot,
+        temp_dir: &std::path::Path,
+    ) -> Result<Option<crate::core::engine::TransitiveUpdateResult>> {
+        let workspace = snapshot.read_file("pnpm-workspace.yaml").await.ok();
+        let lockfile = snapshot.read_file("pnpm-lock.yaml").await.ok();
+
+        let mut minimum_release_age = None;
+        if let Some(ref w_content) = workspace {
+            // Very simple extraction, normally we'd parse the WorkspaceConfig properly
+            if let Ok(val) = serde_yml::from_str::<serde_yml::Value>(w_content) {
+                if let Some(age) = val.get("minimum_release_age").and_then(|v| v.as_i64()) {
+                    minimum_release_age = Some(chrono::Duration::minutes(age));
+                }
+            }
+        }
+
+        tracing::info!("Fetching repository tree for NPM audit...");
+        let files = snapshot.list_files().await?;
+
+        let mut pkg_json_paths_vec = Vec::new();
+        for path in &files {
+            if path.ends_with("package.json") {
+                pkg_json_paths_vec.push(path.to_string());
+            }
+        }
+
+        if pkg_json_paths_vec.is_empty() {
+            return Ok(None);
+        }
+
+        let mut original_pkg_jsons = std::collections::HashMap::new();
+        let mut mutable_pkg_jsons = std::collections::HashMap::new();
+
+        for path in &pkg_json_paths_vec {
+            if let Ok(content) = snapshot.read_file(path).await {
+                original_pkg_jsons.insert(path.clone(), content.clone());
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    mutable_pkg_jsons.insert(path.clone(), val);
+                }
+                let full_path = temp_dir.join(path);
+                if let Some(parent) = full_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&full_path, content)?;
+            }
+        }
+
+        if let Some(ref w) = workspace {
+            fs::write(temp_dir.join("pnpm-workspace.yaml"), w)?;
+        }
+        if let Some(ref l) = lockfile {
+            fs::write(temp_dir.join("pnpm-lock.yaml"), l)?;
+        }
+
+        tracing::info!("Running pnpm install --lockfile-only to set baseline...");
+        let mut cmd = Command::new("pnpm");
+        cmd.arg("install")
+            .arg("--lockfile-only")
+            .arg("--ignore-scripts");
+
+        if workspace.is_some() {
+            cmd.arg("--recursive");
+        }
+
+        if !cmd.current_dir(temp_dir).status()?.success() {
+            tracing::warn!("pnpm install failed, continuing anyway...");
+        }
+
+        tracing::info!("Running pnpm audit --json for baseline...");
+        let baseline_audit_output = Command::new("pnpm")
+            .arg("audit")
+            .arg("--json")
+            .current_dir(temp_dir)
+            .output()?;
+
+        let baseline_json: serde_json::Value =
+            serde_json::from_slice(&baseline_audit_output.stdout).unwrap_or(serde_json::json!({}));
+
+        let mut baseline_advisories = std::collections::HashMap::new();
+        if let Some(advs) = baseline_json.get("advisories").and_then(|a| a.as_object()) {
+            for (id, adv) in advs {
+                baseline_advisories.insert(id.clone(), adv.clone());
+            }
+        }
+
+        if baseline_advisories.is_empty() {
+            tracing::info!("No vulnerabilities found in baseline.");
+            return Ok(None);
+        }
+
+        tracing::info!(
+            "Found {} vulnerabilities. Discovering mature fixes...",
+            baseline_advisories.len()
+        );
+
+        let mut overrides = std::collections::HashMap::new();
+        let mut module_to_vulnerable_versions = std::collections::HashMap::new();
+        let mut blocked_by_age: std::collections::HashMap<
+            String,
+            Vec<(semver::Version, chrono::DateTime<chrono::Utc>)>,
+        > = std::collections::HashMap::new();
+
+        for (_id, adv) in &baseline_advisories {
+            if let (Some(module), Some(vulnerable)) = (
+                adv.get("module_name").and_then(|m| m.as_str()),
+                adv.get("vulnerable_versions").and_then(|p| p.as_str()),
+            ) {
+                module_to_vulnerable_versions
+                    .entry(module.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(vulnerable.to_string());
+            }
+        }
+
+        for (module, vulnerable_list) in module_to_vulnerable_versions {
+            match self.npm_client
+                .resolve_mature_version(&module, &vulnerable_list, minimum_release_age.clone())
+                .await
+            {
+                Ok(resolution) => {
+                    let resolved_empty = resolution.resolved.is_empty();
+                    let blocked_empty = resolution.blocked.is_empty();
+
+                    if !resolved_empty {
+                        tracing::info!(
+                            "Found mature fixes for {}: {:?}",
+                            module,
+                            resolution.resolved
+                        );
+                        overrides.insert(module.clone(), resolution.resolved);
+                    }
+                    if !blocked_empty {
+                        tracing::info!(
+                            "Fixes for {} are blocked by age policy: {:?}",
+                            module,
+                            resolution
+                                .blocked
+                                .iter()
+                                .map(|(v, _)| v.to_string())
+                                .collect::<Vec<_>>()
+                        );
+                        blocked_by_age.insert(module.clone(), resolution.blocked);
+                    }
+
+                    if resolved_empty && blocked_empty {
+                        tracing::warn!(
+                            "No mature fix found for {} satisfying vulnerabilities {:?}",
+                            module,
+                            vulnerable_list
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error resolving mature fix for {}: {}", module, e);
+                }
+            }
+        }
+
+        if overrides.is_empty() {
+            tracing::info!("No mature fixes could be found for any vulnerabilities.");
+            return Ok(None);
+        }
+
+        tracing::info!("Applying fixes to package.json files...");
+
+        let mut all_modifications = Vec::new();
+
+        for (path, pkg_json) in mutable_pkg_jsons.iter_mut() {
+            let mut file_updated = false;
+            for (module, mature_versions) in &overrides {
+                for key in ["dependencies", "devDependencies"] {
+                    if let Some(deps) = pkg_json.get_mut(key).and_then(|d| d.as_object_mut()) {
+                        if let Some(req_val) = deps.get(module) {
+                            if let Some(req) = req_val.as_str() {
+                                let clean_req = req.trim_start_matches(&['^', '~', '=', 'v'][..]);
+                                let current_ver = match semver::Version::parse(clean_req) {
+                                    Ok(v) => v,
+                                    Err(_) => continue, // Cannot parse, skip
+                                };
+
+                                let mut target_mature_version = None;
+                                for mv in mature_versions {
+                                    if current_ver.major == 0 {
+                                        if mv.major == 0 && mv.minor == current_ver.minor {
+                                            target_mature_version = Some(mv);
+                                        }
+                                    } else if mv.major == current_ver.major {
+                                        target_mature_version = Some(mv);
+                                    }
+                                }
+
+                                if let Some(mature_version) = target_mature_version {
+                                    let prefix = if req.starts_with('^') {
+                                        "^"
+                                    } else if req.starts_with('~') {
+                                        "~"
+                                    } else {
+                                        ""
+                                    };
+                                    let new_req = format!("{}{}", prefix, mature_version);
+                                    deps.insert(module.to_string(), serde_json::Value::String(new_req));
+                                    file_updated = true;
+                                } else {
+                                    tracing::warn!("Skipping direct dependency bump for {} in {} because no mature fix exists in major version {}", module, path, current_ver.major);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if file_updated {
+                let updated_pkg_json_str = serde_json::to_string_pretty(pkg_json)? + "\n";
+                let full_path = temp_dir.join(path);
+                fs::write(&full_path, &updated_pkg_json_str)?;
+                all_modifications.push(FileModification {
+                    path: path.clone(),
+                    state: crate::core::engine::repository::FileState::Write(updated_pkg_json_str),
+                });
+            }
+        }
+
+        let before_versions = extract_versions_from_lock(&lockfile.clone().unwrap_or_default());
+
+        if let Some(root_pkg) = mutable_pkg_jsons.get_mut("package.json") {
+            let mut file_updated = false;
+            if let Some(obj) = root_pkg.as_object_mut() {
+                let mut dev_deps = obj
+                    .remove("devDependencies")
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(dev_deps_map) = dev_deps.as_object_mut() {
+                    for (module, mature_versions) in &overrides {
+                        let active_majors = if let Some(vers) = before_versions.get(module) {
+                            let mut majors = std::collections::HashSet::new();
+                            for v in vers {
+                                if let Ok(ver) = semver::Version::parse(v) {
+                                    if ver.major == 0 {
+                                        majors.insert((0, ver.minor));
+                                    } else {
+                                        majors.insert((ver.major, 0));
+                                    }
+                                }
+                            }
+                            majors
+                        } else {
+                            std::collections::HashSet::new()
+                        };
+
+                        for mature_version in mature_versions {
+                            let is_used = if mature_version.major == 0 {
+                                active_majors.contains(&(0, mature_version.minor))
+                            } else {
+                                active_majors.contains(&(mature_version.major, 0))
+                            };
+
+                            if is_used {
+                                let alias_name = format!(
+                                    "syz-force-{}-{}",
+                                    module.replace('@', "").replace('/', "-"),
+                                    mature_version
+                                );
+                                dev_deps_map.insert(
+                                    alias_name,
+                                    serde_json::Value::String(format!("npm:{}@^{}", module, mature_version)),
+                                );
+                                file_updated = true;
+                            }
+                        }
+                    }
+                }
+                obj.insert("devDependencies".to_string(), dev_deps);
+
+                if file_updated {
+                    let updated_root_str = serde_json::to_string_pretty(&root_pkg)? + "\n";
+                    let root_full_path = temp_dir.join("package.json");
+                    fs::write(&root_full_path, &updated_root_str)?;
+
+                    // Update or insert modification for package.json
+                    if let Some(m) = all_modifications.iter_mut().find(|m| m.path == "package.json") {
+                        m.state = crate::core::engine::repository::FileState::Write(updated_root_str);
+                    } else {
+                        all_modifications.push(FileModification {
+                            path: "package.json".to_string(),
+                            state: crate::core::engine::repository::FileState::Write(updated_root_str),
+                        });
+                    }
+                }
+            }
+        }
+
+        tracing::info!("Running pnpm install in temp directory to update lockfile with forced fixes...");
+        let mut install_cmd = Command::new("pnpm");
+        install_cmd
+            .arg("install")
+            .arg("--lockfile-only")
+            .arg("--ignore-scripts");
+
+        if workspace.is_some() {
+            install_cmd.arg("--recursive");
+        }
+
+        if !install_cmd.current_dir(temp_dir).status()?.success() {
+            tracing::warn!("pnpm install failed, continuing anyway...");
+        }
+
+        tracing::info!("Running pnpm dedupe...");
+        let mut dedupe_cmd = Command::new("pnpm");
+        dedupe_cmd.arg("dedupe").arg("--ignore-scripts");
+        let dedupe_status = dedupe_cmd.current_dir(temp_dir).status()?;
+        if !dedupe_status.success() {
+            tracing::warn!("pnpm dedupe failed, continuing anyway...");
+        }
+
+        let updated_lock = fs::read_to_string(temp_dir.join("pnpm-lock.yaml")).ok();
+
+        let mut pr_body = String::new();
+
+        if !blocked_by_age.is_empty() {
+            pr_body.push_str("> [!WARNING]\n> The following vulnerable packages have fixes available, but they have not met the `minimumReleaseAge` requirement yet and were skipped:\n>\n");
+
+            let mut sorted_blocked: Vec<String> = blocked_by_age.keys().cloned().collect();
+            sorted_blocked.sort();
+
+            let now = chrono::Utc::now();
+            let min_age = minimum_release_age
+                .clone()
+                .unwrap_or(chrono::Duration::zero());
+
+            for module in sorted_blocked {
+                let blocked_versions = blocked_by_age.get(&module).unwrap();
+                for (_ver, publish_time) in blocked_versions {
+                    let available_time = *publish_time + min_age;
+                    let remaining = available_time.signed_duration_since(now).num_seconds();
+                    let days = (remaining as f64 / 86400.0).ceil() as i64;
+                    pr_body.push_str(&format!(
+                        "> - `{}`: mature in {} days\n",
+                        module,
+                        days
+                    ));
+                }
+            }
+            pr_body.push_str("\n---\n\n");
+        }
+
+        pr_body.push_str("### Fixed Vulnerabilities\n\n");
+        let mut sorted_overrides: Vec<String> = overrides.keys().cloned().collect();
+        sorted_overrides.sort();
+        for module in sorted_overrides {
+            let vers = overrides.get(&module).unwrap();
+            let vers_str = vers.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+            pr_body.push_str(&format!("- `{}`: bumped to `{}`\n", module, vers_str));
+        }
+
+        if let Some(lock) = updated_lock {
+            let old_lock = lockfile.unwrap_or_default();
+            if lock != old_lock {
+                all_modifications.push(FileModification {
+                    path: "pnpm-lock.yaml".to_string(),
+                    state: crate::core::engine::repository::FileState::Write(lock),
+                });
+            }
+        }
+
+        if all_modifications.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(crate::core::engine::TransitiveUpdateResult {
+                modifications: all_modifications,
+                summary: pr_body,
+            }))
+        }
     }
 }
 

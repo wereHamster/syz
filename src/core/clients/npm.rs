@@ -30,6 +30,58 @@ impl Npm {
         Self { agent }
     }
 
+    pub async fn resolve_mature_version(
+        &self,
+        package: &str,
+        vulnerable_constraints: &[String],
+        minimum_release_age: Option<chrono::Duration>,
+    ) -> Result<crate::core::version_resolver::MatureResolution> {
+        let response = self.get_registry_response(package).await?;
+
+        // The npm registry sometimes uses spaces in constraints (e.g. ">=4.17.21 <5.0.0")
+        // but the Rust `semver` crate expects commas.
+        let mut parsed_reqs = Vec::new();
+        for constraint in vulnerable_constraints {
+            let cleaned_constraint = constraint.replace(" ", ", ");
+            let req = semver::VersionReq::parse(&cleaned_constraint).map_err(|e| {
+                anyhow::anyhow!("Failed to parse constraint '{}': {}", cleaned_constraint, e)
+            })?;
+            parsed_reqs.push(req);
+        }
+
+        let mut available_releases = Vec::new();
+
+        for (version_str, time_str) in &response.time {
+            // Skip metadata keys in the time object
+            if version_str == "modified" || version_str == "created" || version_str == "unpublished"
+            {
+                continue;
+            }
+
+            let parsed_time = match DateTime::parse_from_rfc3339(time_str) {
+                Ok(t) => t.with_timezone(&Utc),
+                Err(_) => continue, // Skip if time is unparseable
+            };
+
+            if let Ok(ver) = Version::parse(version_str) {
+                if ver.pre.is_empty() {
+                    available_releases.push(crate::core::version_resolver::AvailableRelease {
+                        version: ver,
+                        published_at: parsed_time,
+                    });
+                }
+            }
+        }
+
+        let resolution = crate::core::version_resolver::resolve_mature_versions(
+            &parsed_reqs,
+            &available_releases,
+            minimum_release_age,
+        );
+
+        Ok(resolution)
+    }
+
     async fn get_registry_response(&self, package: &str) -> Result<RegistryResponse> {
         let url = format!("https://registry.npmjs.org/{}", package);
         let response: RegistryResponse = self.agent.json(&url).await?;

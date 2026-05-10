@@ -446,7 +446,9 @@ impl Application {
         vec![
             (
                 "npm",
-                Box::new(crate::core::engine::ecosystems::npm::NpmPatcher),
+                Box::new(crate::core::engine::ecosystems::npm::NpmPatcher::new(
+                    crate::core::clients::npm::Npm::new(self.http_agent.clone()),
+                )),
             ),
             // cargo doesn't have a patcher yet in application.rs, but we can add it later if needed
         ]
@@ -457,7 +459,11 @@ impl Application {
         ecosystem: &str,
     ) -> Option<Box<dyn crate::core::engine::ecosystems::Patcher>> {
         match ecosystem {
-            "npm" => Some(Box::new(crate::core::engine::ecosystems::npm::NpmPatcher)),
+            "npm" => Some(Box::new(
+                crate::core::engine::ecosystems::npm::NpmPatcher::new(
+                    crate::core::clients::npm::Npm::new(self.http_agent.clone()),
+                ),
+            )),
             _ => None,
         }
     }

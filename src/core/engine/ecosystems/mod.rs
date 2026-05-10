@@ -78,4 +78,13 @@ pub trait Patcher: Send + Sync {
     ) -> Result<Option<crate::core::engine::TransitiveUpdateResult>> {
         Ok(None)
     }
+
+    /// Automatically resolves known security vulnerabilities by bumping affected dependencies.
+    async fn update_vulnerable_dependencies(
+        &self,
+        _snapshot: &dyn ProjectRepositorySnapshot,
+        _temp_dir: &std::path::Path,
+    ) -> Result<Option<crate::core::engine::TransitiveUpdateResult>> {
+        Ok(None)
+    }
 }

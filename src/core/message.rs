@@ -50,6 +50,10 @@ pub enum Payload {
         project_id: String,
     },
 
+    UpdateVulnerableDependencies {
+        project_id: String,
+    },
+
     #[serde(skip)]
     PersistBumpResult {
         bump_id: String,
@@ -169,6 +173,10 @@ impl Payload {
 
             Payload::UpdateTransitiveDependencies { project_id } => {
                 super::actions::update_transitive_dependencies::run(app, project_id.clone()).await
+            }
+
+            Payload::UpdateVulnerableDependencies { project_id } => {
+                super::actions::update_vulnerable_dependencies::run(app, project_id.clone()).await
             }
 
             Payload::PersistBumpResult {
