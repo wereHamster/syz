@@ -297,6 +297,10 @@ impl Handle {
         }
     }
 
+    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
+    }
+
     pub async fn send(&self, message_id: String, payload: Payload) -> Result<()> {
         let message = Message {
             message_id,

@@ -14,11 +14,13 @@ pub struct Message {
     pub payload: Payload,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize)]
+#[serde(tag = "type")]
 pub enum Payload {
     /// Scan the project source code, identify which dependencies it has, check which
     /// dependencies are outdated, and update the local database with the information.
     AnalyzeProjectDependencies { project_id: String },
+    #[serde(skip)]
     PersistAnalyzedProjectDependencies {
         project_id: String,
         scan_result: AnalyzedProjectDependencies,

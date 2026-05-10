@@ -31,7 +31,8 @@ async fn main() -> Result<()> {
             .await?;
     }
 
-    syz::server::start().await?;
+    let token = std::env::var("SYZD_AUTH_TOKEN").expect("SYZD_AUTH_TOKEN must be set");
+    syz::server::start(handle, token).await?;
 
     tracing::info!("exiting...");
 
