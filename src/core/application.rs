@@ -4,14 +4,22 @@ use tokio::sync::{broadcast, mpsc};
 use turso::params;
 
 use crate::core::clients;
-use crate::core::engine::ecosystems;
 
 use super::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
 };
 use super::clients::github::GitHub;
+
 use super::database::{pk, Bump, BumpDep, Database, Dependency, Project};
-use super::engine::ecosystems::{cargo::Cargo, npm::Npm, Ecosystem};
+
+use super::engine::ecosystems::{
+    cargo::{CargoRegistry, CargoScanner},
+    github_actions::{GitHubRegistry, GitHubScanner},
+    npm::{NpmRegistry, NpmScanner},
+    registry_router::RegistryRouter,
+    Registry, Scanner,
+};
+
 use super::event::Event;
 use super::http_agent::HttpAgent;
 use super::message::{Message, Payload};
@@ -83,14 +91,36 @@ impl Application {
         self.handle.clone()
     }
 
-    pub fn ecosystems(&self) -> Vec<Box<dyn Ecosystem>> {
+    pub fn scanners(&self) -> Vec<Box<dyn Scanner>> {
         vec![
-            Box::new(Cargo::new(clients::crates::Crates::new(
+            Box::new(CargoScanner),
+            Box::new(NpmScanner),
+            Box::new(GitHubScanner),
+        ]
+    }
+
+    pub fn registry_router(&self) -> RegistryRouter {
+        let mut registries: std::collections::HashMap<String, Box<dyn Registry>> =
+            std::collections::HashMap::new();
+
+        registries.insert(
+            "cargo".to_string(),
+            Box::new(CargoRegistry::new(clients::crates::Crates::new(
                 self.http_agent.clone(),
             ))),
-            Box::new(Npm::new(clients::npm::Npm::new(self.http_agent.clone()))),
-            Box::new(ecosystems::github_actions::GitHub::new(self.github.clone())),
-        ]
+        );
+        registries.insert(
+            "npm".to_string(),
+            Box::new(NpmRegistry::new(clients::npm::Npm::new(
+                self.http_agent.clone(),
+            ))),
+        );
+        registries.insert(
+            "github".to_string(),
+            Box::new(GitHubRegistry::new(self.github.clone())),
+        );
+
+        RegistryRouter::new(registries)
     }
 
     pub fn query(&self) -> Query {

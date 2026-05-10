@@ -8,15 +8,19 @@ use crate::core::engine::{
 pub mod cargo;
 pub mod github_actions;
 pub mod npm;
+pub mod registry_router;
 
 #[async_trait]
-pub trait Ecosystem: Send + Sync {
+pub trait Scanner: Send + Sync {
     /// Scans a project repository to discover dependencies.
     async fn discover_project_dependencies(
         &self,
         repo: &dyn ProjectRepositorySnapshot,
     ) -> Result<Vec<DiscoveredDependency>>;
+}
 
+#[async_trait]
+pub trait Registry: Send + Sync {
     /// Computes options how the given dependency can be updated.
     ///
     /// The result includes information about different versions (minor and
