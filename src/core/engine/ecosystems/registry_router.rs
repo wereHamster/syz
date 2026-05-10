@@ -21,9 +21,10 @@ impl RegistryRouter {
     ) -> Result<DependencyUpdateOption> {
         let pkg_type = &dependency.purl.ecosystem;
 
-        let registry = self.registries.get(pkg_type).ok_or_else(|| {
-            anyhow::anyhow!("No registry configured for ecosystem: {}", pkg_type)
-        })?;
+        let registry = self
+            .registries
+            .get(pkg_type)
+            .ok_or_else(|| anyhow::anyhow!("No registry configured for ecosystem: {}", pkg_type))?;
 
         registry.query_dependency_update_options(dependency).await
     }

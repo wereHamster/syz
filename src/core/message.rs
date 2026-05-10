@@ -73,6 +73,14 @@ impl Payload {
                     });
                 }
 
+                let packages = app.query().list_packages().await?;
+                for package in packages {
+                    ops.push(crate::core::event::Op::Upsert {
+                        path: format!("package/{}", package.id),
+                        data: serde_json::to_value(package).unwrap_or_default(),
+                    });
+                }
+
                 let bumps = app.query().list_bumps().await?;
                 for bump in bumps {
                     ops.push(crate::core::event::Op::Upsert {
@@ -151,7 +159,8 @@ impl Payload {
                 bump_id,
                 pull_request_url,
             } => {
-                app.persist_bump_result(bump_id, pull_request_url.clone()).await
+                app.persist_bump_result(bump_id, pull_request_url.clone())
+                    .await
             }
 
             Payload::PersistAnalyzedProjectDependencies {

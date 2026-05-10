@@ -110,7 +110,6 @@ impl Npm {
         current_version: Option<&str>,
         minimum_release_age: Option<chrono::Duration>,
     ) -> Result<VersionData> {
-
         let response = self.get_registry_response(package).await?;
 
         let repo_url = response.repository.and_then(|repo| {

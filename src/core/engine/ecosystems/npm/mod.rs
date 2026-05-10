@@ -8,9 +8,9 @@ use crate::core::engine::{DependencyUpdateOption, DiscoveredDependency};
 
 pub mod internal;
 
-use crate::core::engine::{UpdateTarget, repository::FileModification};
-use std::process::Command;
+use crate::core::engine::{repository::FileModification, UpdateTarget};
 use std::fs;
+use std::process::Command;
 
 pub struct NpmScanner;
 
@@ -119,7 +119,9 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                             if deps.contains_key(&target.name) {
                                 deps.insert(
                                     target.name.to_string(),
-                                    serde_json::Value::String(target.target_version.requirement.clone()),
+                                    serde_json::Value::String(
+                                        target.target_version.requirement.clone(),
+                                    ),
                                 );
                                 was_updated = true;
                             }
@@ -137,7 +139,9 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                     fs::write(&full_path, &updated_pkg_json_str)?;
                     tree_items.push(FileModification {
                         path: path.clone(),
-                        state: crate::core::engine::repository::FileState::Write(updated_pkg_json_str),
+                        state: crate::core::engine::repository::FileState::Write(
+                            updated_pkg_json_str,
+                        ),
                     });
                 } else {
                     fs::write(&full_path, content)?;

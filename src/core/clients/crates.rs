@@ -92,10 +92,10 @@ impl Crates {
         let data: CratesIoResponse = self.http_agent.json(&url).await?;
 
         let mut history = Vec::new();
-        let target_ver = semver::Version::parse(clean_new)
-            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-        let current_ver = semver::Version::parse(clean_current)
-            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        let target_ver =
+            semver::Version::parse(clean_new).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        let current_ver =
+            semver::Version::parse(clean_current).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
 
         for v in data.versions {
             if let Ok(parsed) = semver::Version::parse(&v.num) {
@@ -113,10 +113,7 @@ impl Crates {
         Ok(history)
     }
 
-    pub async fn get_package_info(
-        &self,
-        name: &str,
-    ) -> Result<crate::core::engine::PackageInfo> {
+    pub async fn get_package_info(&self, name: &str) -> Result<crate::core::engine::PackageInfo> {
         let url = format!("https://crates.io/api/v1/crates/{}", name);
         let data: CratesIoResponse = self.http_agent.json(&url).await?;
 

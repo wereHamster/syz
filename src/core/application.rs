@@ -9,8 +9,7 @@ use super::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
 };
 use super::clients::github::GitHub;
-
-use super::database::{pk, Bump, BumpDep, Database, Dependency, Project};
+use super::database::{pk, Bump, BumpDep, Database, Dependency, Package, Project};
 
 use super::engine::ecosystems::{
     cargo::{CargoRegistry, CargoScanner},
@@ -19,7 +18,6 @@ use super::engine::ecosystems::{
     registry_router::RegistryRouter,
     Registry, Scanner,
 };
-
 use super::event::Event;
 use super::http_agent::HttpAgent;
 use super::message::{Message, Payload};
@@ -116,7 +114,7 @@ impl Application {
             ))),
         );
         registries.insert(
-            "github".to_string(),
+            "github-actions".to_string(),
             Box::new(GitHubRegistry::new(self.github.clone())),
         );
 
@@ -534,6 +532,30 @@ impl Query {
         }
 
         Ok(dependencies)
+    }
+
+    pub async fn list_packages(&self) -> Result<Vec<Package>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT id, type, namespace, name, version, subpath FROM package")
+            .await?;
+
+        let mut rows = stmt.query(()).await?;
+
+        let mut packages = Vec::new();
+        while let Some(row) = rows.next().await? {
+            packages.push(Package {
+                id: row.get(0).unwrap_or_default(),
+                r#type: row.get(1).unwrap_or_default(),
+                namespace: row.get(2).unwrap_or_default(),
+                name: row.get(3).unwrap_or_default(),
+                version: row.get(4).unwrap_or_default(),
+                subpath: row.get(5).unwrap_or_default(),
+            });
+        }
+
+        Ok(packages)
     }
 
     pub async fn list_bumps(&self) -> Result<Vec<Bump>> {
