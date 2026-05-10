@@ -17,9 +17,13 @@ pub struct Message {
 #[derive(Clone, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum Payload {
+    /// Lists all projects and sends an AnalyzeProjectDependencies message for each one.
+    AnalyzeAllProjectsDependencies,
+
     /// Scan the project source code, identify which dependencies it has, check which
     /// dependencies are outdated, and update the local database with the information.
     AnalyzeProjectDependencies { project_id: String },
+
     #[serde(skip)]
     PersistAnalyzedProjectDependencies {
         project_id: String,
@@ -30,9 +34,26 @@ pub enum Payload {
 impl Payload {
     pub async fn execute(&self, app: &Application) -> Result<()> {
         match self {
+            Payload::AnalyzeAllProjectsDependencies => {
+                let projects = app.query().list_projects().await?;
+                for project in projects {
+                    app.handle()
+                        .send(
+                            super::database::pk(),
+                            Payload::AnalyzeProjectDependencies {
+                                project_id: project.id,
+                            },
+                        )
+                        .await?;
+                }
+
+                Ok(())
+            }
+
             Payload::AnalyzeProjectDependencies { project_id } => {
                 super::actions::analyze_project_dependencies::run(app, project_id.clone()).await
             }
+
             Payload::PersistAnalyzedProjectDependencies {
                 project_id,
                 scan_result,
