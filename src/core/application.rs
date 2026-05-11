@@ -1,18 +1,13 @@
-use anyhow::{Context, Result};
-use std::collections::HashMap;
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
-use turso::params;
 
 use crate::core::clients;
 use crate::core::platform::{GitHubPlatformAdapter, PlatformRegistry, TangledPlatformAdapter};
 
-use super::actions::analyze_project_dependencies::{
-    AnalyzedProjectDependencies, AnalyzedProjectDependency,
-};
 use super::clients::github::GitHub;
 use super::clients::tangled::Tangled;
-use super::database::{pk, Bump, BumpDep, Database, Dependency, Package, Project};
+use super::database::Database;
 
 use super::engine::ecosystems::{
     cargo::{CargoRegistry, CargoScanner},
@@ -24,8 +19,10 @@ use super::engine::ecosystems::{
 use super::event::Event;
 use super::http_agent::HttpAgent;
 use super::message::{Message, Payload};
+use super::store::Store;
 
 pub struct Application {
+    store: Store,
     handle: Handle,
 
     mailbox: mpsc::Receiver<Message>,
@@ -42,6 +39,7 @@ impl Application {
         let (events, _) = broadcast::channel(1000);
 
         let database = Database::open().await?;
+        let store = Store::new(database);
 
         let http_agent = HttpAgent::new();
         let github = GitHub::new().await?;
@@ -55,8 +53,9 @@ impl Application {
         platforms.register("tangled", Arc::new(TangledPlatformAdapter::new(tangled)));
 
         Ok(Self {
+            store: store.clone(),
             handle: Handle {
-                database,
+                store,
                 mailbox: mailbox_tx,
                 events,
             },
@@ -103,6 +102,10 @@ impl Application {
         self.handle.clone()
     }
 
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
     pub fn scanners(&self) -> Vec<Box<dyn Scanner>> {
         vec![
             Box::new(CargoScanner),
@@ -135,15 +138,11 @@ impl Application {
         RegistryRouter::new(registries)
     }
 
-    pub fn query(&self) -> Query {
-        self.handle().query()
-    }
-
     pub async fn project_repository_view(
         &self,
         project_id: &str,
     ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryView>> {
-        let project = self.query().project(project_id).await?;
+        let project = self.store.project(project_id).await?;
         let platform = self.platforms.resolve(&project.platform)?;
 
         platform.view(&project.repository).await
@@ -157,200 +156,6 @@ impl Application {
         let default_branch = view.get_default_branch().await?;
         let revision = view.get_revision(default_branch.as_str()).await?;
         Ok(view.snapshot(revision.as_str()))
-    }
-
-    pub async fn persist_bump_result(
-        &self,
-        bump_id: &str,
-        pull_request_url: Option<String>,
-    ) -> Result<()> {
-        let conn = self.handle.database.conn()?;
-        if let Some(url) = pull_request_url {
-            conn.execute(
-                "UPDATE bump SET url = ? WHERE id = ?",
-                turso::params![url, bump_id],
-            )
-            .await?;
-        }
-
-        let bump = self.query().bump(bump_id).await?;
-        self.handle().broadcast(crate::core::event::Event::Commit {
-            ops: vec![crate::core::event::Op::Upsert {
-                path: format!("bump/{}", bump.id),
-                data: serde_json::to_value(bump).unwrap_or_default(),
-            }],
-        })?;
-
-        Ok(())
-    }
-
-    pub async fn persist_analyzed_project_dependencies(
-        &self,
-        project_id: &str,
-        scan_result: AnalyzedProjectDependencies,
-    ) -> Result<()> {
-        let scan_id = pk();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        let conn = self.handle.database.conn()?;
-
-        conn.execute(
-            "INSERT INTO scan (id, project_id, create_time) VALUES (?, ?, ?)",
-            params![scan_id.as_str(), project_id, now],
-        )
-        .await
-        .context("Failed to insert scan")?;
-
-        let mut success_count = 0;
-
-        let mut existing_bumps_query = conn
-            .query(
-                "SELECT id, name, major FROM bump WHERE project_id = ?",
-                params![project_id],
-            )
-            .await?;
-        let mut existing_bumps: HashMap<String, [Option<String>; 2]> = HashMap::new();
-        let mut bump_ids_to_wipe = Vec::new();
-        while let Some(row) = existing_bumps_query.next().await? {
-            let id = row.get_value(0)?.as_text().unwrap().to_string();
-            let name = row.get_value(1)?.as_text().unwrap().to_string();
-            let major = *row.get_value(2)?.as_integer().unwrap_or(&0) != 0;
-            existing_bumps.entry(name).or_insert([None, None])[major as usize] = Some(id.clone());
-            bump_ids_to_wipe.push(id);
-        }
-
-        for b_id in bump_ids_to_wipe {
-            conn.execute("DELETE FROM bumpdep WHERE bump_id = ?", params![b_id])
-                .await?;
-        }
-
-        let mut bump_cache: HashMap<String, [Option<String>; 2]> = HashMap::new();
-
-        for res in scan_result.analyzed_project_dependencies {
-            let group_name = res.group_name();
-
-            let AnalyzedProjectDependency {
-                discovered_dependency,
-                dependency_update_options,
-            } = res;
-
-            let r#type = &discovered_dependency.purl.ecosystem;
-            let namespace = &discovered_dependency.purl.namespace;
-            let db_name = &discovered_dependency.purl.name;
-            let subpath = &discovered_dependency.purl.subpath;
-            let locked_version = &discovered_dependency.purl.version;
-            let req = &discovered_dependency.requirement;
-            let min_release_age = discovered_dependency.minimum_release_age;
-
-            {
-                let mut latest_allowed = "0.0.0".to_string();
-                if let Some(first_bump) = dependency_update_options.bumps.first() {
-                    latest_allowed = first_bump.target_version.clone();
-                }
-
-                let pkg_version = locked_version.clone().unwrap_or(latest_allowed.clone());
-                let eco_name = &r#type;
-                let mut pkg_query = conn.query(
-                    "SELECT id FROM package WHERE type = ? AND namespace IS ? AND name = ? AND subpath IS ? AND version = ?",
-                    params![eco_name.as_str(), namespace.as_deref(), db_name.as_str(), subpath.as_deref(), pkg_version.as_str()]
-                ).await?;
-
-                let pkg_id = if let Some(row) = pkg_query.next().await? {
-                    row.get_value(0)?
-                        .as_text()
-                        .context("package id should be text")?
-                        .to_string()
-                } else {
-                    let new_pkg_id = pk();
-                    conn.execute(
-                        "INSERT INTO package (id, type, namespace, name, subpath, version) VALUES (?, ?, ?, ?, ?, ?)",
-                        params![new_pkg_id.as_str(), eco_name.as_str(), namespace.as_deref(), db_name.as_str(), subpath.as_deref(), pkg_version.as_str()]
-                    ).await?;
-                    new_pkg_id
-                };
-
-                let dep_id = pk();
-                conn.execute(
-                    "INSERT INTO dependency (id, scan_id, specifier, package_id) VALUES (?, ?, ?, ?)",
-                    params![dep_id.as_str(), scan_id.as_str(), req.as_str(), pkg_id],
-                )
-                .await?;
-
-                success_count += 1;
-
-                let mut bumps_to_process = Vec::new();
-                for bump in &dependency_update_options.bumps {
-                    let bump_version = bump.target_version.clone();
-                    bumps_to_process.push((bump_version, bump.is_major, bump.head_version.clone()));
-                }
-
-                for (bump_version, bump_is_major, head_ver) in bumps_to_process {
-                    let bump_id = if let Some(id) = existing_bumps
-                        .get(group_name.as_str())
-                        .and_then(|m| m[bump_is_major as usize].as_ref())
-                    {
-                        id.clone()
-                    } else if let Some(id) = bump_cache
-                        .get(group_name.as_str())
-                        .and_then(|m| m[bump_is_major as usize].as_ref())
-                    {
-                        id.clone()
-                    } else {
-                        let new_bump_id = pk();
-                        conn.execute(
-                            "INSERT INTO bump (id, project_id, name, major, approved) VALUES (?, ?, ?, ?, 0)",
-                            params![new_bump_id.as_str(), project_id, group_name.as_str(), bump_is_major]
-                        ).await?;
-                        bump_cache.entry(group_name.clone()).or_insert([None, None])
-                            [bump_is_major as usize] = Some(new_bump_id.clone());
-                        new_bump_id
-                    };
-
-                    let target_ver = bump_version.clone();
-                    let min_age_mins = min_release_age.map(|d| d.num_minutes());
-
-                    conn.execute(
-                        "INSERT INTO bumpdep (bump_id, dependency_id, target_version, head_version, minimum_release_age) VALUES (?, ?, ?, ?, ?)",
-                        params![bump_id, dep_id.as_str(), target_ver, head_ver, min_age_mins]
-                    ).await?;
-                }
-            }
-        }
-
-        conn.execute(
-            "DELETE FROM bump WHERE project_id = ? AND id NOT IN (SELECT bump_id FROM bumpdep)",
-            params![project_id],
-        )
-        .await?;
-
-        let msg = format!(
-            "Scan complete. Inserted {} dependencies (found {} potential bumps).",
-            success_count,
-            bump_cache.len() + existing_bumps.len()
-        );
-        tracing::info!("{}", msg);
-
-        Ok(())
-    }
-
-    pub async fn approve_bump(&self, bump_id: &str) -> Result<()> {
-        let conn = self.handle.database.conn()?;
-        conn.execute(
-            "UPDATE bump SET approved = 1 WHERE id = ?",
-            params![bump_id],
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn retract_bump_approval(&self, bump_id: &str) -> Result<()> {
-        let conn = self.handle.database.conn()?;
-        conn.execute(
-            "UPDATE bump SET approved = 0 WHERE id = ?",
-            params![bump_id],
-        )
-        .await?;
-        Ok(())
     }
 
     async fn run(mut self) -> Result<()> {
@@ -371,7 +176,7 @@ impl Application {
         &self,
         project_id: &str,
     ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryMutator>> {
-        let project = self.query().project(project_id).await?;
+        let project = self.store.project(project_id).await?;
         let platform = self.platforms.resolve(&project.platform)?;
 
         platform.mutator(&project.repository).await
@@ -443,7 +248,7 @@ impl Application {
 
 #[derive(Clone)]
 pub struct Handle {
-    database: Database,
+    store: Store,
 
     /// Clients send messages to this mailbox, which are then processed sequentially by
     /// the application.
@@ -454,10 +259,8 @@ pub struct Handle {
 }
 
 impl Handle {
-    pub fn query(&self) -> Query {
-        Query {
-            database: self.database.clone(),
-        }
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -484,215 +287,4 @@ impl Handle {
 
         Ok(())
     }
-}
-
-pub struct Query {
-    database: Database,
-}
-
-impl Query {
-    pub async fn list_projects(&self) -> Result<Vec<Project>> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare("SELECT id, platform, repository FROM project")
-            .await?;
-
-        let mut rows = stmt.query(()).await?;
-
-        let mut projects = Vec::new();
-        while let Some(row) = rows.next().await? {
-            projects.push(Project {
-                id: row.get(0).unwrap_or_default(),
-                platform: row.get(1).unwrap_or_default(),
-                repository: row.get(2).unwrap_or_default(),
-            });
-        }
-
-        Ok(projects)
-    }
-
-    pub async fn project(&self, project_id: &str) -> Result<Project> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare("SELECT id, platform, repository FROM project WHERE id = ?1")
-            .await?;
-
-        let mut rows = stmt.query((project_id,)).await?;
-
-        if let Some(row) = rows.next().await? {
-            return Ok(Project {
-                id: row.get(0).unwrap_or_default(),
-                platform: row.get(1).unwrap_or_default(),
-                repository: row.get(2).unwrap_or_default(),
-            });
-        }
-
-        Err(anyhow::anyhow!("Project not found"))
-    }
-
-    pub async fn list_dependencies(&self) -> Result<Vec<Dependency>> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare("SELECT id, scan_id, specifier, package_id FROM dependency")
-            .await?;
-
-        let mut rows = stmt.query(()).await?;
-
-        let mut dependencies = Vec::new();
-        while let Some(row) = rows.next().await? {
-            dependencies.push(Dependency {
-                id: row.get(0).unwrap_or_default(),
-                scan_id: row.get(1).unwrap_or_default(),
-                specifier: row.get(2).unwrap_or_default(),
-                package_id: row.get(3).unwrap_or_default(),
-            });
-        }
-
-        Ok(dependencies)
-    }
-
-    pub async fn list_packages(&self) -> Result<Vec<Package>> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare("SELECT id, type, namespace, name, version, subpath FROM package")
-            .await?;
-
-        let mut rows = stmt.query(()).await?;
-
-        let mut packages = Vec::new();
-        while let Some(row) = rows.next().await? {
-            packages.push(Package {
-                id: row.get(0).unwrap_or_default(),
-                r#type: row.get(1).unwrap_or_default(),
-                namespace: row.get(2).unwrap_or_default(),
-                name: row.get(3).unwrap_or_default(),
-                version: row.get(4).unwrap_or_default(),
-                subpath: row.get(5).unwrap_or_default(),
-            });
-        }
-
-        Ok(packages)
-    }
-
-    pub async fn list_bumps(&self) -> Result<Vec<Bump>> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare("SELECT id, project_id, name, major, approved, url FROM bump")
-            .await?;
-
-        let mut rows = stmt.query(()).await?;
-
-        let mut bumps = Vec::new();
-        while let Some(row) = rows.next().await? {
-            bumps.push(Bump {
-                id: row.get(0).unwrap_or_default(),
-                project_id: row.get(1).unwrap_or_default(),
-                name: row.get(2).unwrap_or_default(),
-                major: row.get(3).unwrap_or_default(),
-                approved: row.get(4).unwrap_or_default(),
-                url: row.get(5).unwrap_or_default(),
-            });
-        }
-
-        Ok(bumps)
-    }
-
-    pub async fn bump(&self, bump_id: &str) -> Result<Bump> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare("SELECT id, project_id, name, major, approved, url FROM bump WHERE id = ?1")
-            .await?;
-
-        let mut rows = stmt.query((bump_id,)).await?;
-
-        if let Some(row) = rows.next().await? {
-            return Ok(Bump {
-                id: row.get(0).unwrap_or_default(),
-                project_id: row.get(1).unwrap_or_default(),
-                name: row.get(2).unwrap_or_default(),
-                major: row.get(3).unwrap_or_default(),
-                approved: row.get(4).unwrap_or_default(),
-                url: row.get(5).unwrap_or_default(),
-            });
-        }
-
-        Err(anyhow::anyhow!("Bump not found"))
-    }
-
-    pub async fn list_bumpdeps(&self) -> Result<Vec<BumpDep>> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare("SELECT bump_id, dependency_id, target_version, head_version, minimum_release_age FROM bumpdep")
-            .await?;
-
-        let mut rows = stmt.query(()).await?;
-
-        let mut bumpdeps = Vec::new();
-        while let Some(row) = rows.next().await? {
-            bumpdeps.push(BumpDep {
-                bump_id: row.get(0).unwrap_or_default(),
-                dependency_id: row.get(1).unwrap_or_default(),
-                target_version: row.get(2).unwrap_or_default(),
-                head_version: row.get(3).unwrap_or_default(),
-                minimum_release_age: row.get(4).unwrap_or_default(),
-            });
-        }
-
-        Ok(bumpdeps)
-    }
-
-    pub async fn bump_targets(&self, bump_id: &str) -> Result<Vec<BumpTargetData>> {
-        let conn = self.database.conn()?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT p.name, d.specifier, p.version, p.type, bd.target_version, bd.head_version, NULL as repo_url, p.namespace, p.subpath, bd.minimum_release_age
-                 FROM bumpdep bd
-                 JOIN dependency d ON bd.dependency_id = d.id
-                 JOIN package p ON d.package_id = p.id
-                 WHERE bd.bump_id = ?1"
-            )
-            .await?;
-
-        let mut rows = stmt.query((bump_id,)).await?;
-        let mut targets = Vec::new();
-
-        while let Some(row) = rows.next().await? {
-            let minimum_release_age_secs: Option<i64> = row.get(9).unwrap_or_default();
-            targets.push(BumpTargetData {
-                name: row.get(0).unwrap_or_default(),
-                specifier: row.get(1).unwrap_or_default(),
-                current_version: row.get(2).unwrap_or_default(),
-                eco_type: row.get(3).unwrap_or_default(),
-                target_version: row.get(4).unwrap_or_default(),
-                head_version: row.get(5).unwrap_or_default(),
-                repo_url: row.get(6).unwrap_or_default(),
-                namespace: row.get(7).unwrap_or_default(),
-                subpath: row.get(8).unwrap_or_default(),
-                minimum_release_age: minimum_release_age_secs.map(chrono::Duration::seconds),
-            });
-        }
-
-        Ok(targets)
-    }
-}
-
-pub struct BumpTargetData {
-    pub name: String,
-    pub specifier: String,
-    pub current_version: String,
-    pub eco_type: String,
-    pub target_version: String,
-    pub head_version: String,
-    pub repo_url: Option<String>,
-    pub namespace: Option<String>,
-    pub subpath: Option<String>,
-    pub minimum_release_age: Option<chrono::Duration>,
 }

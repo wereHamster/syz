@@ -1,15 +1,16 @@
-use crate::core::application::{Application, BumpTargetData};
+use crate::core::application::Application;
 use crate::core::engine::ecosystems::Patcher;
 use crate::core::engine::{PackageInfo, RequirementVersion, UpdateTarget};
 use crate::core::message::Payload;
+use crate::core::store::BumpTargetData;
 use anyhow::Result;
 use tempfile::TempDir;
 
 pub async fn run(app: &Application, bump_id: String) -> Result<()> {
-    let bump = app.query().bump(&bump_id).await?;
-    let project = app.query().project(&bump.project_id).await?;
+    let bump = app.store().bump(&bump_id).await?;
+    let project = app.store().project(&bump.project_id).await?;
 
-    let bump_targets_data = app.query().bump_targets(&bump_id).await?;
+    let bump_targets_data = app.store().bump_targets(&bump_id).await?;
     if bump_targets_data.is_empty() {
         tracing::warn!("No bump targets found for bump {}", bump_id);
         return Ok(());

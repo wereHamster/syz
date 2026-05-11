@@ -3,7 +3,7 @@ use anyhow::Result;
 use tempfile::TempDir;
 
 pub async fn run(app: &Application, project_id: String) -> Result<()> {
-    let project = app.query().project(&project_id).await?;
+    let project = app.store().project(&project_id).await?;
     let patchers = app.patchers();
 
     let view = app.project_repository_view(&project.id).await?;

@@ -73,7 +73,7 @@ impl Payload {
             Payload::Bootstrap => {
                 let mut ops = Vec::new();
 
-                let projects = app.query().list_projects().await?;
+                let projects = app.store().list_projects().await?;
                 for project in projects {
                     ops.push(crate::core::event::Op::Upsert {
                         path: format!("project/{}", project.id),
@@ -81,7 +81,7 @@ impl Payload {
                     });
                 }
 
-                let dependencies = app.query().list_dependencies().await?;
+                let dependencies = app.store().list_dependencies().await?;
                 for dependency in dependencies {
                     ops.push(crate::core::event::Op::Upsert {
                         path: format!("dependency/{}", dependency.id),
@@ -89,7 +89,7 @@ impl Payload {
                     });
                 }
 
-                let packages = app.query().list_packages().await?;
+                let packages = app.store().list_packages().await?;
                 for package in packages {
                     ops.push(crate::core::event::Op::Upsert {
                         path: format!("package/{}", package.id),
@@ -97,7 +97,7 @@ impl Payload {
                     });
                 }
 
-                let bumps = app.query().list_bumps().await?;
+                let bumps = app.store().list_bumps().await?;
                 for bump in bumps {
                     ops.push(crate::core::event::Op::Upsert {
                         path: format!("bump/{}", bump.id),
@@ -105,7 +105,7 @@ impl Payload {
                     });
                 }
 
-                let bumpdeps = app.query().list_bumpdeps().await?;
+                let bumpdeps = app.store().list_bumpdeps().await?;
                 for bumpdep in bumpdeps {
                     ops.push(crate::core::event::Op::Upsert {
                         path: format!("bumpdep/{}/{}", bumpdep.bump_id, bumpdep.dependency_id),
@@ -120,7 +120,7 @@ impl Payload {
             }
 
             Payload::AnalyzeAllProjectsDependencies => {
-                let projects = app.query().list_projects().await?;
+                let projects = app.store().list_projects().await?;
                 for project in projects {
                     app.handle()
                         .send(
@@ -140,13 +140,12 @@ impl Payload {
             }
 
             Payload::ApproveBump { bump_id } => {
-                app.approve_bump(&bump_id).await?;
+                let updated_bump = app.store().approve_bump(&bump_id).await?;
 
-                let bump = app.query().bump(&bump_id).await?;
                 app.handle().broadcast(crate::core::event::Event::Commit {
                     ops: vec![crate::core::event::Op::Upsert {
-                        path: format!("bump/{}", bump.id),
-                        data: serde_json::to_value(bump).unwrap_or_default(),
+                        path: format!("bump/{}", updated_bump.id),
+                        data: serde_json::to_value(updated_bump).unwrap_or_default(),
                     }],
                 })?;
 
@@ -154,13 +153,12 @@ impl Payload {
             }
 
             Payload::RetractBumpApproval { bump_id } => {
-                app.retract_bump_approval(&bump_id).await?;
+                let updated_bump = app.store().retract_bump_approval(&bump_id).await?;
 
-                let bump = app.query().bump(&bump_id).await?;
                 app.handle().broadcast(crate::core::event::Event::Commit {
                     ops: vec![crate::core::event::Op::Upsert {
-                        path: format!("bump/{}", bump.id),
-                        data: serde_json::to_value(bump).unwrap_or_default(),
+                        path: format!("bump/{}", updated_bump.id),
+                        data: serde_json::to_value(updated_bump).unwrap_or_default(),
                     }],
                 })?;
 
@@ -182,13 +180,28 @@ impl Payload {
             Payload::PersistBumpResult {
                 bump_id,
                 pull_request_url,
-            } => app.persist_bump_result(&bump_id, pull_request_url).await,
+            } => {
+                let updated_bump = app
+                    .store()
+                    .persist_bump_result(&bump_id, pull_request_url)
+                    .await?;
+
+                app.handle().broadcast(crate::core::event::Event::Commit {
+                    ops: vec![crate::core::event::Op::Upsert {
+                        path: format!("bump/{}", updated_bump.id),
+                        data: serde_json::to_value(updated_bump).unwrap_or_default(),
+                    }],
+                })?;
+
+                Ok(())
+            }
 
             Payload::PersistAnalyzedProjectDependencies {
                 project_id,
                 scan_result,
             } => {
-                app.persist_analyzed_project_dependencies(&project_id, scan_result)
+                app.store()
+                    .persist_analyzed_project_dependencies(&project_id, scan_result)
                     .await
             }
         }
