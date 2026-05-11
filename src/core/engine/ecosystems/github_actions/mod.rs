@@ -2,9 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::core::clients;
-use crate::core::engine::ecosystems::{Registry, Scanner};
-use crate::core::engine::repository::ProjectRepositorySnapshot;
-use crate::core::engine::{DependencyUpdateOption, DiscoveredDependency};
+use crate::core::engine::ecosystems::{Patcher, Registry, Scanner};
+use crate::core::engine::repository::{FileModification, ProjectRepositorySnapshot};
+use crate::core::engine::{DependencyUpdateOption, DiscoveredDependency, UpdateTarget};
 
 pub mod internal;
 
@@ -52,5 +52,156 @@ impl Registry for GitHubRegistry {
         self.github_client
             .get_release_history(name, current_version, target_version)
             .await
+    }
+}
+
+pub struct GitHubPatcher {
+    github_client: clients::github::GitHub,
+}
+
+impl GitHubPatcher {
+    pub fn new(github_client: clients::github::GitHub) -> Self {
+        Self { github_client }
+    }
+}
+
+#[async_trait]
+impl Patcher for GitHubPatcher {
+    fn updated_requirement(&self, old_req: &str, target_version: &str) -> Option<String> {
+        if target_version.len() == 40 {
+            return Some(target_version.to_string());
+        }
+
+        let prefix = if old_req.starts_with('v') { "v" } else { "" };
+        let new_req = format!("{}{}", prefix, target_version.trim_start_matches('v'));
+        if old_req != new_req {
+            Some(new_req)
+        } else {
+            None
+        }
+    }
+
+    async fn apply_updates(
+        &self,
+        snapshot: &dyn ProjectRepositorySnapshot,
+        _temp_dir: &std::path::Path,
+        targets: &[UpdateTarget],
+    ) -> Result<Vec<FileModification>> {
+        let files = snapshot.list_files().await?;
+        let mut tree_items = Vec::new();
+
+        let re = regex::Regex::new(r"^(?P<indent>[ \t]*-?[ \t]*uses:\s+)(?P<action>[a-zA-Z0-9_.-]+/[a-zA-Z0-9_./-]+)@(?P<ref>[^#\s]+)(?:[ \t]+#[ \t]*(?P<comment>v?[\d\.]+.*))?").unwrap();
+
+        let mut target_map: std::collections::HashMap<String, &UpdateTarget> =
+            std::collections::HashMap::new();
+        for t in targets {
+            target_map.insert(t.name.clone(), t);
+        }
+
+        for path in files {
+            if path.starts_with(".github/workflows/")
+                && (path.ends_with(".yml") || path.ends_with(".yaml"))
+            {
+                if let Ok(content) = snapshot.read_file(&path).await {
+                    let mut updated_lines = Vec::new();
+                    let mut file_changed = false;
+
+                    for line in content.lines() {
+                        if let Some(caps) = re.captures(line) {
+                            let action = caps.name("action").unwrap().as_str().to_string();
+
+                            if let Some(target) = target_map.get(&action) {
+                                file_changed = true;
+                                let indent = caps.name("indent").unwrap().as_str();
+                                let comment = caps.name("comment");
+
+                                let mut clean_new_tag = target.target_version.requirement.clone();
+                                let action_repo = internal::helpers::extract_repo(&action);
+
+                                if clean_new_tag.len() == 40 {
+                                    if let Some(tag) = internal::helpers::get_tag_for_sha(
+                                        &self.github_client,
+                                        &action_repo,
+                                        &clean_new_tag,
+                                    )
+                                    .await
+                                    {
+                                        clean_new_tag = tag;
+                                    }
+                                }
+
+                                let clean_new =
+                                    clean_new_tag.trim_start_matches(['^', '~', '=', 'v']);
+                                let v_tag = format!("v{}", clean_new);
+                                let no_v_tag = clean_new.to_string();
+
+                                if comment.is_some() {
+                                    // Format: uses: owner/repo@<commit> # v1.2.3
+                                    let mut commit_sha = target.target_version.version.clone();
+
+                                    // If target.target_version.version is NOT a SHA (e.g. from an old DB scan), try to get it
+                                    if commit_sha.len() != 40 {
+                                        let mut sha_opt = internal::helpers::get_sha_for_tag(
+                                            &self.github_client,
+                                            &action_repo,
+                                            &clean_new_tag,
+                                        )
+                                        .await;
+                                        if sha_opt.is_none() {
+                                            sha_opt = internal::helpers::get_sha_for_tag(
+                                                &self.github_client,
+                                                &action_repo,
+                                                &v_tag,
+                                            )
+                                            .await;
+                                            if sha_opt.is_none() {
+                                                sha_opt = internal::helpers::get_sha_for_tag(
+                                                    &self.github_client,
+                                                    &action_repo,
+                                                    &no_v_tag,
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                        if let Some(sha) = sha_opt {
+                                            commit_sha = sha;
+                                        }
+                                    }
+
+                                    updated_lines.push(format!(
+                                        "{}{}@{} # {}",
+                                        indent, action, commit_sha, clean_new_tag
+                                    ));
+                                } else {
+                                    // Format: uses: owner/repo@v1
+                                    let old_req = target.current_version.requirement.clone();
+
+                                    let new_tag = if old_req.len() == 40
+                                        && target.target_version.version.len() == 40
+                                    {
+                                        target.target_version.version.clone() // user uses SHA without comment
+                                    } else {
+                                        clean_new_tag
+                                    };
+                                    updated_lines.push(format!("{}{}@{}", indent, action, new_tag));
+                                }
+                                continue;
+                            }
+                        }
+                        updated_lines.push(line.to_string());
+                    }
+
+                    if file_changed {
+                        let new_content = updated_lines.join("\n") + "\n";
+                        tree_items.push(FileModification {
+                            path: path.to_string(),
+                            state: crate::core::engine::repository::FileState::Write(new_content),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(tree_items)
     }
 }

@@ -1,9 +1,27 @@
 use crate::core::engine::UpdateTarget;
 
-pub fn generate_title(package_group: &str, targets: &[UpdateTarget], is_major: bool) -> String {
+pub async fn generate_title(
+    package_group: &str,
+    ecosystem: &str,
+    targets: &[UpdateTarget],
+    is_major: bool,
+    github: Option<&crate::core::clients::github::GitHub>,
+) -> String {
     let mut title = if targets.len() == 1 {
         let target = &targets[0];
-        let clean_new = target.target_version.version.clone();
+        let mut clean_new = target.target_version.version.clone();
+
+        if ecosystem == "github-actions" && clean_new.len() == 40 {
+            if let Some(gh) = github {
+                let action_repo = crate::core::engine::ecosystems::github_actions::internal::helpers::extract_repo(&target.name);
+                if let Some(tag) = crate::core::engine::ecosystems::github_actions::internal::helpers::get_tag_for_sha(gh, &action_repo, &clean_new).await {
+                    clean_new = tag;
+                }
+            }
+        } else if ecosystem == "github-actions" {
+            clean_new = target.target_version.requirement.clone();
+        }
+
         format!("Update {} to {}", package_group, clean_new)
     } else {
         let first_new_req = &targets[0].target_version;
@@ -34,8 +52,41 @@ pub fn generate_title(package_group: &str, targets: &[UpdateTarget], is_major: b
             }
         }
 
-        let clean_highest = highest_new;
-        let clean_lowest = lowest_new;
+        let mut clean_highest = highest_new.clone();
+        let mut clean_lowest = lowest_new.clone();
+
+        if ecosystem == "github-actions" {
+            // For GitHub Actions, we actually want the requirement text if it isn't a SHA
+            let highest_req = &targets
+                .iter()
+                .find(|t| t.target_version.version == *highest_new)
+                .unwrap()
+                .target_version
+                .requirement;
+            let lowest_req = &targets
+                .iter()
+                .find(|t| t.target_version.version == *lowest_new)
+                .unwrap()
+                .target_version
+                .requirement;
+
+            clean_highest = highest_req.clone();
+            clean_lowest = lowest_req.clone();
+
+            if let Some(gh) = github {
+                let action_repo = crate::core::engine::ecosystems::github_actions::internal::helpers::extract_repo(package_group);
+                if clean_highest.len() == 40 {
+                    if let Some(tag) = crate::core::engine::ecosystems::github_actions::internal::helpers::get_tag_for_sha(gh, &action_repo, &clean_highest).await {
+                        clean_highest = tag;
+                    }
+                }
+                if clean_lowest.len() == 40 {
+                    if let Some(tag) = crate::core::engine::ecosystems::github_actions::internal::helpers::get_tag_for_sha(gh, &action_repo, &clean_lowest).await {
+                        clean_lowest = tag;
+                    }
+                }
+            }
+        }
 
         if clean_highest == clean_lowest {
             format!("Update {} to {}", package_group, clean_highest)
@@ -76,34 +127,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_generate_title_single_target() {
+    #[tokio::test]
+    async fn test_generate_title_single_target() {
         let targets = vec![make_target("react", "17.0.0", "18.0.0")];
-        let title = generate_title("React", &targets, false);
+        let title = generate_title("React", "npm", &targets, false, None).await;
         assert_eq!(title, "Update React to 18.0.0");
 
-        let title_major = generate_title("React", &targets, true);
+        let title_major = generate_title("React", "npm", &targets, true, None).await;
         assert_eq!(title_major, "Update React to 18.0.0 (major)");
     }
 
-    #[test]
-    fn test_generate_title_multiple_targets_same_version() {
+    #[tokio::test]
+    async fn test_generate_title_multiple_targets_same_version() {
         let targets = vec![
             make_target("react", "17.0.0", "18.0.0"),
             make_target("react-dom", "17.0.0", "18.0.0"),
         ];
-        let title = generate_title("React", &targets, false);
+        let title = generate_title("React", "npm", &targets, false, None).await;
         assert_eq!(title, "Update React to 18.0.0");
     }
 
-    #[test]
-    fn test_generate_title_multiple_targets_different_versions() {
+    #[tokio::test]
+    async fn test_generate_title_multiple_targets_different_versions() {
         let targets = vec![
             make_target("babel-core", "7.0.0", "7.1.0"),
             make_target("babel-cli", "7.0.0", "7.2.5"),
             make_target("babel-preset-env", "7.0.0", "7.0.5"),
         ];
-        let title = generate_title("Babel", &targets, false);
+        let title = generate_title("Babel", "npm", &targets, false, None).await;
         assert_eq!(title, "Update Babel to 7.0.5 ~ 7.2.5");
     }
 }

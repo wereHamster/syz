@@ -227,6 +227,14 @@ impl Application {
                     crate::core::clients::npm::Npm::new(self.http_agent.clone()),
                 )),
             ),
+            (
+                "github-actions",
+                Box::new(
+                    crate::core::engine::ecosystems::github_actions::GitHubPatcher::new(
+                        self.github.clone(),
+                    ),
+                ),
+            ),
             // cargo doesn't have a patcher yet in application.rs, but we can add it later if needed
         ]
     }
@@ -239,6 +247,11 @@ impl Application {
             "npm" => Some(Box::new(
                 crate::core::engine::ecosystems::npm::NpmPatcher::new(
                     crate::core::clients::npm::Npm::new(self.http_agent.clone()),
+                ),
+            )),
+            "github-actions" => Some(Box::new(
+                crate::core::engine::ecosystems::github_actions::GitHubPatcher::new(
+                    self.github.clone(),
                 ),
             )),
             _ => None,

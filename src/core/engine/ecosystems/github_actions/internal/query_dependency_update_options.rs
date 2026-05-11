@@ -6,11 +6,19 @@ use serde::Deserialize;
 use crate::core::{
     clients::{self, github::GitHub},
     engine::{
-        DependencyUpdateOption, DiscoveredDependency, PackageInfo, ProposedBump,
-        RequirementVersion, VersionData,
+        DependencyUpdateOption, DiscoveredDependency, PackageInfo, ProposedBump, VersionData,
     },
     version_resolver::{self, AvailableRelease},
 };
+
+use super::helpers;
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct GithubRelease {
+    tag_name: String,
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+}
 
 pub async fn run(
     github_client: clients::github::GitHub,
@@ -21,8 +29,6 @@ pub async fn run(
         None => dependency.purl.name.clone(),
     };
 
-    let repo_name = extract_repo(&full_name);
-
     let versions = get_versions_internal(
         &github_client,
         &full_name,
@@ -31,124 +37,23 @@ pub async fn run(
     )
     .await?;
 
-    let mut target_minor = None;
-    if let Some(minor) = versions.target_minor {
-        let clean_base = minor.trim_start_matches('v');
-        let v_tag = format!("v{}", clean_base);
-        let no_v_tag = clean_base.to_string();
-
-        let mut sha_opt = get_sha_for_tag(&github_client, &repo_name, &v_tag).await;
-        if sha_opt.is_none() {
-            sha_opt = get_sha_for_tag(&github_client, &repo_name, &no_v_tag).await;
-        }
-
-        if let Some(sha) = sha_opt {
-            target_minor = Some(RequirementVersion {
-                requirement: minor.clone(),
-                version: sha,
-            });
-        } else {
-            let prefix = if dependency.requirement.starts_with('v') && !minor.starts_with('v') {
-                "v"
-            } else {
-                ""
-            };
-            target_minor = Some(RequirementVersion {
-                requirement: minor.clone(),
-                version: format!("{}{}", prefix, minor),
-            });
-        }
-    }
-
-    let mut target_major = None;
-    if let Some(major) = versions.target_major {
-        let clean_base = major.trim_start_matches('v');
-        let v_tag = format!("v{}", clean_base);
-        let no_v_tag = clean_base.to_string();
-
-        let mut sha_opt = get_sha_for_tag(&github_client, &repo_name, &v_tag).await;
-        if sha_opt.is_none() {
-            sha_opt = get_sha_for_tag(&github_client, &repo_name, &no_v_tag).await;
-        }
-
-        if let Some(sha) = sha_opt {
-            target_major = Some(RequirementVersion {
-                requirement: major.clone(),
-                version: sha,
-            });
-        } else {
-            let prefix = if dependency.requirement.starts_with('v') && !major.starts_with('v') {
-                "v"
-            } else {
-                ""
-            };
-            target_major = Some(RequirementVersion {
-                requirement: major.clone(),
-                version: format!("{}{}", prefix, major),
-            });
-        }
-    }
-
-    let mut latest_minor = versions.head_minor.unwrap_or_else(|| "0.0.0".to_string());
-    if latest_minor != "0.0.0" {
-        let clean_latest = latest_minor.trim_start_matches('v');
-        let v_tag = format!("v{}", clean_latest);
-        let no_v_tag = clean_latest.to_string();
-
-        let mut sha_opt = get_sha_for_tag(&github_client, &repo_name, &v_tag).await;
-        if sha_opt.is_none() {
-            sha_opt = get_sha_for_tag(&github_client, &repo_name, &no_v_tag).await;
-        }
-
-        if let Some(sha) = sha_opt {
-            latest_minor = sha;
-        }
-    }
-
-    let mut latest_major = versions.head_major.unwrap_or_else(|| "0.0.0".to_string());
-    if latest_major != "0.0.0" {
-        let clean_latest = latest_major.trim_start_matches('v');
-        let v_tag = format!("v{}", clean_latest);
-        let no_v_tag = clean_latest.to_string();
-
-        let mut sha_opt = get_sha_for_tag(&github_client, &repo_name, &v_tag).await;
-        if sha_opt.is_none() {
-            sha_opt = get_sha_for_tag(&github_client, &repo_name, &no_v_tag).await;
-        }
-
-        if let Some(sha) = sha_opt {
-            latest_major = sha;
-        }
-    }
-
-    // tracing::info!(
-    //     "Dependency Update Option {} minor:{} major:{}",
-    //     dependency.name,
-    //     latest_minor,
-    //     latest_major
-    // );
-
-    // if let Some(ref t) = target_minor {
-    //     tracing::info!("target minor req:{} version:{}", t.requirement, t.version);
-    // }
-    // if let Some(ref t) = target_major {
-    //     tracing::info!("target major req:{} version:{}", t.requirement, t.version);
-    // }
+    let latest_minor = versions.head_minor.unwrap_or_else(|| "0.0.0".to_string());
+    let latest_major = versions.head_major.unwrap_or_else(|| "0.0.0".to_string());
 
     let mut bumps = Vec::new();
 
-    if let Some(minor) = target_minor {
+    if let Some(minor) = versions.target_minor {
         bumps.push(ProposedBump {
-            target_version: minor.version,
+            target_version: minor,
             head_version: latest_minor,
             is_major: false,
             update_type: crate::core::engine::UpdateType::Minor,
         });
     }
 
-    if let Some(major) = target_major {
+    if let Some(major) = versions.target_major {
         bumps.push(ProposedBump {
-            target_version: major.version,
+            target_version: major,
             head_version: latest_major,
             is_major: true,
             update_type: crate::core::engine::UpdateType::Major,
@@ -163,68 +68,13 @@ pub async fn run(
     })
 }
 
-fn extract_repo(action: &str) -> String {
-    let parts: Vec<&str> = action.splitn(3, '/').collect();
-    if parts.len() >= 2 {
-        format!("{}/{}", parts[0], parts[1])
-    } else {
-        action.to_string()
-    }
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct GithubRelease {
-    tag_name: String,
-    published_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Deserialize)]
-struct GithubTag {
-    object: GithubTagObject,
-}
-
-#[derive(Deserialize)]
-struct GithubTagObject {
-    sha: String,
-    #[serde(rename = "type")]
-    object_type: String,
-}
-
-async fn get_sha_for_tag(github_client: &GitHub, action_repo: &str, tag: &str) -> Option<String> {
-    let route = format!("/repos/{}/git/ref/tags/{}", action_repo, tag);
-    if let Ok(res) = github_client.get_json(&route).await {
-        if let Ok(tag_data) = serde_json::from_value::<GithubTag>(res) {
-            let sha = if tag_data.object.object_type == "tag" {
-                let tag_route = format!("/repos/{}/git/tags/{}", action_repo, tag_data.object.sha);
-                if let Ok(tag_res) = github_client.get_json(&tag_route).await {
-                    if let Some(obj) = tag_res.get("object").and_then(|o| o.as_object()) {
-                        obj.get("sha")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or(&tag_data.object.sha)
-                            .to_string()
-                    } else {
-                        tag_data.object.sha
-                    }
-                } else {
-                    tag_data.object.sha
-                }
-            } else {
-                tag_data.object.sha
-            };
-            return Some(sha);
-        }
-    }
-    None
-}
-
 async fn get_versions_internal(
     github_client: &GitHub,
     name: &str,
     req: &str,
     minimum_release_age: Option<chrono::Duration>,
 ) -> Result<VersionData> {
-    let repo_name = extract_repo(name);
+    let repo_name = helpers::extract_repo(name);
     let route = format!("/repos/{}/releases", repo_name);
     let response = match github_client.get_json(&route).await {
         Ok(res) => res,
@@ -244,7 +94,6 @@ async fn get_versions_internal(
     let mut heads_per_major: HashMap<u64, (semver::Version, String)> = HashMap::new();
 
     for rel in &releases {
-        // tracing::info!("release {} {}", name, rel.tag_name);
         let ver_str = rel.tag_name.trim_start_matches('v');
         if let Some(ver) = coerce_version(ver_str) {
             if ver.pre.is_empty() {
@@ -259,7 +108,6 @@ async fn get_versions_internal(
     }
 
     let clean_req = req.trim_start_matches('v');
-    // tracing::info!("clean_req {}", clean_req);
     let current_ver = if let Some(v) = coerce_version(clean_req) {
         v
     } else {

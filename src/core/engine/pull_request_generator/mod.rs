@@ -19,6 +19,7 @@ pub trait PullRequestGenerator: Send + Sync {
     async fn generate_pull_request_title(
         &self,
         package_group: &str,
+        ecosystem: &str,
         targets: &[UpdateTarget],
         is_major: bool,
     ) -> Result<String>;
@@ -234,10 +235,18 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
     async fn generate_pull_request_title(
         &self,
         package_group: &str,
+        ecosystem: &str,
         targets: &[UpdateTarget],
         is_major: bool,
     ) -> Result<String> {
-        Ok(title::generate_title(package_group, targets, is_major))
+        Ok(title::generate_title(
+            package_group,
+            ecosystem,
+            targets,
+            is_major,
+            Some(&self.github),
+        )
+        .await)
     }
 
     async fn generate_pull_request_body(
@@ -247,10 +256,39 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
         targets: &[UpdateTarget],
         is_major: bool,
     ) -> Result<String> {
+        let mut display_targets = targets.to_vec();
+
+        if ecosystem == "github-actions" {
+            for t in display_targets.iter_mut() {
+                t.current_version.version = t.current_version.requirement.clone();
+                t.target_version.version = t.target_version.requirement.clone();
+
+                let action_repo = crate::core::engine::ecosystems::github_actions::internal::helpers::extract_repo(&t.name);
+
+                if t.current_version.version.len() == 40 {
+                    if let Some(tag) = crate::core::engine::ecosystems::github_actions::internal::helpers::get_tag_for_sha(&self.github, &action_repo, &t.current_version.version).await {
+                        t.current_version.version = tag;
+                    }
+                }
+
+                if t.target_version.version.len() == 40 {
+                    if let Some(tag) = crate::core::engine::ecosystems::github_actions::internal::helpers::get_tag_for_sha(&self.github, &action_repo, &t.target_version.version).await {
+                        t.target_version.version = tag;
+                    }
+                }
+
+                if t.latest_version.len() == 40 {
+                    if let Some(tag) = crate::core::engine::ecosystems::github_actions::internal::helpers::get_tag_for_sha(&self.github, &action_repo, &t.latest_version).await {
+                        t.latest_version = tag;
+                    }
+                }
+            }
+        }
+
         let ctx = PullRequestGenerationContext {
             package_group,
             ecosystem,
-            targets,
+            targets: &display_targets,
             is_major,
             registry_router: &self.registry_router,
             advisory_resolver: self.advisory_resolver.as_ref(),
