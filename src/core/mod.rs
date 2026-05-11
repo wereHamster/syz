@@ -7,4 +7,5 @@ pub mod event;
 pub mod http_agent;
 pub mod logger;
 pub mod message;
+pub mod platform;
 pub mod version_resolver;

@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use turso::params;
 
 use crate::core::clients;
+use crate::core::platform::{GitHubPlatformAdapter, PlatformRegistry, TangledPlatformAdapter};
 
 use super::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
@@ -30,7 +32,8 @@ pub struct Application {
 
     http_agent: HttpAgent,
     github: GitHub,
-    tangled: Tangled,
+
+    platforms: PlatformRegistry,
 }
 
 impl Application {
@@ -44,6 +47,13 @@ impl Application {
         let github = GitHub::new().await?;
         let tangled = Tangled::new().await?;
 
+        let mut platforms = PlatformRegistry::new();
+        platforms.register(
+            "github",
+            Arc::new(GitHubPlatformAdapter::new(github.clone())),
+        );
+        platforms.register("tangled", Arc::new(TangledPlatformAdapter::new(tangled)));
+
         Ok(Self {
             handle: Handle {
                 database,
@@ -55,7 +65,7 @@ impl Application {
 
             http_agent,
             github,
-            tangled,
+            platforms,
         })
     }
 
@@ -134,34 +144,9 @@ impl Application {
         project_id: &str,
     ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryView>> {
         let project = self.query().project(project_id).await?;
+        let platform = self.platforms.resolve(&project.platform)?;
 
-        match project.platform.as_str() {
-            "github" => {
-                let parts: Vec<&str> = project.repository.split('/').collect();
-                if parts.len() != 2 {
-                    anyhow::bail!("Repository must be in the format owner/repo");
-                }
-                let owner = parts[0].to_string();
-                let repo = parts[1].to_string();
-
-                let view = self.github.project_repository_view(owner, repo).await?;
-                Ok(Box::new(view))
-            }
-            "tangled" => {
-                let parts: Vec<&str> = project.repository.split('/').collect();
-                if parts.len() != 2 {
-                    anyhow::bail!("Repository must be in the format owner/repo");
-                }
-                let owner = parts[0].to_string();
-                let repo = parts[1].to_string();
-
-                let view = self.tangled.project_repository_view(owner, repo).await?;
-                Ok(Box::new(view))
-            }
-            _ => {
-                anyhow::bail!("Unsupported project platform: {}", project.platform);
-            }
-        }
+        platform.view(&project.repository).await
     }
 
     pub async fn project_repository_snapshot(
@@ -387,36 +372,9 @@ impl Application {
         project_id: &str,
     ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryMutator>> {
         let project = self.query().project(project_id).await?;
+        let platform = self.platforms.resolve(&project.platform)?;
 
-        match project.platform.as_str() {
-            "github" => {
-                let parts: Vec<&str> = project.repository.split('/').collect();
-                if parts.len() != 2 {
-                    anyhow::bail!("Repository must be in the format owner/repo");
-                }
-                let owner = parts[0].to_string();
-                let repo = parts[1].to_string();
-
-                let mutator = self.github.project_repository_mutator(owner, repo).await?;
-
-                Ok(Box::new(mutator))
-            }
-            "tangled" => {
-                let parts: Vec<&str> = project.repository.split('/').collect();
-                if parts.len() != 2 {
-                    anyhow::bail!("Repository must be in the format owner/repo");
-                }
-                let owner = parts[0].to_string();
-                let repo = parts[1].to_string();
-
-                let mutator = self.tangled.project_repository_mutator(owner, repo).await?;
-
-                Ok(Box::new(mutator))
-            }
-            _ => {
-                anyhow::bail!("Unsupported project platform: {}", project.platform);
-            }
-        }
+        platform.mutator(&project.repository).await
     }
 
     pub fn advisory_resolver(&self) -> Box<dyn crate::core::engine::advisories::AdvisoryResolver> {
