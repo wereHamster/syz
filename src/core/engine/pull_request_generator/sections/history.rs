@@ -164,7 +164,14 @@ impl PullRequestSectionGenerator for HistorySection {
                     None
                 };
 
-                let notes_futures: Vec<_> = history
+                let history_to_process: Vec<_> = history
+                    .into_iter()
+                    .filter(|r| {
+                        r.version.trim_start_matches('v') != hist_current.trim_start_matches('v')
+                    })
+                    .collect();
+
+                let notes_futures: Vec<_> = history_to_process
                     .iter()
                     .map(|release| {
                         let resolver = &resolver;
@@ -183,7 +190,10 @@ impl PullRequestSectionGenerator for HistorySection {
 
                 let mut current_length = body.len();
 
-                for (release, notes_res) in history.into_iter().zip(notes_results.into_iter()) {
+                for (release, notes_res) in history_to_process
+                    .into_iter()
+                    .zip(notes_results.into_iter())
+                {
                     let mut time_str = "Published ".to_string();
                     let now = chrono::Utc::now();
                     let diff = now.signed_duration_since(release.publish_time);
