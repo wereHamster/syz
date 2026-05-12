@@ -48,12 +48,48 @@ pub async fn run(
         },
     };
 
-    let latest_minor = versions.head_minor.unwrap_or_else(|| "0.0.0".to_string());
-    let latest_major = versions.head_major.unwrap_or_else(|| "0.0.0".to_string());
+    let mut target_minor_sha = None;
+    if let Some(ref t) = versions.target_minor {
+        target_minor_sha = Some(
+            helpers::get_sha_for_tag(&github_client, &repo_name, t)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Failed to resolve tag {}", t))?,
+        );
+    }
+
+    let mut target_major_sha = None;
+    if let Some(ref t) = versions.target_major {
+        target_major_sha = Some(
+            helpers::get_sha_for_tag(&github_client, &repo_name, t)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Failed to resolve tag {}", t))?,
+        );
+    }
+
+    let mut head_minor_sha = None;
+    if let Some(ref t) = versions.head_minor {
+        head_minor_sha = Some(
+            helpers::get_sha_for_tag(&github_client, &repo_name, t)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Failed to resolve tag {}", t))?,
+        );
+    }
+
+    let mut head_major_sha = None;
+    if let Some(ref t) = versions.head_major {
+        head_major_sha = Some(
+            helpers::get_sha_for_tag(&github_client, &repo_name, t)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("Failed to resolve tag {}", t))?,
+        );
+    }
+
+    let latest_minor = head_minor_sha.unwrap_or_else(|| "0.0.0".to_string());
+    let latest_major = head_major_sha.unwrap_or_else(|| "0.0.0".to_string());
 
     let mut bumps = Vec::new();
 
-    if let Some(minor) = versions.target_minor {
+    if let Some(minor) = target_minor_sha {
         bumps.push(ProposedBump {
             target_version: minor,
             head_version: latest_minor,
@@ -62,7 +98,7 @@ pub async fn run(
         });
     }
 
-    if let Some(major) = versions.target_major {
+    if let Some(major) = target_major_sha {
         bumps.push(ProposedBump {
             target_version: major,
             head_version: latest_major,

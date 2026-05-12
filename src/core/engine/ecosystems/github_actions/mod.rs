@@ -115,75 +115,33 @@ impl Patcher for GitHubPatcher {
                                 let indent = caps.name("indent").unwrap().as_str();
                                 let comment = caps.name("comment");
 
-                                let mut clean_new_tag = target.target_version.requirement.clone();
+                                let commit_sha = target.target_version.requirement.clone();
                                 let action_repo = internal::helpers::extract_repo(&action);
 
-                                if clean_new_tag.len() == 40 {
-                                    if let Some(tag) = internal::helpers::get_tag_for_sha(
+                                let pretty_tag = if commit_sha.len() == 40 {
+                                    internal::helpers::get_tag_for_sha(
                                         &self.github_client,
                                         &action_repo,
-                                        &clean_new_tag,
+                                        &commit_sha,
                                     )
                                     .await
-                                    {
-                                        clean_new_tag = tag;
-                                    }
-                                }
-
-                                let clean_new =
-                                    clean_new_tag.trim_start_matches(['^', '~', '=', 'v']);
-                                let v_tag = format!("v{}", clean_new);
-                                let no_v_tag = clean_new.to_string();
+                                } else {
+                                    None
+                                };
 
                                 if comment.is_some() {
-                                    // Format: uses: owner/repo@<commit> # v1.2.3
-                                    let mut commit_sha = target.target_version.version.clone();
-
-                                    // If target.target_version.version is NOT a SHA (e.g. from an old DB scan), try to get it
-                                    if commit_sha.len() != 40 {
-                                        let mut sha_opt = internal::helpers::get_sha_for_tag(
-                                            &self.github_client,
-                                            &action_repo,
-                                            &clean_new_tag,
-                                        )
-                                        .await;
-                                        if sha_opt.is_none() {
-                                            sha_opt = internal::helpers::get_sha_for_tag(
-                                                &self.github_client,
-                                                &action_repo,
-                                                &v_tag,
-                                            )
-                                            .await;
-                                            if sha_opt.is_none() {
-                                                sha_opt = internal::helpers::get_sha_for_tag(
-                                                    &self.github_client,
-                                                    &action_repo,
-                                                    &no_v_tag,
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                        if let Some(sha) = sha_opt {
-                                            commit_sha = sha;
-                                        }
-                                    }
-
-                                    updated_lines.push(format!(
-                                        "{}{}@{} # {}",
-                                        indent, action, commit_sha, clean_new_tag
-                                    ));
-                                } else {
-                                    // Format: uses: owner/repo@v1
-                                    let old_req = target.current_version.requirement.clone();
-
-                                    let new_tag = if old_req.len() == 40
-                                        && target.target_version.version.len() == 40
-                                    {
-                                        target.target_version.version.clone() // user uses SHA without comment
+                                    if let Some(tag) = pretty_tag {
+                                        updated_lines.push(format!(
+                                            "{}{}@{} # {}",
+                                            indent, action, commit_sha, tag
+                                        ));
                                     } else {
-                                        clean_new_tag
-                                    };
-                                    updated_lines.push(format!("{}{}@{}", indent, action, new_tag));
+                                        updated_lines
+                                            .push(format!("{}{}@{}", indent, action, commit_sha));
+                                    }
+                                } else {
+                                    updated_lines
+                                        .push(format!("{}{}@{}", indent, action, commit_sha));
                                 }
                                 continue;
                             }
