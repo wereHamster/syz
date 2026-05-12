@@ -24,12 +24,10 @@ pub async fn run(
     github_client: clients::github::GitHub,
     dependency: &DiscoveredDependency,
 ) -> Result<DependencyUpdateOption> {
-    let full_name = match &dependency.purl.namespace {
+    let repo_name = match &dependency.purl.namespace {
         Some(ns) => format!("{}/{}", ns, dependency.purl.name),
         None => dependency.purl.name.clone(),
     };
-
-    let repo_name = helpers::extract_repo(&full_name);
 
     let versions = match fetch_releases(&github_client, &repo_name).await {
         Some(releases) => compute_versions(
