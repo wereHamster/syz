@@ -7,6 +7,9 @@ pub mod repository;
 
 pub use crate::core::types::{DiscoveredDependency, PURL};
 
+// Re-export the moved types for backward compatibility
+// (Actually, we are removing these re-exports and moving to explicit paths)
+
 /// A pair of version (the exact version as known by the ecosystem pacakge registry)
 /// as well as a requirement string that can be put into the manifest.
 ///
@@ -82,14 +85,6 @@ pub struct Release {
     pub publish_time: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Advisory {
-    pub id: String,
-    pub title: String,
-    pub url: String,
-    pub severity: String,
-}
-
 pub struct TransitiveUpdateSummary {
     pub added: Vec<(String, String)>,
     pub removed: Vec<(String, String)>,
@@ -100,23 +95,4 @@ pub struct TransitiveUpdateSummary {
 pub struct TransitiveUpdateResult {
     pub modifications: Vec<crate::core::engine::repository::FileModification>,
     pub summary: TransitiveUpdateSummary,
-}
-
-pub struct ResolvedAdvisoryBump {
-    pub before_versions: Vec<String>,
-    pub after_versions: Vec<String>,
-    pub advisories: Vec<serde_json::Value>,
-}
-
-pub struct SecurityUpdateSummary {
-    pub resolved_advisories: std::collections::HashMap<String, ResolvedAdvisoryBump>,
-    pub blocked_by_age:
-        std::collections::HashMap<String, Vec<(semver::Version, chrono::DateTime<chrono::Utc>)>>,
-    pub unfixable_vulnerabilities: std::collections::HashMap<String, Vec<serde_json::Value>>,
-    pub minimum_release_age: Option<chrono::Duration>,
-}
-
-pub struct SecurityUpdateResult {
-    pub modifications: Vec<crate::core::engine::repository::FileModification>,
-    pub summary: SecurityUpdateSummary,
 }

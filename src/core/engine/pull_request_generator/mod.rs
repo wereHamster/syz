@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::core::engine::{SecurityUpdateSummary, TransitiveUpdateSummary, UpdateTarget};
+use crate::core::engine::{
+    advisories::SecurityUpdateSummary, TransitiveUpdateSummary, UpdateTarget,
+};
 
 pub mod context;
 pub mod formatting;

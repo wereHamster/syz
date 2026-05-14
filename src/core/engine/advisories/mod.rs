@@ -1,7 +1,48 @@
-use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::core::engine::Advisory;
+/// Represents a single security advisory/vulnerability.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Advisory {
+    /// Unique identifier for the advisory (e.g., OSV ID).
+    ///
+    /// Example: `"GHSA-xxxx-xxxx-xxxx"` or `"OSV-ID-123"`.
+    pub id: String,
+
+    /// A short summary or title of the vulnerability.
+    ///
+    /// Example: `"Improper Input Validation in package-name"`.
+    pub title: String,
+
+    /// A URL pointing to more details about the advisory.
+    ///
+    /// Example: `"https://osv.dev/vulnerability/GHSA-xxxx-xxxx-xxxx"`.
+    pub url: String,
+
+    /// The severity level of the vulnerability (e.g., CVSS score or descriptive string).
+    ///
+    /// Example: `"7.5"` or `"HIGH"`.
+    pub severity: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedAdvisoryBump {
+    pub before_versions: Vec<String>,
+    pub after_versions: Vec<String>,
+    pub advisories: Vec<serde_json::Value>,
+}
+
+pub struct SecurityUpdateSummary {
+    pub resolved_advisories: std::collections::HashMap<String, ResolvedAdvisoryBump>,
+    pub blocked_by_age:
+        std::collections::HashMap<String, Vec<(semver::Version, chrono::DateTime<chrono::Utc>)>>,
+    pub unfixable_vulnerabilities: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    pub minimum_release_age: Option<chrono::Duration>,
+}
+
+pub struct SecurityUpdateResult {
+    pub modifications: Vec<crate::core::engine::repository::FileModification>,
+    pub summary: SecurityUpdateSummary,
+}
 
 #[async_trait]
 pub trait AdvisoryResolver: Send + Sync {
@@ -11,7 +52,7 @@ pub trait AdvisoryResolver: Send + Sync {
         name: &str,
         current_version: &str,
         target_version: &str,
-    ) -> Result<Vec<Advisory>>;
+    ) -> anyhow::Result<Vec<Advisory>>;
 }
 
 pub struct OsvAdvisoryResolver {
@@ -32,7 +73,7 @@ impl AdvisoryResolver for OsvAdvisoryResolver {
         name: &str,
         current_version: &str,
         target_version: &str,
-    ) -> Result<Vec<Advisory>> {
+    ) -> anyhow::Result<Vec<Advisory>> {
         let current_vulns = match self.client.query(ecosystem, name, current_version).await {
             Ok(v) => v,
             Err(_) => return Ok(Vec::new()),
@@ -67,8 +108,8 @@ impl AdvisoryResolver for OsvAdvisoryResolver {
                     let mut url = format!("https://osv.dev/vulnerability/{}", id);
                     if let Some(refs) = v.get("references").and_then(|r| r.as_array()) {
                         for r in refs {
-                            if let Some(t) = r.get("type").and_then(|t| t.as_str()) {
-                                if t == "ADVISORY" {
+                            if let Some(type_val) = r.get("type").and_then(|t| t.as_str()) {
+                                if type_val == "ADVISORY" {
                                     if let Some(u) = r.get("url").and_then(|u| u.as_str()) {
                                         url = u.to_string();
                                         break;

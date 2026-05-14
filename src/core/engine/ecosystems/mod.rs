@@ -84,7 +84,7 @@ pub trait Patcher: Send + Sync {
         &self,
         _snapshot: &dyn ProjectRepositorySnapshot,
         _temp_dir: &std::path::Path,
-    ) -> Result<Option<crate::core::engine::SecurityUpdateResult>> {
+    ) -> Result<Option<crate::core::engine::advisories::SecurityUpdateResult>> {
         Ok(None)
     }
 }

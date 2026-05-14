@@ -496,7 +496,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         &self,
         snapshot: &dyn ProjectRepositorySnapshot,
         temp_dir: &std::path::Path,
-    ) -> Result<Option<crate::core::engine::SecurityUpdateResult>> {
+    ) -> Result<Option<crate::core::engine::advisories::SecurityUpdateResult>> {
         let workspace = snapshot.read_file("pnpm-workspace.yaml").await.ok();
         let lockfile = snapshot.read_file("pnpm-lock.yaml").await.ok();
 
@@ -945,7 +945,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
 
             resolved_advisories_map.insert(
                 module_name,
-                crate::core::engine::ResolvedAdvisoryBump {
+                crate::core::engine::advisories::ResolvedAdvisoryBump {
                     before_versions: before_list,
                     after_versions: after_list,
                     advisories,
@@ -966,17 +966,19 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         if all_modifications.is_empty() {
             Ok(None)
         } else {
-            let summary = crate::core::engine::SecurityUpdateSummary {
+            let summary = crate::core::engine::advisories::SecurityUpdateSummary {
                 resolved_advisories: resolved_advisories_map,
                 blocked_by_age,
                 unfixable_vulnerabilities,
                 minimum_release_age,
             };
 
-            Ok(Some(crate::core::engine::SecurityUpdateResult {
-                modifications: all_modifications,
-                summary,
-            }))
+            Ok(Some(
+                crate::core::engine::advisories::SecurityUpdateResult {
+                    modifications: all_modifications,
+                    summary,
+                },
+            ))
         }
     }
 }
