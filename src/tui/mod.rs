@@ -13,6 +13,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use crate::tui::app::Event;
 
 mod app;
+pub mod views;
 
 pub struct Options {
     pub url: String,
