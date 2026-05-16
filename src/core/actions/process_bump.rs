@@ -5,6 +5,7 @@ use crate::core::message::Payload;
 use crate::core::store::BumpTargetData;
 use anyhow::Result;
 use tempfile::TempDir;
+use tracing::instrument::WithSubscriber;
 
 pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     let bump = app.store().bump(&bump_id).await?;
@@ -122,7 +123,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         {
             tracing::error!("Failed to send PersistBumpResult: {}", e);
         }
-    });
+    }.with_current_subscriber());
 
     Ok(())
 }

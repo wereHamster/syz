@@ -1,6 +1,7 @@
 use crate::core::application::Application;
 use anyhow::Result;
 use tempfile::TempDir;
+use tracing::instrument::WithSubscriber;
 
 pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let project = app.store().project(&project_id).await?;
@@ -95,7 +96,7 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                 tracing::error!("Failed to commit changes for transitive updates: {}", e);
             }
         }
-    });
+    }.with_current_subscriber());
 
     Ok(())
 }
