@@ -1,6 +1,6 @@
 use crate::core::database::{Bump, BumpDep, Dependency, Package, Project};
 use crate::core::message::Payload;
-use crate::tui::app::{Backend, Event, View, ViewAction, ViewType};
+use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crossterm::event::KeyCode;
 use ratatui::{
     prelude::*,
@@ -280,7 +280,10 @@ impl View for ProjectView {
         }
     }
 
-    fn hotkeys(&self) -> Vec<(String, String)> {
-        vec![("Space".to_string(), "Toggle Approval".to_string())]
+    fn hotkeys(&self) -> Vec<HotkeyDescriptor> {
+        vec![HotkeyDescriptor {
+            key: "Space".to_string(),
+            description: "Toggle Approval".to_string(),
+        }]
     }
 }

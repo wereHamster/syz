@@ -73,6 +73,30 @@ pub enum Effect {
     SendPayload(Payload),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotkeyDescriptor {
+    /// The key (or sequence of keys) that triggers this hotkey.
+    pub key: String,
+
+    /// A human-readable description of what this hotkey does.
+    pub description: String,
+}
+
+impl HotkeyDescriptor {
+    pub fn render(&self) -> Vec<Span<'static>> {
+        vec![
+            Span::styled(
+                self.key.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}", self.description),
+                Style::default().fg(Color::Gray),
+            ),
+        ]
+    }
+}
+
 pub trait View {
     /// Handles user input and returns a list of side-effects (e.g., sending payloads or switching views).
     fn update(&mut self, event: &Event, backend: &Backend) -> Vec<ViewAction>;
@@ -81,7 +105,7 @@ pub trait View {
     fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect);
 
     /// Returns a list of hotkeys supported by this view for the UI footer.
-    fn hotkeys(&self) -> Vec<(String, String)>;
+    fn hotkeys(&self) -> Vec<HotkeyDescriptor>;
 }
 
 #[derive(Eq, PartialEq)]
@@ -241,26 +265,22 @@ impl App {
         );
 
         // 4. Hotkeys
-        let mut hotkey_spans = vec![
-            Span::styled("Q", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(" Quit", Style::default().fg(Color::Gray)),
-        ];
+        let mut hotkey_spans = Vec::new();
+
+        let quit_hotkey = HotkeyDescriptor {
+            key: "Q".to_string(),
+            description: "Quit".to_string(),
+        };
+        hotkey_spans.extend(quit_hotkey.render());
 
         let view_hotkeys = match self.current_view_type {
             ViewType::Overview => self.overview_view.hotkeys(),
             ViewType::Project(_) => self.project_view.hotkeys(),
         };
 
-        for (key, desc) in view_hotkeys {
+        for hotkey in view_hotkeys {
             hotkey_spans.push(Span::from("    "));
-            hotkey_spans.push(Span::styled(
-                key,
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-            hotkey_spans.push(Span::styled(
-                format!(" {}", desc),
-                Style::default().fg(Color::Gray),
-            ));
+            hotkey_spans.extend(hotkey.render());
         }
 
         let hotkey_text = Line::from(hotkey_spans);

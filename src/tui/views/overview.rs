@@ -1,5 +1,5 @@
 use crate::core::database::Project;
-use crate::tui::app::{Backend, Event, View, ViewAction, ViewType};
+use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crossterm::event::KeyCode;
 use ratatui::{
     prelude::*,
@@ -156,7 +156,7 @@ impl View for OverviewView {
         frame.render_stateful_widget(table, overview_chunks[2], &mut self.table_state);
     }
 
-    fn hotkeys(&self) -> Vec<(String, String)> {
+    fn hotkeys(&self) -> Vec<HotkeyDescriptor> {
         vec![]
     }
 }
