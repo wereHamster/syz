@@ -14,7 +14,7 @@ pub struct Message {
     pub payload: Payload,
 }
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum Payload {
     /// Broadcast current state of the application to all clients.
