@@ -1,10 +1,12 @@
-use crate::core::database::Project;
+use crate::core::database::{Bump, Project};
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crossterm::event::KeyCode;
 use ratatui::{
     prelude::*,
+    text::{Line, Span},
     widgets::{Cell, Paragraph, Row, Table, TableState},
 };
+use std::collections::HashMap;
 
 pub struct OverviewView {
     pub selected_index: usize,
@@ -116,6 +118,24 @@ impl View for OverviewView {
                 .then_with(|| a.repository.cmp(&b.repository))
         });
 
+        let mut bumps_by_project: HashMap<String, (usize, usize, usize)> = HashMap::new();
+        for (path, value) in backend.db.iter() {
+            if path.starts_with("bump/") {
+                if let Ok(bump) = serde_json::from_value::<Bump>(value.clone()) {
+                    let stats = bumps_by_project
+                        .entry(bump.project_id.clone())
+                        .or_insert((0, 0, 0));
+                    stats.0 += 1;
+                    if bump.approved {
+                        stats.1 += 1;
+                    }
+                    if bump.url.is_some() {
+                        stats.2 += 1;
+                    }
+                }
+            }
+        }
+
         let max_platform_len = projects
             .iter()
             .map(|p| p.platform.len())
@@ -133,9 +153,51 @@ impl View for OverviewView {
                 } else {
                     Style::default().fg(Color::Gray)
                 };
+
+                let (total_bumps, approved_bumps, pr_bumps) =
+                    bumps_by_project.get(&p.id).cloned().unwrap_or((0, 0, 0));
+
+                let mut bumps_spans = Vec::new();
+
+                let add_bump_spans = |val: usize, spans: &mut Vec<Span>| {
+                    if val == 0 {
+                        spans.push(Span::styled("   ", Style::default().fg(Color::DarkGray)));
+                    } else {
+                        let s = val.to_string();
+                        let padding_len = 3usize.saturating_sub(s.len());
+
+                        if padding_len > 0 {
+                            spans.push(Span::styled(
+                                " ".repeat(padding_len),
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                        }
+
+                        let val_style = Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD);
+                        spans.push(Span::styled(s, val_style));
+                    }
+                };
+
+                add_bump_spans(total_bumps, &mut bumps_spans);
+                bumps_spans.push(Span::styled(
+                    " | ".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                add_bump_spans(approved_bumps, &mut bumps_spans);
+                bumps_spans.push(Span::styled(
+                    " | ".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                add_bump_spans(pr_bumps, &mut bumps_spans);
+
+                let bumps_line = Line::from(bumps_spans);
+
                 Row::new(vec![
                     Cell::from(p.platform.clone()),
                     Cell::from(p.repository.clone()),
+                    Cell::from(bumps_line),
                 ])
                 .style(style)
             })
@@ -146,10 +208,11 @@ impl View for OverviewView {
             [
                 Constraint::Length(platform_width as u16),
                 Constraint::Min(0),
+                Constraint::Length(20),
             ],
         )
         .header(
-            Row::new(vec!["Platform", "Repository"])
+            Row::new(vec!["Platform", "Repository", "Bumps"])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         );
 
