@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
+use tracing::Instrument;
 
 use crate::core::clients;
 use crate::core::platform::{GitHubPlatformAdapter, PlatformRegistry, TangledPlatformAdapter};
@@ -160,10 +161,12 @@ impl Application {
 
     async fn run(mut self) -> Result<()> {
         while let Some(msg) = self.mailbox.recv().await {
-            tracing::info!("Processing message {}", msg.message_id);
+            let message_id = msg.message_id.clone();
+            tracing::info!("Processing message {}", message_id);
 
-            if let Err(e) = msg.payload.execute(&self).await {
-                tracing::warn!("Failed to process message {}: {:#}", msg.message_id, e);
+            let span = tracing::info_span!("process_message", mid = %message_id);
+            if let Err(e) = msg.payload.execute(&self).instrument(span).await {
+                tracing::warn!("Failed to process message {}: {:#}", message_id, e);
             }
         }
 
