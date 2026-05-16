@@ -9,7 +9,6 @@ use ratatui::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 
 pub struct Backend {
     /// The last 100 log messages that the server has sent.
@@ -52,6 +51,10 @@ impl Backend {
     }
 }
 
+pub enum Effect {
+    SendPayload(Payload),
+}
+
 pub enum View {
     /// Overview showing all projects.
     Overview,
@@ -76,7 +79,6 @@ pub struct App {
     pub table_state: TableState,
     pub selected_bump_index: usize,
     pub bump_table_state: TableState,
-    pub payload_tx: mpsc::Sender<Payload>,
 }
 
 pub enum Event {
@@ -86,7 +88,7 @@ pub enum Event {
 }
 
 impl App {
-    pub fn new(payload_tx: mpsc::Sender<Payload>) -> Self {
+    pub fn new() -> Self {
         let mut table_state = TableState::default();
         table_state.select(Some(0));
         Self {
@@ -98,11 +100,11 @@ impl App {
             table_state,
             selected_bump_index: 0,
             bump_table_state: TableState::default(),
-            payload_tx,
         }
     }
 
-    pub fn update(&mut self, event: Event) {
+    pub fn update(&mut self, event: Event) -> Vec<Effect> {
+        let mut effects = Vec::new();
         match event {
             Event::Term(event) => match event {
                 crossterm::event::Event::Key(key) => match key.code {
@@ -253,7 +255,7 @@ impl App {
                                         bump_id: bump.id.clone(),
                                     }
                                 };
-                                let _ = self.payload_tx.try_send(payload);
+                                effects.push(Effect::SendPayload(payload));
                             }
                         }
                     }
@@ -270,6 +272,7 @@ impl App {
                 self.dirty = true;
             }
         }
+        effects
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {

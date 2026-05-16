@@ -43,13 +43,14 @@ pub async fn run(options: Options) -> Result<()> {
 }
 
 async fn run_app<B: Backend>(options: Options, terminal: &mut Terminal<B>) -> Result<()> {
-    let (payload_tx, payload_rx) = mpsc::channel(100);
-    let mut app = app::App::new(payload_tx.clone());
+    let mut app = app::App::new();
     terminal.draw(|frame| app.draw(frame))?;
 
     let (tx, mut rx) = mpsc::channel(100);
 
     pump_term_events(tx.clone());
+
+    let (payload_tx, payload_rx) = mpsc::channel(100);
     pump_core_events(
         tx.clone(),
         options.url.clone(),
@@ -60,7 +61,15 @@ async fn run_app<B: Backend>(options: Options, terminal: &mut Terminal<B>) -> Re
     let mut redraw_timer_handle: Option<JoinHandle<()>> = None;
 
     while let Some(event) = rx.recv().await {
-        app.update(event);
+        let effects = app.update(event);
+
+        for effect in effects {
+            match effect {
+                app::Effect::SendPayload(payload) => {
+                    let _ = payload_tx.try_send(payload);
+                }
+            }
+        }
 
         if app.lifecycle == app::Lifecycle::Exiting {
             break;
