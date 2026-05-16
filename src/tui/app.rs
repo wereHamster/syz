@@ -174,6 +174,7 @@ impl App {
                                 }
                             }
                         }
+                        self.dirty = true;
                     }
                 },
                 _ => {}
