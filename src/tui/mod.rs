@@ -43,13 +43,19 @@ pub async fn run(options: Options) -> Result<()> {
 }
 
 async fn run_app<B: Backend>(options: Options, terminal: &mut Terminal<B>) -> Result<()> {
-    let mut app = app::App::new();
+    let (payload_tx, payload_rx) = mpsc::channel(100);
+    let mut app = app::App::new(payload_tx.clone());
     terminal.draw(|frame| app.draw(frame))?;
 
     let (tx, mut rx) = mpsc::channel(100);
 
     pump_term_events(tx.clone());
-    pump_core_events(tx.clone(), options.url.clone(), options.token.clone());
+    pump_core_events(
+        tx.clone(),
+        options.url.clone(),
+        options.token.clone(),
+        payload_rx,
+    );
 
     let mut redraw_timer_handle: Option<JoinHandle<()>> = None;
 
@@ -92,7 +98,12 @@ fn pump_term_events(tx: mpsc::Sender<app::Event>) {
     });
 }
 
-fn pump_core_events(tx: mpsc::Sender<app::Event>, url: String, token: String) {
+fn pump_core_events(
+    tx: mpsc::Sender<app::Event>,
+    url: String,
+    token: String,
+    mut payload_rx: mpsc::Receiver<crate::core::message::Payload>,
+) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
 
@@ -164,39 +175,52 @@ fn pump_core_events(tx: mpsc::Sender<app::Event>, url: String, token: String) {
         let mut stream = res.bytes_stream();
         let mut buffer = Vec::new();
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    buffer.extend_from_slice(&bytes);
-                    while let Some(pos) = buffer.windows(2).position(|w| w == b"\n\n") {
-                        let event = buffer.drain(..pos + 2).collect::<Vec<_>>();
-                        let text = String::from_utf8_lossy(&event);
-                        for line in text.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if let Ok(ev) =
-                                    serde_json::from_str::<crate::core::event::Event>(data)
-                                {
-                                    let _ = tx.send(Event::Core(ev)).await;
-                                } else {
-                                    let _ = tx
-                                        .send(Event::Core(crate::core::event::Event::Trace {
-                                            level: tracing::Level::INFO,
-                                            message: data.to_string(),
-                                        }))
-                                        .await;
+        loop {
+            tokio::select! {
+                res = stream.next() => {
+                    match res {
+                        Some(Ok(bytes)) => {
+                            buffer.extend_from_slice(&bytes);
+                            while let Some(pos) = buffer.windows(2).position(|w| w == b"\n\n") {
+                                let event_bytes = buffer.drain(..pos + 2).collect::<Vec<_>>();
+                                let text = String::from_utf8_lossy(&event_bytes);
+                                for line in text.lines() {
+                                    if let Some(data) = line.strip_prefix("data: ") {
+                                        if let Ok(ev) =
+                                            serde_json::from_str::<crate::core::event::Event>(data)
+                                        {
+                                            let _ = tx.send(Event::Core(ev)).await;
+                                        } else {
+                                            let _ = tx
+                                                .send(Event::Core(crate::core::event::Event::Trace {
+                                                    level: tracing::Level::INFO,
+                                                    message: data.to_string(),
+                                                }))
+                                                .await;
+                                        }
+                                    }
                                 }
                             }
                         }
+                        Some(Err(e)) => {
+                            let _ = tx
+                                .send(Event::Core(crate::core::event::Event::Trace {
+                                    level: tracing::Level::INFO,
+                                    message: format!("Stream error: {}", e),
+                                }))
+                                .await;
+                            break;
+                        }
+                        None => break,
                     }
                 }
-                Err(e) => {
-                    let _ = tx
-                        .send(Event::Core(crate::core::event::Event::Trace {
-                            level: tracing::Level::INFO,
-                            message: format!("Stream error: {}", e),
-                        }))
+                Some(payload) = payload_rx.recv() => {
+                    let _ = client
+                        .post(format!("{}/messages", url))
+                        .header("Authorization", format!("Bearer {}", token))
+                        .json(&payload)
+                        .send()
                         .await;
-                    break;
                 }
             }
         }

@@ -1,5 +1,6 @@
 use crate::core::database::{Bump, BumpDep, Dependency, Package, Project};
 use crate::core::event::Op;
+use crate::core::message::Payload;
 use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::{
@@ -8,6 +9,7 @@ use ratatui::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 pub struct Backend {
     /// The last 100 log messages that the server has sent.
@@ -74,6 +76,7 @@ pub struct App {
     pub table_state: TableState,
     pub selected_bump_index: usize,
     pub bump_table_state: TableState,
+    pub payload_tx: mpsc::Sender<Payload>,
 }
 
 pub enum Event {
@@ -83,7 +86,7 @@ pub enum Event {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(payload_tx: mpsc::Sender<Payload>) -> Self {
         let mut table_state = TableState::default();
         table_state.select(Some(0));
         Self {
@@ -95,6 +98,7 @@ impl App {
             table_state,
             selected_bump_index: 0,
             bump_table_state: TableState::default(),
+            payload_tx,
         }
     }
 
@@ -216,12 +220,41 @@ impl App {
                                 let project = &projects[self.selected_index];
                                 self.view = View::Project(project.id.clone());
                                 self.bump_table_state.select(Some(0));
+                                self.selected_bump_index = 0;
                             }
                         }
                     }
                     KeyCode::Left => {
                         if let View::Project(_) = self.view {
                             self.view = View::Overview;
+                        }
+                    }
+                    KeyCode::Char(' ') => {
+                        if let View::Project(project_id) = &self.view {
+                            let mut bumps: Vec<Bump> = self
+                                .backend
+                                .db
+                                .iter()
+                                .filter(|(path, _)| path.starts_with("bump/"))
+                                .filter_map(|(_, value)| {
+                                    serde_json::from_value::<Bump>(value.clone()).ok()
+                                })
+                                .filter(|b| b.project_id == *project_id)
+                                .collect();
+                            bumps.sort_by(|a, b| a.name.cmp(&b.name));
+
+                            if let Some(bump) = bumps.get(self.selected_bump_index) {
+                                let payload = if bump.approved {
+                                    Payload::RetractBumpApproval {
+                                        bump_id: bump.id.clone(),
+                                    }
+                                } else {
+                                    Payload::ApproveBump {
+                                        bump_id: bump.id.clone(),
+                                    }
+                                };
+                                let _ = self.payload_tx.try_send(payload);
+                            }
                         }
                     }
                     _ => {}
@@ -561,10 +594,24 @@ impl App {
         );
 
         // 4. Hotkeys
-        let hotkey_text = Line::from(vec![
+        let mut hotkeys = vec![
             Span::styled("Q", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(" Quit", Style::default().fg(Color::Gray)),
-        ]);
+        ];
+
+        if let View::Project(_) = self.view {
+            hotkeys.push(Span::from("    "));
+            hotkeys.push(Span::styled(
+                "Space",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            hotkeys.push(Span::styled(
+                " Toggle Approval",
+                Style::default().fg(Color::Gray),
+            ));
+        }
+
+        let hotkey_text = Line::from(hotkeys);
         frame.render_widget(Paragraph::new(hotkey_text), hotkeys_area);
     }
 }
