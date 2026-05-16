@@ -1,4 +1,5 @@
 use crate::core::database::{Bump, Project};
+use crate::core::message::Payload;
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -79,6 +80,11 @@ impl View for OverviewView {
                             project.id.clone(),
                         ))];
                     }
+                }
+                KeyCode::Char('s') => {
+                    return vec![ViewAction::SendPayload(
+                        Payload::AnalyzeAllProjectsDependencies,
+                    )];
                 }
                 _ => {}
             }
@@ -220,6 +226,9 @@ impl View for OverviewView {
     }
 
     fn hotkeys(&self) -> Vec<HotkeyDescriptor> {
-        vec![]
+        vec![HotkeyDescriptor {
+            key: "S".to_string(),
+            description: "Scan".to_string(),
+        }]
     }
 }

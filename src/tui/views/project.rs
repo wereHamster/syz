@@ -101,6 +101,45 @@ impl View for ProjectView {
                             return vec![ViewAction::SendPayload(payload)];
                         }
                     }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        return vec![ViewAction::SendPayload(
+                            Payload::AnalyzeProjectDependencies {
+                                project_id: self.project_id.clone(),
+                            },
+                        )];
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        let mut bumps: Vec<Bump> = backend
+                            .db
+                            .iter()
+                            .filter(|(path, _)| path.starts_with("bump/"))
+                            .filter_map(|(_, value)| {
+                                serde_json::from_value::<Bump>(value.clone()).ok()
+                            })
+                            .filter(|b| b.project_id == self.project_id)
+                            .collect();
+                        bumps.sort_by(|a, b| a.name.cmp(&b.name));
+
+                        if let Some(bump) = bumps.get(self.selected_bump_index) {
+                            return vec![ViewAction::SendPayload(Payload::ProcessBump {
+                                bump_id: bump.id.clone(),
+                            })];
+                        }
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        return vec![ViewAction::SendPayload(
+                            Payload::UpdateVulnerableDependencies {
+                                project_id: self.project_id.clone(),
+                            },
+                        )];
+                    }
+                    KeyCode::Char('t') | KeyCode::Char('T') => {
+                        return vec![ViewAction::SendPayload(
+                            Payload::UpdateTransitiveDependencies {
+                                project_id: self.project_id.clone(),
+                            },
+                        )];
+                    }
                     _ => {}
                 }
             }
@@ -248,6 +287,7 @@ impl View for ProjectView {
                         };
 
                         let approved_checkbox = if b.approved { "[x]" } else { "[ ]" };
+                        let pr_url = b.url.clone().unwrap_or_default();
 
                         Row::new(vec![
                             Cell::from(approved_checkbox),
@@ -255,6 +295,7 @@ impl View for ProjectView {
                             Cell::from(current_col),
                             Cell::from(target_col),
                             Cell::from(final_head_col),
+                            Cell::from(pr_url),
                         ])
                         .style(style)
                     })
@@ -268,11 +309,19 @@ impl View for ProjectView {
                         Constraint::Length(15),
                         Constraint::Length(15),
                         Constraint::Length(15),
+                        Constraint::Min(0),
                     ],
                 )
                 .header(
-                    Row::new(vec!["", "Name", "Current", "Target", "Head"])
-                        .style(Style::default().add_modifier(Modifier::BOLD)),
+                    Row::new(vec![
+                        "",
+                        "Name",
+                        "Current",
+                        "Target",
+                        "Head",
+                        "Pull Request",
+                    ])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                 );
 
                 frame.render_stateful_widget(table, project_chunks[2], &mut self.bump_table_state);
@@ -281,9 +330,27 @@ impl View for ProjectView {
     }
 
     fn hotkeys(&self) -> Vec<HotkeyDescriptor> {
-        vec![HotkeyDescriptor {
-            key: "Space".to_string(),
-            description: "Toggle Approval".to_string(),
-        }]
+        vec![
+            HotkeyDescriptor {
+                key: "S".to_string(),
+                description: "Scan".to_string(),
+            },
+            HotkeyDescriptor {
+                key: "Space".to_string(),
+                description: "Toggle".to_string(),
+            },
+            HotkeyDescriptor {
+                key: "P".to_string(),
+                description: "Process".to_string(),
+            },
+            HotkeyDescriptor {
+                key: "A".to_string(),
+                description: "Audit".to_string(),
+            },
+            HotkeyDescriptor {
+                key: "T".to_string(),
+                description: "Transitive".to_string(),
+            },
+        ]
     }
 }
