@@ -441,11 +441,11 @@ impl Store {
                     };
 
                     let target_ver = bump_version.clone();
-                    let min_age_mins = min_release_age.map(|d| d.num_minutes());
+                    let min_age_secs = min_release_age.map(|d| d.num_seconds());
 
                     conn.execute(
                         "INSERT INTO bumpdep (bump_id, dependency_id, target_version, head_version, minimum_release_age) VALUES (?, ?, ?, ?, ?)",
-                        params![bump_id.clone(), dep_id.as_str(), target_ver.clone(), head_ver.clone(), min_age_mins]
+                        params![bump_id.clone(), dep_id.as_str(), target_ver.clone(), head_ver.clone(), min_age_secs]
                     ).await?;
 
                     ops.push(Op::Upsert {
@@ -455,7 +455,7 @@ impl Store {
                             "dependency_id": dep_id,
                             "target_version": target_ver,
                             "head_version": head_ver,
-                            "minimum_release_age": min_age_mins
+                            "minimum_release_age": min_age_secs
                         }),
                     });
                 }
