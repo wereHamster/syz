@@ -165,15 +165,15 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         tracing::info!("Running pnpm install in temp directory to update lockfile...");
-        if !run_pnpm_install(temp_dir, workspace.is_some(), true, false)? {
+        if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), true, false).await? {
             tracing::info!("Fallback: Running without --lockfile-only...");
-            if !run_pnpm_install(temp_dir, workspace.is_some(), false, false)? {
+            if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), false, false).await? {
                 anyhow::bail!("pnpm install failed");
             }
         }
 
         tracing::info!("Running pnpm dedupe...");
-        if !run_pnpm_dedupe(temp_dir, false)? {
+        if !run_pnpm_dedupe(temp_dir.to_path_buf(), false).await? {
             tracing::warn!("pnpm dedupe failed, continuing anyway...");
         }
 
@@ -296,7 +296,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             fs::write(&full_path, serde_json::to_string_pretty(pkg_json)? + "\n")?;
         }
 
-        run_pnpm_install(temp_dir, is_workspace, true, true)?;
+        run_pnpm_install(temp_dir.to_path_buf(), is_workspace, true, true).await?;
 
         tracing::info!("Phase 2: Adding dependencies with exact versions");
         for (path, pkg_json) in mutable_pkg_jsons.iter_mut() {
@@ -345,7 +345,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             fs::write(&full_path, serde_json::to_string_pretty(pkg_json)? + "\n")?;
         }
 
-        run_pnpm_install(temp_dir, is_workspace, true, true)?;
+        run_pnpm_install(temp_dir.to_path_buf(), is_workspace, true, true).await?;
 
         tracing::info!("Phase 3: Restoring original package.json specs");
         for (path, original_content) in &original_pkg_jsons {
@@ -353,10 +353,10 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             fs::write(&full_path, original_content)?;
         }
 
-        run_pnpm_install(temp_dir, is_workspace, false, false)?;
+        run_pnpm_install(temp_dir.to_path_buf(), is_workspace, false, false).await?;
 
         tracing::info!("Running pnpm dedupe to consolidate transitive dependencies...");
-        if !run_pnpm_dedupe(temp_dir, false)? {
+        if !run_pnpm_dedupe(temp_dir.to_path_buf(), false).await? {
             tracing::warn!("pnpm dedupe failed, continuing anyway...");
         }
 
@@ -537,7 +537,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         tracing::info!("Running pnpm audit --json for baseline...");
-        let baseline_json = run_pnpm_audit(temp_dir)?;
+        let baseline_json = run_pnpm_audit(temp_dir.to_path_buf()).await?;
 
         let mut baseline_advisories = std::collections::HashMap::new();
         if let Some(advs) = baseline_json.get("advisories").and_then(|a| a.as_object()) {
@@ -830,7 +830,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         tracing::info!("Running pnpm audit --json for post-fix comparison...");
-        let after_json = run_pnpm_audit(temp_dir)?;
+        let after_json = run_pnpm_audit(temp_dir.to_path_buf()).await?;
 
         let mut after_advisories = std::collections::HashSet::new();
         if let Some(advs) = after_json.get("advisories").and_then(|a| a.as_object()) {
@@ -943,57 +943,69 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
     }
 }
 
-fn run_pnpm_install(
-    dir_path: &std::path::Path,
+async fn run_pnpm_install(
+    dir_path: std::path::PathBuf,
     is_workspace: bool,
     lockfile_only: bool,
     silent: bool,
 ) -> Result<bool> {
-    let mut cmd = Command::new("pnpm");
-    cmd.arg("install");
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = Command::new("pnpm");
+        cmd.arg("install");
 
-    if lockfile_only {
-        cmd.arg("--lockfile-only");
-    }
+        if lockfile_only {
+            cmd.arg("--lockfile-only");
+        }
 
-    cmd.arg("--ignore-scripts");
+        cmd.arg("--ignore-scripts");
 
-    if is_workspace {
-        cmd.arg("--recursive");
-    }
+        if is_workspace {
+            cmd.arg("--recursive");
+        }
 
-    if silent {
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-    }
+        if silent {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
 
-    let success = cmd.current_dir(dir_path).status()?.success();
-    Ok(success)
+        let success = cmd.current_dir(&dir_path).status()?.success();
+        Ok(success)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
 }
 
-fn run_pnpm_dedupe(dir_path: &std::path::Path, silent: bool) -> Result<bool> {
-    let mut cmd = Command::new("pnpm");
-    cmd.arg("dedupe").arg("--ignore-scripts");
+async fn run_pnpm_dedupe(dir_path: std::path::PathBuf, silent: bool) -> Result<bool> {
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = Command::new("pnpm");
+        cmd.arg("dedupe").arg("--ignore-scripts");
 
-    if silent {
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-    }
+        if silent {
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
 
-    let success = cmd.current_dir(dir_path).status()?.success();
-    Ok(success)
+        let success = cmd.current_dir(&dir_path).status()?.success();
+        Ok(success)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
 }
 
-fn run_pnpm_audit(dir_path: &std::path::Path) -> Result<serde_json::Value> {
-    let output = Command::new("pnpm")
-        .arg("audit")
-        .arg("--json")
-        .current_dir(dir_path)
-        .output()?;
+async fn run_pnpm_audit(dir_path: std::path::PathBuf) -> Result<serde_json::Value> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("pnpm")
+            .arg("audit")
+            .arg("--json")
+            .current_dir(&dir_path)
+            .output()?;
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap_or(serde_json::json!({}));
-    Ok(json)
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or(serde_json::json!({}));
+        Ok(json)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
 }
 
 pub(crate) fn extract_versions_from_lock(
