@@ -63,6 +63,24 @@ impl Store {
         Err(anyhow::anyhow!("Project not found"))
     }
 
+    pub async fn add_project(&self, platform: String, repository: String) -> Result<Project> {
+        let conn = self.database.conn()?;
+        let id = pk();
+
+        conn.execute(
+            "INSERT INTO project (id, platform, repository) VALUES (?, ?, ?)",
+            params![id.as_str(), platform.as_str(), repository.as_str()],
+        )
+        .await
+        .context("Failed to insert project")?;
+
+        Ok(Project {
+            id,
+            platform,
+            repository,
+        })
+    }
+
     pub async fn list_dependencies(&self) -> Result<Vec<Dependency>> {
         let conn = self.database.conn()?;
 

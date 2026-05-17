@@ -29,6 +29,12 @@ pub enum Payload {
         project_id: String,
     },
 
+    /// Add a new project to the database.
+    AddProject {
+        platform: String,
+        repository: String,
+    },
+
     /// Approve a Bump to be processed. This only updates the database but does not
     /// schedule the actual update task.
     ApproveBump {
@@ -137,6 +143,19 @@ impl Payload {
 
             Payload::AnalyzeProjectDependencies { project_id } => {
                 super::actions::analyze_project_dependencies::run(app, project_id).await
+            }
+
+            Payload::AddProject { platform, repository } => {
+                let project = app.store().add_project(platform, repository).await?;
+
+                app.handle().broadcast(crate::core::event::Event::Commit {
+                    ops: vec![crate::core::event::Op::Upsert {
+                        path: format!("project/{}", project.id),
+                        data: serde_json::to_value(project).unwrap_or_default(),
+                    }],
+                })?;
+
+                Ok(())
             }
 
             Payload::ApproveBump { bump_id } => {
