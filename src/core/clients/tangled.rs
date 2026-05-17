@@ -590,7 +590,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
                                 None
                             }
                         }) {
-                            if repo_uri == &self.repo_at_uri {
+                            if repo_uri == &self.repo_at_uri || repo_uri == &self.repo_did {
                                 if let Some(source) = obj.get("source").and_then(|v| {
                                     if let ipld_core::ipld::Ipld::Map(m) = &**v {
                                         Some(m)
@@ -756,7 +756,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
                 "branch": head_branch,
             },
             "target": {
-                "repo": self.repo_at_uri,
+                "repo": &self.repo_did,
                 "branch": base_branch,
             },
             "rounds": [new_round]
