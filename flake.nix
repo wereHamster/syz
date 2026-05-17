@@ -19,6 +19,23 @@
 
       in
       {
+        packages = {
+          default = pkgs.rustPlatform.buildRustPackage {
+            pname = "syz";
+            version = "0.1.0";
+
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+
+            nativeBuildInputs = with pkgs; [
+              perl
+              gnumake
+            ];
+
+            doCheck = false;
+          };
+        };
+
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
             rustc
