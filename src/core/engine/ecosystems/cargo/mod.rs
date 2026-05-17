@@ -113,7 +113,10 @@ impl Patcher for CargoPatcher {
                             }
                         } else if let Some(t) = val.as_inline_table_mut() {
                             if t.contains_key("version") {
-                                t.insert("version", target.target_version.requirement.clone().into());
+                                t.insert(
+                                    "version",
+                                    target.target_version.requirement.clone().into(),
+                                );
                             }
                         } else if let Some(t) = val.as_table_mut() {
                             if t.contains_key("version") {

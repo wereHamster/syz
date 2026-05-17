@@ -73,6 +73,30 @@ pub enum Payload {
     },
 }
 
+impl std::fmt::Display for Payload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Payload::Bootstrap => write!(f, "Bootstrap"),
+            Payload::AnalyzeAllProjectsDependencies => write!(f, "AnalyzeAllProjectsDependencies"),
+            Payload::AnalyzeProjectDependencies { .. } => write!(f, "AnalyzeProjectDependencies"),
+            Payload::AddProject { .. } => write!(f, "AddProject"),
+            Payload::ApproveBump { .. } => write!(f, "ApproveBump"),
+            Payload::RetractBumpApproval { .. } => write!(f, "RetractBumpApproval"),
+            Payload::ProcessBump { .. } => write!(f, "ProcessBump"),
+            Payload::UpdateTransitiveDependencies { .. } => {
+                write!(f, "UpdateTransitiveDependencies")
+            }
+            Payload::UpdateVulnerableDependencies { .. } => {
+                write!(f, "UpdateVulnerableDependencies")
+            }
+            Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
+            Payload::PersistAnalyzedProjectDependencies { .. } => {
+                write!(f, "PersistAnalyzedProjectDependencies")
+            }
+        }
+    }
+}
+
 impl Payload {
     pub async fn execute(self, app: &Application) -> Result<()> {
         match self {
@@ -145,7 +169,10 @@ impl Payload {
                 super::actions::analyze_project_dependencies::run(app, project_id).await
             }
 
-            Payload::AddProject { platform, repository } => {
+            Payload::AddProject {
+                platform,
+                repository,
+            } => {
                 let project = app.store().add_project(platform, repository).await?;
 
                 app.handle().broadcast(crate::core::event::Event::Commit {

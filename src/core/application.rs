@@ -162,9 +162,12 @@ impl Application {
     async fn run(mut self) -> Result<()> {
         while let Some(msg) = self.mailbox.recv().await {
             let message_id = msg.message_id.clone();
-            tracing::info!("Processing message {}", message_id);
 
-            let span = tracing::info_span!("process_message", mid = %message_id);
+            let span = tracing::info_span!("message", mid = %message_id);
+            span.in_scope(|| {
+                tracing::info!("Processing {:}", msg.payload);
+            });
+
             if let Err(e) = msg.payload.execute(&self).instrument(span).await {
                 tracing::warn!("Failed to process message {}: {:#}", message_id, e);
             }
