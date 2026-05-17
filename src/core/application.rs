@@ -164,13 +164,16 @@ impl Application {
             let message_id = msg.message_id.clone();
 
             let span = tracing::info_span!("message", mid = %message_id);
-            span.in_scope(|| {
-                tracing::info!("Processing {:}", msg.payload);
-            });
 
-            if let Err(e) = msg.payload.execute(&self).instrument(span).await {
-                tracing::warn!("Failed to process message {}: {:#}", message_id, e);
+            async {
+                tracing::info!("Processing {:}", msg.payload);
+
+                if let Err(e) = msg.payload.execute(&self).await {
+                    tracing::warn!("Failed to process message {}: {:#}", message_id, e);
+                }
             }
+            .instrument(span)
+            .await;
         }
 
         tracing::error!("Application loop is unexpectedly exiting");
