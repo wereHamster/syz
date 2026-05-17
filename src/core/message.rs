@@ -200,9 +200,15 @@ impl Payload {
                 project_id,
                 scan_result,
             } => {
-                app.store()
+                let ops = app
+                    .store()
                     .persist_analyzed_project_dependencies(&project_id, scan_result)
-                    .await
+                    .await?;
+
+                app.handle()
+                    .broadcast(crate::core::event::Event::Commit { ops })?;
+
+                Ok(())
             }
         }
     }

@@ -6,6 +6,7 @@ use crate::core::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
 };
 use crate::core::database::{pk, Bump, BumpDep, Database, Dependency, Package, Project};
+use crate::core::event::Op;
 
 #[derive(Clone)]
 pub struct Store {
@@ -254,7 +255,8 @@ impl Store {
         &self,
         project_id: &str,
         scan_result: AnalyzedProjectDependencies,
-    ) -> Result<()> {
+    ) -> Result<Vec<Op>> {
+        let mut ops = Vec::new();
         let scan_id = pk();
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -286,6 +288,18 @@ impl Store {
         }
 
         for b_id in bump_ids_to_wipe {
+            let mut bumpdeps_to_delete_query = conn
+                .query(
+                    "SELECT dependency_id FROM bumpdep WHERE bump_id = ?",
+                    params![b_id.clone()],
+                )
+                .await?;
+            while let Some(row) = bumpdeps_to_delete_query.next().await? {
+                let dep_id = row.get_value(0)?.as_text().unwrap().to_string();
+                ops.push(Op::Delete {
+                    path: format!("bumpdep/{}/{}", b_id, dep_id),
+                });
+            }
             conn.execute("DELETE FROM bumpdep WHERE bump_id = ?", params![b_id])
                 .await?;
         }
@@ -332,15 +346,38 @@ impl Store {
                         "INSERT INTO package (id, type, namespace, name, subpath, version) VALUES (?, ?, ?, ?, ?, ?)",
                         params![new_pkg_id.as_str(), eco_name.as_str(), namespace.as_deref(), db_name.as_str(), subpath.as_deref(), pkg_version.as_str()]
                     ).await?;
+
+                    ops.push(Op::Upsert {
+                        path: format!("package/{}", new_pkg_id),
+                        data: serde_json::json!({
+                            "id": new_pkg_id,
+                            "type": eco_name,
+                            "namespace": namespace,
+                            "name": db_name,
+                            "subpath": subpath,
+                            "version": pkg_version
+                        }),
+                    });
+
                     new_pkg_id
                 };
 
                 let dep_id = pk();
                 conn.execute(
                     "INSERT INTO dependency (id, scan_id, specifier, package_id) VALUES (?, ?, ?, ?)",
-                    params![dep_id.as_str(), scan_id.as_str(), req.as_str(), pkg_id],
+                    params![dep_id.as_str(), scan_id.as_str(), req.as_str(), pkg_id.clone()],
                 )
                 .await?;
+
+                ops.push(Op::Upsert {
+                    path: format!("dependency/{}", dep_id),
+                    data: serde_json::json!({
+                        "id": dep_id,
+                        "scan_id": scan_id,
+                        "specifier": req,
+                        "package_id": pkg_id
+                    }),
+                });
 
                 success_count += 1;
 
@@ -367,6 +404,19 @@ impl Store {
                             "INSERT INTO bump (id, project_id, name, major, approved) VALUES (?, ?, ?, ?, 0)",
                             params![new_bump_id.as_str(), project_id, group_name.as_str(), bump_is_major]
                         ).await?;
+
+                        ops.push(Op::Upsert {
+                            path: format!("bump/{}", new_bump_id),
+                            data: serde_json::json!({
+                                "id": new_bump_id,
+                                "project_id": project_id,
+                                "name": group_name,
+                                "major": bump_is_major,
+                                "approved": false,
+                                "url": null
+                            }),
+                        });
+
                         bump_cache.entry(group_name.clone()).or_insert([None, None])
                             [bump_is_major as usize] = Some(new_bump_id.clone());
                         new_bump_id
@@ -377,10 +427,34 @@ impl Store {
 
                     conn.execute(
                         "INSERT INTO bumpdep (bump_id, dependency_id, target_version, head_version, minimum_release_age) VALUES (?, ?, ?, ?, ?)",
-                        params![bump_id, dep_id.as_str(), target_ver, head_ver, min_age_mins]
+                        params![bump_id.clone(), dep_id.as_str(), target_ver.clone(), head_ver.clone(), min_age_mins]
                     ).await?;
+
+                    ops.push(Op::Upsert {
+                        path: format!("bumpdep/{}/{}", bump_id, dep_id),
+                        data: serde_json::json!({
+                            "bump_id": bump_id,
+                            "dependency_id": dep_id,
+                            "target_version": target_ver,
+                            "head_version": head_ver,
+                            "minimum_release_age": min_age_mins
+                        }),
+                    });
                 }
             }
+        }
+
+        let mut bumps_to_delete_query = conn
+            .query(
+                "SELECT id FROM bump WHERE project_id = ? AND id NOT IN (SELECT bump_id FROM bumpdep)",
+                params![project_id],
+            )
+            .await?;
+        while let Some(row) = bumps_to_delete_query.next().await? {
+            let id = row.get_value(0)?.as_text().unwrap().to_string();
+            ops.push(Op::Delete {
+                path: format!("bump/{}", id),
+            });
         }
 
         conn.execute(
@@ -396,7 +470,7 @@ impl Store {
         );
         tracing::info!("{}", msg);
 
-        Ok(())
+        Ok(ops)
     }
 }
 
