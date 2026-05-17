@@ -293,9 +293,9 @@ impl Handle {
     }
 
     pub fn broadcast(&self, event: Event) -> Result<()> {
-        self.events
-            .send(event)
-            .map_err(|_| anyhow::anyhow!("Failed to broadcast event"))?;
+        // Ignore errors, there may be no subscribers (clients) connected.
+        let _ = self.events.send(event);
+
         Ok(())
     }
 
