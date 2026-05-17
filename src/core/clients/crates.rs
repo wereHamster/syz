@@ -68,7 +68,9 @@ impl Crates {
             if let Ok(entry) = serde_json::from_str::<CrateIndexLine>(line) {
                 if !entry.yanked {
                     if let Ok(v) = Version::parse(&entry.vers) {
-                        versions.push(v);
+                        if v.pre.is_empty() {
+                            versions.push(v);
+                        }
                     }
                 }
             }
