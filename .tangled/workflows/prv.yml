@@ -7,7 +7,8 @@ engine: "nixery"
 dependencies:
   nixpkgs:
     - nix
+    - perl
 
 steps:
   - command: |
-      nix develop -c 'cargo check'
+      nix develop -c cargo check
