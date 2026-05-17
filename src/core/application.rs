@@ -238,7 +238,10 @@ impl Application {
                     ),
                 ),
             ),
-            // cargo doesn't have a patcher yet in application.rs, but we can add it later if needed
+            (
+                "cargo",
+                Box::new(crate::core::engine::ecosystems::cargo::CargoPatcher::new()),
+            ),
         ]
     }
 
@@ -256,6 +259,9 @@ impl Application {
                 crate::core::engine::ecosystems::github_actions::GitHubPatcher::new(
                     self.github.clone(),
                 ),
+            )),
+            "cargo" => Some(Box::new(
+                crate::core::engine::ecosystems::cargo::CargoPatcher::new(),
             )),
             _ => None,
         }
