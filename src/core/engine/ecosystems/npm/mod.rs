@@ -165,37 +165,15 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         tracing::info!("Running pnpm install in temp directory to update lockfile...");
-        let mut cmd = Command::new("pnpm");
-        cmd.arg("install")
-            .arg("--lockfile-only")
-            .arg("--ignore-scripts");
-
-        if workspace.is_some() {
-            cmd.arg("--recursive");
-        }
-
-        let status = cmd.current_dir(temp_dir).status()?;
-
-        if !status.success() {
+        if !run_pnpm_install(temp_dir, workspace.is_some(), true, false)? {
             tracing::info!("Fallback: Running without --lockfile-only...");
-            let mut fallback_cmd = Command::new("pnpm");
-            fallback_cmd.arg("install").arg("--ignore-scripts");
-            if workspace.is_some() {
-                fallback_cmd.arg("--recursive");
-            }
-
-            let fallback_status = fallback_cmd.current_dir(temp_dir).status()?;
-
-            if !fallback_status.success() {
+            if !run_pnpm_install(temp_dir, workspace.is_some(), false, false)? {
                 anyhow::bail!("pnpm install failed");
             }
         }
 
         tracing::info!("Running pnpm dedupe...");
-        let mut dedupe_cmd = Command::new("pnpm");
-        dedupe_cmd.arg("dedupe").arg("--ignore-scripts");
-        let dedupe_status = dedupe_cmd.current_dir(temp_dir).status()?;
-        if !dedupe_status.success() {
+        if !run_pnpm_dedupe(temp_dir, false)? {
             tracing::warn!("pnpm dedupe failed, continuing anyway...");
         }
 
@@ -318,7 +296,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             fs::write(&full_path, serde_json::to_string_pretty(pkg_json)? + "\n")?;
         }
 
-        run_pnpm_install(temp_dir, is_workspace, true)?;
+        run_pnpm_install(temp_dir, is_workspace, true, true)?;
 
         tracing::info!("Phase 2: Adding dependencies with exact versions");
         for (path, pkg_json) in mutable_pkg_jsons.iter_mut() {
@@ -367,7 +345,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             fs::write(&full_path, serde_json::to_string_pretty(pkg_json)? + "\n")?;
         }
 
-        run_pnpm_install(temp_dir, is_workspace, true)?;
+        run_pnpm_install(temp_dir, is_workspace, true, true)?;
 
         tracing::info!("Phase 3: Restoring original package.json specs");
         for (path, original_content) in &original_pkg_jsons {
@@ -375,14 +353,10 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             fs::write(&full_path, original_content)?;
         }
 
-        run_pnpm_install(temp_dir, is_workspace, false)?;
+        run_pnpm_install(temp_dir, is_workspace, false, false)?;
 
         tracing::info!("Running pnpm dedupe to consolidate transitive dependencies...");
-        let mut dedupe_cmd = Command::new("pnpm");
-        dedupe_cmd.arg("dedupe").arg("--ignore-scripts");
-
-        let dedupe_status = dedupe_cmd.current_dir(temp_dir).status()?;
-        if !dedupe_status.success() {
+        if !run_pnpm_dedupe(temp_dir, false)? {
             tracing::warn!("pnpm dedupe failed, continuing anyway...");
         }
 
@@ -563,14 +537,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         tracing::info!("Running pnpm audit --json for baseline...");
-        let baseline_audit_output = Command::new("pnpm")
-            .arg("audit")
-            .arg("--json")
-            .current_dir(temp_dir)
-            .output()?;
-
-        let baseline_json: serde_json::Value =
-            serde_json::from_slice(&baseline_audit_output.stdout).unwrap_or(serde_json::json!({}));
+        let baseline_json = run_pnpm_audit(temp_dir)?;
 
         let mut baseline_advisories = std::collections::HashMap::new();
         if let Some(advs) = baseline_json.get("advisories").and_then(|a| a.as_object()) {
@@ -863,14 +830,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         tracing::info!("Running pnpm audit --json for post-fix comparison...");
-        let after_audit_output = Command::new("pnpm")
-            .arg("audit")
-            .arg("--json")
-            .current_dir(temp_dir)
-            .output()?;
-
-        let after_json: serde_json::Value =
-            serde_json::from_slice(&after_audit_output.stdout).unwrap_or(serde_json::json!({}));
+        let after_json = run_pnpm_audit(temp_dir)?;
 
         let mut after_advisories = std::collections::HashSet::new();
         if let Some(advs) = after_json.get("advisories").and_then(|a| a.as_object()) {
@@ -983,26 +943,57 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
     }
 }
 
-fn run_pnpm_install(dir_path: &std::path::Path, is_workspace: bool, silent: bool) -> Result<()> {
+fn run_pnpm_install(
+    dir_path: &std::path::Path,
+    is_workspace: bool,
+    lockfile_only: bool,
+    silent: bool,
+) -> Result<bool> {
     let mut cmd = Command::new("pnpm");
-    cmd.arg("install")
-        .arg("--lockfile-only")
-        .arg("--ignore-scripts");
+    cmd.arg("install");
+
+    if lockfile_only {
+        cmd.arg("--lockfile-only");
+    }
+
+    cmd.arg("--ignore-scripts");
+
+    if is_workspace {
+        cmd.arg("--recursive");
+    }
 
     if silent {
         cmd.stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
     }
 
-    if is_workspace {
-        cmd.arg("--recursive");
+    let success = cmd.current_dir(dir_path).status()?.success();
+    Ok(success)
+}
+
+fn run_pnpm_dedupe(dir_path: &std::path::Path, silent: bool) -> Result<bool> {
+    let mut cmd = Command::new("pnpm");
+    cmd.arg("dedupe").arg("--ignore-scripts");
+
+    if silent {
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
     }
 
-    if !cmd.current_dir(dir_path).status()?.success() {
-        tracing::warn!("pnpm install failed, continuing anyway...");
-    }
+    let success = cmd.current_dir(dir_path).status()?.success();
+    Ok(success)
+}
 
-    Ok(())
+fn run_pnpm_audit(dir_path: &std::path::Path) -> Result<serde_json::Value> {
+    let output = Command::new("pnpm")
+        .arg("audit")
+        .arg("--json")
+        .current_dir(dir_path)
+        .output()?;
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or(serde_json::json!({}));
+    Ok(json)
 }
 
 pub(crate) fn extract_versions_from_lock(
