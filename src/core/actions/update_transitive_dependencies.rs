@@ -2,6 +2,7 @@ use crate::core::application::Application;
 use anyhow::Result;
 use tempfile::TempDir;
 use tracing::instrument::WithSubscriber;
+use tracing::Instrument;
 
 pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let project = app.store().project(&project_id).await?;
@@ -14,6 +15,8 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let snapshot = view.snapshot(&base_revision);
 
     let pr_generator = app.transitive_pull_request_generator();
+
+    let span = tracing::Span::current();
 
     tokio::spawn(async move {
         let mut all_modifications = Vec::new();
@@ -96,7 +99,9 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                 tracing::error!("Failed to commit changes for transitive updates: {}", e);
             }
         }
-    }.with_current_subscriber());
+    }
+    .instrument(span)
+    .with_current_subscriber());
 
     Ok(())
 }

@@ -6,6 +6,7 @@ use crate::core::store::BumpTargetData;
 use anyhow::Result;
 use tempfile::TempDir;
 use tracing::instrument::WithSubscriber;
+use tracing::Instrument;
 
 pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     let bump = app.store().bump(&bump_id).await?;
@@ -45,6 +46,8 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     let snapshot = view.snapshot(&base_revision);
     let is_major = bump.major;
     let bump_name = bump.name.clone();
+
+    let span = tracing::Span::current();
 
     tokio::spawn(async move {
         // 1. Prepare temporary directory
@@ -123,7 +126,9 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         {
             tracing::error!("Failed to send PersistBumpResult: {}", e);
         }
-    }.with_current_subscriber());
+    }
+    .instrument(span)
+    .with_current_subscriber());
 
     Ok(())
 }

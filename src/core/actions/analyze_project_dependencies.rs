@@ -1,6 +1,7 @@
 use anyhow::Result;
 use futures::future;
 use tracing::instrument::WithSubscriber;
+use tracing::Instrument;
 
 use crate::core::{
     application::Application,
@@ -31,6 +32,8 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let scanners = app.scanners();
     let registry_router = app.registry_router();
     let handle = app.handle();
+
+    let span = tracing::Span::current();
 
     tokio::spawn(
         async move {
@@ -90,7 +93,8 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                 }
             }
         }
-        .with_current_subscriber(),
+        .instrument(span)
+        .with_current_subscriber()
     );
 
     Ok(())
