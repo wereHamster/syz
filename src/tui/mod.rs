@@ -43,7 +43,10 @@ pub async fn run(options: Options) -> Result<()> {
     Ok(())
 }
 
-async fn run_app<B: Backend>(options: Options, terminal: &mut Terminal<B>) -> Result<()> {
+async fn run_app<B: Backend>(options: Options, terminal: &mut Terminal<B>) -> Result<()>
+where
+    <B as Backend>::Error: Send + Sync + 'static,
+{
     let mut app = app::App::new();
     terminal.draw(|frame| app.draw(frame))?;
 

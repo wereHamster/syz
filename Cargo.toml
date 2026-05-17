@@ -47,5 +47,5 @@ atrium-api = "0.25.8"
 atrium-xrpc-client = "0.5.15"
 git2 = { version = "0.20.4", features = ["vendored-openssl", "ssh"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
-ratatui = "0.28"
+ratatui = "0.30.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
