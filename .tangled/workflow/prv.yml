@@ -1,0 +1,13 @@
+when:
+  - event: ["pull_request"]
+    branch: ["main"]
+
+engine: "nixery"
+
+dependencies:
+  nixpkgs:
+    - nix
+
+steps:
+  - command: |
+      nix develop -c 'cargo check'
