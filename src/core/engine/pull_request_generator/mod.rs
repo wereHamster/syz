@@ -299,8 +299,8 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
 
         let sections: Vec<Box<dyn PullRequestSectionGenerator>> = vec![
             Box::new(SummarySection),
-            Box::new(AdvisoriesSection),
             Box::new(PolicySection),
+            Box::new(AdvisoriesSection),
             Box::new(HistorySection),
         ];
 
