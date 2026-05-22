@@ -1,4 +1,5 @@
 pub mod events;
+pub mod github_webhook;
 pub mod messages;
 pub mod root;
 

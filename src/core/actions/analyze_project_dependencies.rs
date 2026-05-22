@@ -27,7 +27,7 @@ pub struct AnalyzedProjectDependencies {
     pub analyzed_project_dependencies: Vec<AnalyzedProjectDependency>,
 }
 
-pub async fn run(app: &Application, project_id: String) -> Result<()> {
+pub async fn run(app: &Application, project_id: String, trigger_bumps: bool) -> Result<()> {
     let snapshot = app.project_repository_snapshot(&project_id).await?;
     let scanners = app.scanners();
     let registry_router = app.registry_router();
@@ -73,6 +73,7 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                                     scan_result: AnalyzedProjectDependencies {
                                         analyzed_project_dependencies,
                                     },
+                                    trigger_bumps,
                                 };
 
                             // We send it to the application mailbox using an ad-hoc message_id

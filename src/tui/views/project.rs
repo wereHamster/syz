@@ -105,6 +105,7 @@ impl View for ProjectView {
                         return vec![ViewAction::SendPayload(
                             Payload::AnalyzeProjectDependencies {
                                 project_id: self.project_id.clone(),
+                                trigger_bumps: false,
                             },
                         )];
                     }

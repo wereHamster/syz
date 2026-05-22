@@ -27,6 +27,7 @@ pub enum Payload {
     /// dependencies are outdated, and update the local database with the information.
     AnalyzeProjectDependencies {
         project_id: String,
+        trigger_bumps: bool,
     },
 
     /// Add a new project to the database.
@@ -70,6 +71,7 @@ pub enum Payload {
     PersistAnalyzedProjectDependencies {
         project_id: String,
         scan_result: AnalyzedProjectDependencies,
+        trigger_bumps: bool,
     },
 }
 
@@ -157,6 +159,7 @@ impl Payload {
                             super::database::pk(),
                             Payload::AnalyzeProjectDependencies {
                                 project_id: project.id,
+                                trigger_bumps: false,
                             },
                         )
                         .await?;
@@ -165,8 +168,12 @@ impl Payload {
                 Ok(())
             }
 
-            Payload::AnalyzeProjectDependencies { project_id } => {
-                super::actions::analyze_project_dependencies::run(app, project_id).await
+            Payload::AnalyzeProjectDependencies {
+                project_id,
+                trigger_bumps,
+            } => {
+                super::actions::analyze_project_dependencies::run(app, project_id, trigger_bumps)
+                    .await
             }
 
             Payload::AddProject {
@@ -245,6 +252,7 @@ impl Payload {
             Payload::PersistAnalyzedProjectDependencies {
                 project_id,
                 scan_result,
+                trigger_bumps,
             } => {
                 let ops = app
                     .store()
@@ -254,6 +262,21 @@ impl Payload {
                 app.handle()
                     .broadcast(crate::core::event::Event::Commit { ops })?;
 
+                if trigger_bumps {
+                    let bumps = app.store().list_bumps().await?;
+                    for bump in bumps
+                        .into_iter()
+                        .filter(|b| b.project_id == project_id && b.approved)
+                    {
+                        app.handle()
+                            .send(
+                                crate::core::database::pk(),
+                                Payload::ProcessBump { bump_id: bump.id },
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                    }
+                }
                 Ok(())
             }
         }
