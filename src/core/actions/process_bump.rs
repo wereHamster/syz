@@ -10,6 +10,9 @@ use tracing::Instrument;
 
 pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     let bump = app.store().bump(&bump_id).await?;
+    if !bump.approved {
+        return Ok(());
+    }
     let project = app.store().project(&bump.project_id).await?;
 
     let bump_targets_data = app.store().bump_targets(&bump_id).await?;
