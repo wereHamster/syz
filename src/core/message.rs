@@ -36,6 +36,12 @@ pub enum Payload {
         repository: String,
     },
 
+    /// Remove a project from the database.
+    RemoveProject {
+        platform: String,
+        repository: String,
+    },
+
     /// Approve a Bump to be processed. This only updates the database but does not
     /// schedule the actual update task.
     ApproveBump {
@@ -82,6 +88,7 @@ impl std::fmt::Display for Payload {
             Payload::AnalyzeAllProjectsDependencies => write!(f, "AnalyzeAllProjectsDependencies"),
             Payload::AnalyzeProjectDependencies { .. } => write!(f, "AnalyzeProjectDependencies"),
             Payload::AddProject { .. } => write!(f, "AddProject"),
+            Payload::RemoveProject { .. } => write!(f, "RemoveProject"),
             Payload::ApproveBump { .. } => write!(f, "ApproveBump"),
             Payload::RetractBumpApproval { .. } => write!(f, "RetractBumpApproval"),
             Payload::ProcessBump { .. } => write!(f, "ProcessBump"),
@@ -188,6 +195,17 @@ impl Payload {
                         data: serde_json::to_value(project).unwrap_or_default(),
                     }],
                 })?;
+
+                Ok(())
+            }
+
+            Payload::RemoveProject {
+                platform,
+                repository,
+            } => {
+                let ops = app.store().remove_project(platform, repository).await?;
+
+                app.handle().broadcast(crate::core::event::Event::Commit { ops })?;
 
                 Ok(())
             }

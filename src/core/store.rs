@@ -81,6 +81,86 @@ impl Store {
         })
     }
 
+    pub async fn remove_project(&self, platform: String, repository: String) -> Result<Vec<Op>> {
+        let conn = self.database.conn()?;
+
+        // Find the project
+        let mut stmt = conn
+            .prepare("SELECT id FROM project WHERE platform = ?1 AND repository = ?2")
+            .await?;
+
+        let mut rows = stmt.query((platform.as_str(), repository.as_str())).await?;
+
+        let project_id = if let Some(row) = rows.next().await? {
+            row.get_value(0)?.as_text().context("project id should be text")?.to_string()
+        } else {
+            return Err(anyhow::anyhow!("Project not found"));
+        };
+
+        let mut ops = Vec::new();
+
+        // 1. Delete bumpdeps and bumps
+        let mut bumps_stmt = conn
+            .prepare("SELECT id FROM bump WHERE project_id = ?1")
+            .await?;
+        let mut bumps_rows = bumps_stmt.query((project_id.as_str(),)).await?;
+        let mut bump_ids = Vec::new();
+        while let Some(row) = bumps_rows.next().await? {
+            bump_ids.push(row.get_value(0)?.as_text().unwrap().to_string());
+        }
+
+        for bump_id in &bump_ids {
+            let mut bumpdeps_stmt = conn
+                .prepare("SELECT dependency_id FROM bumpdep WHERE bump_id = ?1")
+                .await?;
+            let mut bumpdeps_rows = bumpdeps_stmt.query((bump_id.as_str(),)).await?;
+            while let Some(dep_row) = bumpdeps_rows.next().await? {
+                let dep_id = dep_row.get_value(0)?.as_text().unwrap().to_string();
+                ops.push(Op::Delete {
+                    path: format!("bumpdep/{}/{}", bump_id, dep_id),
+                });
+            }
+            ops.push(Op::Delete {
+                path: format!("bump/{}", bump_id),
+            });
+        }
+        conn.execute("DELETE FROM bumpdep WHERE bump_id IN (SELECT id FROM bump WHERE project_id = ?1)", params![project_id.as_str()]).await?;
+        conn.execute("DELETE FROM bump WHERE project_id = ?1", params![project_id.as_str()]).await?;
+
+        // 2. Delete scans and dependencies
+        let mut scans_stmt = conn
+            .prepare("SELECT id FROM scan WHERE project_id = ?1")
+            .await?;
+        let mut scans_rows = scans_stmt.query((project_id.as_str(),)).await?;
+        while let Some(row) = scans_rows.next().await? {
+            let scan_id = row.get_value(0)?.as_text().unwrap().to_string();
+            
+            let mut deps_stmt = conn
+                .prepare("SELECT id FROM dependency WHERE scan_id = ?1")
+                .await?;
+            let mut deps_rows = deps_stmt.query((scan_id.as_str(),)).await?;
+            while let Some(dep_row) = deps_rows.next().await? {
+                let dep_id = dep_row.get_value(0)?.as_text().unwrap().to_string();
+                ops.push(Op::Delete {
+                    path: format!("dependency/{}", dep_id),
+                });
+            }
+            ops.push(Op::Delete {
+                path: format!("scan/{}", scan_id),
+            });
+        }
+        conn.execute("DELETE FROM dependency WHERE scan_id IN (SELECT id FROM scan WHERE project_id = ?1)", params![project_id.as_str()]).await?;
+        conn.execute("DELETE FROM scan WHERE project_id = ?1", params![project_id.as_str()]).await?;
+
+        // 3. Delete project
+        ops.push(Op::Delete {
+            path: format!("project/{}", project_id),
+        });
+        conn.execute("DELETE FROM project WHERE id = ?1", params![project_id.as_str()]).await?;
+
+        Ok(ops)
+    }
+
     pub async fn list_dependencies(&self) -> Result<Vec<Dependency>> {
         let conn = self.database.conn()?;
 

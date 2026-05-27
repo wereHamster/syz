@@ -23,6 +23,11 @@ enum Commands {
         /// The project to add (e.g., github:owner/repo)
         argument: String,
     },
+    /// Remove a project in the format platform:repository
+    Remove {
+        /// The project to remove (e.g., github:owner/repo)
+        argument: String,
+    },
 }
 
 #[tokio::main]
@@ -54,6 +59,31 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
 
             println!("Project added successfully (command sent).");
+        }
+        Some(Commands::Remove { argument }) => {
+            let parts: Vec<&str> = argument.split(':').collect();
+            if parts.len() != 2 {
+                anyhow::bail!("Invalid argument format. Expected platform:repository");
+            }
+
+            let platform = parts[0].to_string();
+            let repository = parts[1].to_string();
+
+            let client = reqwest::Client::new();
+            let payload = serde_json::json!({
+                "type": "RemoveProject",
+                "platform": platform,
+                "repository": repository,
+            });
+
+            client
+                .post(format!("{}/messages", args.url))
+                .header("Authorization", format!("Bearer {}", args.token))
+                .json(&payload)
+                .send()
+                .await?;
+
+            println!("Project removal command sent.");
         }
         None => {
             run(Options {
