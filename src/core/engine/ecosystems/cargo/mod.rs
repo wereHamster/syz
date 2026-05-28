@@ -138,6 +138,17 @@ impl Patcher for CargoPatcher {
             fs::write(temp_dir.join("Cargo.lock"), l)?;
         }
 
+        for src_file in ["src/lib.rs", "src/main.rs"] {
+            if let Ok(content) = repo.read_file(src_file).await {
+                let src_path = std::path::Path::new(src_file);
+                let dest_path = temp_dir.join(src_path);
+                if let Some(parent) = dest_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(dest_path, &content)?;
+            }
+        }
+
         let mut cmd = Command::new("cargo");
         cmd.arg("generate-lockfile").current_dir(temp_dir);
 
