@@ -8,7 +8,11 @@ pub struct SummarySection;
 
 #[async_trait]
 impl PullRequestSectionGenerator for SummarySection {
-    async fn generate(&self, ctx: &PullRequestGenerationContext<'_>) -> Result<Option<String>> {
+    async fn generate(
+        &self,
+        ctx: &PullRequestGenerationContext<'_>,
+        _current_length: usize,
+    ) -> Result<Option<String>> {
         let targets = ctx.targets;
         let ecosystem = ctx.ecosystem;
         let package_group = ctx.package_group;

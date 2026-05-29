@@ -8,7 +8,11 @@ pub struct AdvisoriesSection;
 
 #[async_trait]
 impl PullRequestSectionGenerator for AdvisoriesSection {
-    async fn generate(&self, ctx: &PullRequestGenerationContext<'_>) -> Result<Option<String>> {
+    async fn generate(
+        &self,
+        ctx: &PullRequestGenerationContext<'_>,
+        _current_length: usize,
+    ) -> Result<Option<String>> {
         let mut advisories_md = String::new();
         let mut seen_advisories = std::collections::HashSet::new();
 

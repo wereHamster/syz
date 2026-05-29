@@ -306,7 +306,7 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
 
         let mut body = String::new();
         for section in sections {
-            if let Ok(Some(content)) = section.generate(&ctx).await {
+            if let Ok(Some(content)) = section.generate(&ctx, body.len()).await {
                 body.push_str(&content);
             }
         }

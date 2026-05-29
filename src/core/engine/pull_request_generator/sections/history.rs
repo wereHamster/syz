@@ -32,7 +32,11 @@ impl HistorySection {
 
 #[async_trait]
 impl PullRequestSectionGenerator for HistorySection {
-    async fn generate(&self, ctx: &PullRequestGenerationContext<'_>) -> Result<Option<String>> {
+    async fn generate(
+        &self,
+        ctx: &PullRequestGenerationContext<'_>,
+        base_length: usize,
+    ) -> Result<Option<String>> {
         let targets = ctx.targets;
         if targets.is_empty() {
             return Ok(None);
@@ -188,8 +192,6 @@ impl PullRequestSectionGenerator for HistorySection {
 
                 let notes_results = futures::future::join_all(notes_futures).await;
 
-                let mut current_length = body.len();
-
                 for (release, notes_res) in history_to_process
                     .into_iter()
                     .zip(notes_results.into_iter())
@@ -244,7 +246,7 @@ impl PullRequestSectionGenerator for HistorySection {
                         body.push_str(&format!("## {}\n{}\n\n", release.version, time_str));
                     }
 
-                    if current_length > 60_000 {
+                    if base_length + body.len() > 60_000 {
                         if !repo_url.is_empty() && repo_url.contains("github.com") {
                             let github_url = format!("{}/releases/tag/{}", repo_url, encoded_tag);
                             body.push_str(&format!("> *Changelog truncated due to GitHub PR size limits. [View release notes on GitHub]({})*\n\n", github_url));
@@ -253,13 +255,12 @@ impl PullRequestSectionGenerator for HistorySection {
                                 "> *Changelog truncated due to GitHub PR size limits.*\n\n",
                             );
                         }
-                        continue;
+                        return Ok(Some(body));
                     }
 
                     if let Some(md) = fetched_md {
                         body.push_str(&md);
                         body.push_str("\n\n");
-                        current_length = body.len();
                     }
                 }
             }

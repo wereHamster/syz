@@ -8,7 +8,11 @@ pub struct PolicySection;
 
 #[async_trait]
 impl PullRequestSectionGenerator for PolicySection {
-    async fn generate(&self, ctx: &PullRequestGenerationContext<'_>) -> Result<Option<String>> {
+    async fn generate(
+        &self,
+        ctx: &PullRequestGenerationContext<'_>,
+        _current_length: usize,
+    ) -> Result<Option<String>> {
         let targets = ctx.targets;
         let mut body = String::new();
 

@@ -10,5 +10,9 @@ pub mod summary;
 
 #[async_trait]
 pub trait PullRequestSectionGenerator: Send + Sync {
-    async fn generate(&self, ctx: &PullRequestGenerationContext<'_>) -> Result<Option<String>>;
+    async fn generate(
+        &self,
+        ctx: &PullRequestGenerationContext<'_>,
+        current_length: usize,
+    ) -> Result<Option<String>>;
 }
