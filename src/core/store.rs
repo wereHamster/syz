@@ -92,7 +92,10 @@ impl Store {
         let mut rows = stmt.query((platform.as_str(), repository.as_str())).await?;
 
         let project_id = if let Some(row) = rows.next().await? {
-            row.get_value(0)?.as_text().context("project id should be text")?.to_string()
+            row.get_value(0)?
+                .as_text()
+                .context("project id should be text")?
+                .to_string()
         } else {
             return Err(anyhow::anyhow!("Project not found"));
         };
@@ -124,8 +127,16 @@ impl Store {
                 path: format!("bump/{}", bump_id),
             });
         }
-        conn.execute("DELETE FROM bumpdep WHERE bump_id IN (SELECT id FROM bump WHERE project_id = ?1)", params![project_id.as_str()]).await?;
-        conn.execute("DELETE FROM bump WHERE project_id = ?1", params![project_id.as_str()]).await?;
+        conn.execute(
+            "DELETE FROM bumpdep WHERE bump_id IN (SELECT id FROM bump WHERE project_id = ?1)",
+            params![project_id.as_str()],
+        )
+        .await?;
+        conn.execute(
+            "DELETE FROM bump WHERE project_id = ?1",
+            params![project_id.as_str()],
+        )
+        .await?;
 
         // 2. Delete scans and dependencies
         let mut scans_stmt = conn
@@ -134,7 +145,7 @@ impl Store {
         let mut scans_rows = scans_stmt.query((project_id.as_str(),)).await?;
         while let Some(row) = scans_rows.next().await? {
             let scan_id = row.get_value(0)?.as_text().unwrap().to_string();
-            
+
             let mut deps_stmt = conn
                 .prepare("SELECT id FROM dependency WHERE scan_id = ?1")
                 .await?;
@@ -149,14 +160,26 @@ impl Store {
                 path: format!("scan/{}", scan_id),
             });
         }
-        conn.execute("DELETE FROM dependency WHERE scan_id IN (SELECT id FROM scan WHERE project_id = ?1)", params![project_id.as_str()]).await?;
-        conn.execute("DELETE FROM scan WHERE project_id = ?1", params![project_id.as_str()]).await?;
+        conn.execute(
+            "DELETE FROM dependency WHERE scan_id IN (SELECT id FROM scan WHERE project_id = ?1)",
+            params![project_id.as_str()],
+        )
+        .await?;
+        conn.execute(
+            "DELETE FROM scan WHERE project_id = ?1",
+            params![project_id.as_str()],
+        )
+        .await?;
 
         // 3. Delete project
         ops.push(Op::Delete {
             path: format!("project/{}", project_id),
         });
-        conn.execute("DELETE FROM project WHERE id = ?1", params![project_id.as_str()]).await?;
+        conn.execute(
+            "DELETE FROM project WHERE id = ?1",
+            params![project_id.as_str()],
+        )
+        .await?;
 
         Ok(ops)
     }

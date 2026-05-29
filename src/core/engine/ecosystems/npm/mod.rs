@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::core::clients;
+use crate::core::engine::ecosystems::npm::internal::discover_project_dependencies::WorkspaceConfig;
 use crate::core::engine::ecosystems::{Registry, Scanner};
 use crate::core::engine::repository::ProjectRepositorySnapshot;
 use crate::core::engine::{DependencyUpdateOption, DiscoveredDependency};
@@ -476,9 +477,8 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
 
         let mut minimum_release_age = None;
         if let Some(ref w_content) = workspace {
-            // Very simple extraction, normally we'd parse the WorkspaceConfig properly
-            if let Ok(val) = serde_yml::from_str::<serde_yml::Value>(w_content) {
-                if let Some(age) = val.get("minimum_release_age").and_then(|v| v.as_i64()) {
+            if let Ok(config) = serde_yml::from_str::<WorkspaceConfig>(w_content) {
+                if let Some(age) = config.minimum_release_age {
                     minimum_release_age = Some(chrono::Duration::minutes(age));
                 }
             }

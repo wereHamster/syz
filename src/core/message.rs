@@ -205,7 +205,8 @@ impl Payload {
             } => {
                 let ops = app.store().remove_project(platform, repository).await?;
 
-                app.handle().broadcast(crate::core::event::Event::Commit { ops })?;
+                app.handle()
+                    .broadcast(crate::core::event::Event::Commit { ops })?;
 
                 Ok(())
             }
