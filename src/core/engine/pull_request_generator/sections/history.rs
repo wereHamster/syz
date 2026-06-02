@@ -236,32 +236,34 @@ impl PullRequestSectionGenerator for HistorySection {
                         }
                     }
 
-                    if !repo_url.is_empty() && repo_url.contains("github.com") {
-                        let github_url = format!("{}/releases/tag/{}", repo_url, encoded_tag);
-                        body.push_str(&format!(
-                            "## [{}]({})\n{}\n\n",
-                            release.version, github_url, time_str
-                        ));
+                    let github_url = if !repo_url.is_empty() && repo_url.contains("github.com") {
+                        Some(format!("{}/releases/tag/{}", repo_url, encoded_tag))
                     } else {
-                        body.push_str(&format!("## {}\n{}\n\n", release.version, time_str));
-                    }
+                        None
+                    };
 
-                    if base_length + body.len() > 60_000 {
-                        if !repo_url.is_empty() && repo_url.contains("github.com") {
-                            let github_url = format!("{}/releases/tag/{}", repo_url, encoded_tag);
-                            body.push_str(&format!("> *Changelog truncated due to GitHub PR size limits. [View release notes on GitHub]({})*\n\n", github_url));
+                    let header = if let Some(ref url) = github_url {
+                        format!("## [{}]({})\n{}\n\n", release.version, url, time_str)
+                    } else {
+                        format!("## {}\n{}\n\n", release.version, time_str)
+                    };
+
+                    let md_part = match &fetched_md {
+                        Some(md) => format!("{}\n\n", md),
+                        None => String::new(),
+                    };
+
+                    if base_length + body.len() + header.len() + md_part.len() > 60_000 {
+                        if let Some(ref url) = github_url {
+                            body.push_str(&format!("> *Changelog truncated due to GitHub PR size limits. [View release notes on GitHub]({})*\n\n", url));
                         } else {
-                            body.push_str(
-                                "> *Changelog truncated due to GitHub PR size limits.*\n\n",
-                            );
+                            body.push_str("> *Changelog truncated due to GitHub PR size limits.*\n\n");
                         }
                         return Ok(Some(body));
                     }
 
-                    if let Some(md) = fetched_md {
-                        body.push_str(&md);
-                        body.push_str("\n\n");
-                    }
+                    body.push_str(&header);
+                    body.push_str(&md_part);
                 }
             }
         }
