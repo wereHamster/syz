@@ -687,83 +687,72 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
 
         let before_versions = extract_versions_from_lock(lockfile.as_deref().unwrap_or_default());
         let mut injected_transitive = false;
-        let mut package_json_modifications: Vec<FileModification> = Vec::new();
 
-        if let Some(root_pkg) = mutable_pkg_jsons.get_mut("package.json") {
-            let mut file_updated = false;
-            if let Some(obj) = root_pkg.as_object_mut() {
-                let mut pnpm = obj.remove("pnpm").unwrap_or_else(|| serde_json::json!({}));
-                if let Some(pnpm_map) = pnpm.as_object_mut() {
-                    let mut overrides_node = pnpm_map
-                        .remove("overrides")
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    if let Some(overrides_map) = overrides_node.as_object_mut() {
-                        for (module, mature_versions) in &overrides {
-                            let active_majors = if let Some(vers) = before_versions.get(module) {
-                                let mut majors = std::collections::HashSet::new();
-                                for v in vers {
-                                    if let Ok(ver) = semver::Version::parse(v) {
-                                        if ver.major == 0 {
-                                            majors.insert((0, ver.minor));
-                                        } else {
-                                            majors.insert((ver.major, 0));
-                                        }
-                                    }
-                                }
-                                majors
-                            } else {
-                                std::collections::HashSet::new()
-                            };
-
-                            for mature_version in mature_versions {
-                                let is_used = if mature_version.major == 0 {
-                                    active_majors.contains(&(0, mature_version.minor))
-                                } else {
-                                    active_majors.contains(&(mature_version.major, 0))
-                                };
-
-                                if is_used {
-                                    let req_prefix =
-                                        if mature_version.major == 0 { "~" } else { "^" };
-                                    overrides_map.insert(
-                                        format!("{}@{}", module, mature_version.major),
-                                        serde_json::Value::String(format!(
-                                            "{}{}",
-                                            req_prefix, mature_version
-                                        )),
-                                    );
-                                    file_updated = true;
-                                    injected_transitive = true;
-                                }
-                            }
+        // pnpm v11 no longer reads the `pnpm` field from package.json; overrides must go in
+        // pnpm-workspace.yaml under the `overrides:` key.
+        let mut new_overrides = serde_yml::Mapping::new();
+        for (module, mature_versions) in &overrides {
+            let active_majors = if let Some(vers) = before_versions.get(module) {
+                let mut majors = std::collections::HashSet::new();
+                for v in vers {
+                    if let Ok(ver) = semver::Version::parse(v) {
+                        if ver.major == 0 {
+                            majors.insert((0, ver.minor));
+                        } else {
+                            majors.insert((ver.major, 0));
                         }
                     }
-                    pnpm_map.insert("overrides".to_string(), overrides_node);
                 }
-                obj.insert("pnpm".to_string(), pnpm);
+                majors
+            } else {
+                std::collections::HashSet::new()
+            };
 
-                if file_updated {
-                    let updated_root_str = serde_json::to_string_pretty(&root_pkg)? + "\n";
-                    let root_full_path = temp_dir.join("package.json");
-                    fs::write(&root_full_path, &updated_root_str)?;
+            for mature_version in mature_versions {
+                let is_used = if mature_version.major == 0 {
+                    active_majors.contains(&(0, mature_version.minor))
+                } else {
+                    active_majors.contains(&(mature_version.major, 0))
+                };
 
-                    if let Some(m) = package_json_modifications
-                        .iter_mut()
-                        .find(|m| m.path == "package.json")
-                    {
-                        m.state =
-                            crate::core::engine::repository::FileState::Write(updated_root_str);
-                    } else {
-                        package_json_modifications.push(FileModification {
-                            path: "package.json".to_string(),
-                            state: crate::core::engine::repository::FileState::Write(
-                                updated_root_str,
-                            ),
-                        });
-                    }
+                if is_used {
+                    let req_prefix = if mature_version.major == 0 { "~" } else { "^" };
+                    new_overrides.insert(
+                        serde_yml::Value::String(format!("{}@{}", module, mature_version.major)),
+                        serde_yml::Value::String(format!("{}{}", req_prefix, mature_version)),
+                    );
+                    injected_transitive = true;
                 }
             }
         }
+
+        if injected_transitive {
+            let mut workspace_value: serde_yml::Value = workspace
+                .as_deref()
+                .and_then(|w| serde_yml::from_str(w).ok())
+                .unwrap_or_else(|| serde_yml::Value::Mapping(serde_yml::Mapping::new()));
+
+            if let Some(ws_map) = workspace_value.as_mapping_mut() {
+                if let Some(existing) = ws_map.get_mut("overrides").and_then(|v| v.as_mapping_mut())
+                {
+                    for (k, v) in new_overrides {
+                        existing.insert(k, v);
+                    }
+                } else {
+                    ws_map.insert(
+                        serde_yml::Value::String("overrides".to_string()),
+                        serde_yml::Value::Mapping(new_overrides),
+                    );
+                }
+            }
+            fs::write(
+                temp_dir.join("pnpm-workspace.yaml"),
+                serde_yml::to_string(&workspace_value)?,
+            )?;
+        }
+
+        // pnpm v11 won't update pnpm-lock.yaml when overrides change unless node_modules is absent.
+        let _ = fs::remove_dir_all(temp_dir.join("node_modules"));
 
         tracing::info!(
             "Running pnpm install in temp directory to update lockfile with forced fixes..."
@@ -790,9 +779,37 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             tracing::warn!("pnpm dedupe failed, continuing anyway...");
         }
 
-        tracing::info!(
-            "Restoring original package.json files to discard pnpm.overrides changes..."
-        );
+        if injected_transitive {
+            // Restore pnpm-workspace.yaml without overrides, then re-run pnpm install so that
+            // pnpm itself removes the overrides section from pnpm-lock.yaml while keeping the
+            // secure resolved versions (node_modules was deleted above, so pnpm re-resolves from
+            // the lockfile rather than from installed packages).
+            match workspace.as_deref() {
+                Some(original) => {
+                    fs::write(temp_dir.join("pnpm-workspace.yaml"), original)?;
+                }
+                None => {
+                    let _ = fs::remove_file(temp_dir.join("pnpm-workspace.yaml"));
+                }
+            }
+
+            tracing::info!("Running pnpm install --lockfile-only to remove override markers from lockfile...");
+            let mut final_install_cmd = Command::new("pnpm");
+            final_install_cmd
+                .arg("install")
+                .arg("--lockfile-only")
+                .arg("--ignore-scripts");
+
+            if workspace.is_some() {
+                final_install_cmd.arg("--recursive");
+            }
+
+            if !final_install_cmd.current_dir(temp_dir).status()?.success() {
+                tracing::warn!("Final pnpm install failed, continuing anyway...");
+            }
+        }
+
+        tracing::info!("Restoring original package.json files...");
         let mut all_modifications = Vec::new();
 
         for (path, clean_json) in &clean_pkg_jsons {
@@ -809,23 +826,6 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                         ),
                     });
                 }
-            }
-        }
-
-        if injected_transitive {
-            tracing::info!("Running pnpm install --lockfile-only again to cleanly remove pnpm.overrides from lockfile...");
-            let mut final_install_cmd = Command::new("pnpm");
-            final_install_cmd
-                .arg("install")
-                .arg("--lockfile-only")
-                .arg("--ignore-scripts");
-
-            if workspace.is_some() {
-                final_install_cmd.arg("--recursive");
-            }
-
-            if !final_install_cmd.current_dir(temp_dir).status()?.success() {
-                tracing::warn!("Final pnpm install failed, continuing anyway...");
             }
         }
 
