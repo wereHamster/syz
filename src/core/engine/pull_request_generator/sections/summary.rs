@@ -6,6 +6,10 @@ use crate::core::engine::pull_request_generator::sections::PullRequestSectionGen
 
 pub struct SummarySection;
 
+fn npmx_diff_url(name: &str, old: &str, new: &str) -> String {
+    format!("https://npmx.dev/diff/{}/v/{}...{}", name, old, new)
+}
+
 #[async_trait]
 impl PullRequestSectionGenerator for SummarySection {
     async fn generate(
@@ -32,12 +36,41 @@ impl PullRequestSectionGenerator for SummarySection {
             }
 
             if !repo_url.is_empty() {
+                if ecosystem == "npm" {
+                    let diff_url = npmx_diff_url(
+                        &target.name,
+                        &target.current_version.version,
+                        &target.target_version.version,
+                    );
+                    body.push_str(&format!(
+                        "This PR updates [{}]({}) from version [{} to {}]({}).\n\n",
+                        target.name,
+                        repo_url,
+                        target.current_version.version,
+                        target.target_version.version,
+                        diff_url
+                    ));
+                } else {
+                    body.push_str(&format!(
+                        "This PR updates [{}]({}) from version {} to {}.\n\n",
+                        target.name,
+                        repo_url,
+                        target.current_version.version,
+                        target.target_version.version
+                    ));
+                }
+            } else if ecosystem == "npm" {
+                let diff_url = npmx_diff_url(
+                    &target.name,
+                    &target.current_version.version,
+                    &target.target_version.version,
+                );
                 body.push_str(&format!(
-                    "This PR updates [{}]({}) from version {} to {}.\n\n",
+                    "This PR updates `{}` from version [{} to {}]({}).\n\n",
                     target.name,
-                    repo_url,
                     target.current_version.version,
-                    target.target_version.version
+                    target.target_version.version,
+                    diff_url
                 ));
             } else {
                 body.push_str(&format!(
@@ -81,7 +114,16 @@ impl PullRequestSectionGenerator for SummarySection {
                 }
 
                 for t in targets {
-                    body.push_str(&format!("- `{}`\n", t.name));
+                    if ecosystem == "npm" {
+                        let diff_url = npmx_diff_url(
+                            &t.name,
+                            &first_target.current_version.version,
+                            &first_target.target_version.version,
+                        );
+                        body.push_str(&format!("- `{}` ([diff]({}))\n", t.name, diff_url));
+                    } else {
+                        body.push_str(&format!("- `{}`\n", t.name));
+                    }
                 }
                 body.push_str("\n");
             } else {
@@ -104,12 +146,41 @@ impl PullRequestSectionGenerator for SummarySection {
                     }
 
                     if !repo_url.is_empty() {
+                        if ecosystem == "npm" {
+                            let diff_url = npmx_diff_url(
+                                &target.name,
+                                &target.current_version.version,
+                                &target.target_version.version,
+                            );
+                            body.push_str(&format!(
+                                "- [{}]({}) from [`{}` to `{}`]({})\n",
+                                target.name,
+                                repo_url,
+                                target.current_version.version,
+                                target.target_version.version,
+                                diff_url
+                            ));
+                        } else {
+                            body.push_str(&format!(
+                                "- [{}]({}) from `{}` to `{}`\n",
+                                target.name,
+                                repo_url,
+                                target.current_version.version,
+                                target.target_version.version
+                            ));
+                        }
+                    } else if ecosystem == "npm" {
+                        let diff_url = npmx_diff_url(
+                            &target.name,
+                            &target.current_version.version,
+                            &target.target_version.version,
+                        );
                         body.push_str(&format!(
-                            "- [{}]({}) from `{}` to `{}`\n",
+                            "- `{}` from [`{}` to `{}`]({})\n",
                             target.name,
-                            repo_url,
                             target.current_version.version,
-                            target.target_version.version
+                            target.target_version.version,
+                            diff_url
                         ));
                     } else {
                         body.push_str(&format!(
