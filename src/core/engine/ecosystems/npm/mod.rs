@@ -793,7 +793,9 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                 }
             }
 
-            tracing::info!("Running pnpm install --lockfile-only to remove override markers from lockfile...");
+            tracing::info!(
+                "Running pnpm install --lockfile-only to remove override markers from lockfile..."
+            );
             let mut final_install_cmd = Command::new("pnpm");
             final_install_cmd
                 .arg("install")

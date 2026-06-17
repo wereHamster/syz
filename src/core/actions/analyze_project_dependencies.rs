@@ -3,10 +3,16 @@ use futures::future;
 use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 
-use crate::core::{
-    application::Application,
-    database::pk,
-    engine::{DependencyUpdateOption, DiscoveredDependency},
+use crate::{
+    core::{
+        application::Application,
+        database::pk,
+        engine::{
+            repository::{ProjectRepositorySnapshot, ProjectRepositoryView},
+            DependencyUpdateOption, DiscoveredDependency,
+        },
+    },
+    tui::views,
 };
 
 #[derive(Clone)]
@@ -28,7 +34,8 @@ pub struct AnalyzedProjectDependencies {
 }
 
 pub async fn run(app: &Application, project_id: String, trigger_bumps: bool) -> Result<()> {
-    let snapshot = app.project_repository_snapshot(&project_id).await?;
+    let repository = app.project_platform_repository(&project_id).await?;
+
     let scanners = app.scanners();
     let registry_router = app.registry_router();
     let handle = app.handle();
@@ -37,6 +44,20 @@ pub async fn run(app: &Application, project_id: String, trigger_bumps: bool) -> 
 
     tokio::spawn(
         async move {
+            let snapshot = match repository.view().await {
+                Ok(view) => match snapshot_at_default_branch(view.as_ref()).await {
+                    Ok(snapshot) => snapshot,
+                    Err(e) => {
+                        tracing::error!("Failed to get project repository snapshot: {}", e);
+                        return;
+                    }
+                },
+                Err(e) => {
+                    tracing::error!("Failed to get project repository view: {}", e);
+                    return;
+                }
+            };
+
             // --- PHASE 1: SCAN ---
             // Run all scanners concurrently over the snapshot
             let scan_futures = scanners.iter().map(|scanner| {
@@ -99,4 +120,12 @@ pub async fn run(app: &Application, project_id: String, trigger_bumps: bool) -> 
     );
 
     Ok(())
+}
+
+async fn snapshot_at_default_branch(
+    view: &dyn ProjectRepositoryView,
+) -> Result<Box<dyn ProjectRepositorySnapshot>> {
+    let default_branch = view.get_default_branch().await?;
+    let revision = view.get_revision(default_branch.as_str()).await?;
+    Ok(view.snapshot(revision.as_str()))
 }

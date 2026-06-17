@@ -8,10 +8,14 @@ use crate::core::clients::tangled::Tangled;
 use crate::core::engine::repository::{ProjectRepositoryMutator, ProjectRepositoryView};
 
 /// A seam for interacting with different project hosting platforms.
-#[async_trait]
 pub trait ProjectPlatform: Send + Sync {
-    async fn view(&self, repository: &str) -> Result<Box<dyn ProjectRepositoryView>>;
-    async fn mutator(&self, repository: &str) -> Result<Box<dyn ProjectRepositoryMutator>>;
+    fn repository(&self, repository: &str) -> Box<dyn ProjectPlatformRepository>;
+}
+
+#[async_trait]
+pub trait ProjectPlatformRepository: Send + Sync {
+    async fn view(&self) -> Result<Box<dyn ProjectRepositoryView>>;
+    async fn mutator(&self) -> Result<Box<dyn ProjectRepositoryMutator>>;
 }
 
 /// Helper to split a repository string into owner and repo.
@@ -37,15 +41,30 @@ impl GitHubPlatformAdapter {
 
 #[async_trait]
 impl ProjectPlatform for GitHubPlatformAdapter {
-    async fn view(&self, repository: &str) -> Result<Box<dyn ProjectRepositoryView>> {
-        let (owner, repo) = parse_repository(repository)?;
+    fn repository(&self, repository: &str) -> Box<dyn ProjectPlatformRepository> {
+        Box::new(GitHubPlatformRepository {
+            client: self.client.clone(),
+            repository: repository.to_string(),
+        })
+    }
+}
+
+struct GitHubPlatformRepository {
+    client: GitHub,
+    repository: String,
+}
+
+#[async_trait]
+impl ProjectPlatformRepository for GitHubPlatformRepository {
+    async fn view(&self) -> Result<Box<dyn ProjectRepositoryView>> {
+        let (owner, repo) = parse_repository(&self.repository)?;
         Ok(Box::new(
             self.client.project_repository_view(owner, repo).await?,
         ))
     }
 
-    async fn mutator(&self, repository: &str) -> Result<Box<dyn ProjectRepositoryMutator>> {
-        let (owner, repo) = parse_repository(repository)?;
+    async fn mutator(&self) -> Result<Box<dyn ProjectRepositoryMutator>> {
+        let (owner, repo) = parse_repository(&self.repository)?;
         Ok(Box::new(
             self.client.project_repository_mutator(owner, repo).await?,
         ))
@@ -64,15 +83,30 @@ impl TangledPlatformAdapter {
 
 #[async_trait]
 impl ProjectPlatform for TangledPlatformAdapter {
-    async fn view(&self, repository: &str) -> Result<Box<dyn ProjectRepositoryView>> {
-        let (owner, repo) = parse_repository(repository)?;
+    fn repository(&self, repository: &str) -> Box<dyn ProjectPlatformRepository> {
+        Box::new(TangledPlatformRepository {
+            client: self.client.clone(),
+            repository: repository.to_string(),
+        })
+    }
+}
+
+struct TangledPlatformRepository {
+    client: Tangled,
+    repository: String,
+}
+
+#[async_trait]
+impl ProjectPlatformRepository for TangledPlatformRepository {
+    async fn view(&self) -> Result<Box<dyn ProjectRepositoryView>> {
+        let (owner, repo) = parse_repository(&self.repository)?;
         Ok(Box::new(
             self.client.project_repository_view(owner, repo).await?,
         ))
     }
 
-    async fn mutator(&self, repository: &str) -> Result<Box<dyn ProjectRepositoryMutator>> {
-        let (owner, repo) = parse_repository(repository)?;
+    async fn mutator(&self) -> Result<Box<dyn ProjectRepositoryMutator>> {
+        let (owner, repo) = parse_repository(&self.repository)?;
         Ok(Box::new(
             self.client.project_repository_mutator(owner, repo).await?,
         ))

@@ -257,7 +257,9 @@ impl PullRequestSectionGenerator for HistorySection {
                         if let Some(ref url) = github_url {
                             body.push_str(&format!("> *Changelog truncated due to GitHub PR size limits. [View release notes on GitHub]({})*\n\n", url));
                         } else {
-                            body.push_str("> *Changelog truncated due to GitHub PR size limits.*\n\n");
+                            body.push_str(
+                                "> *Changelog truncated due to GitHub PR size limits.*\n\n",
+                            );
                         }
                         return Ok(Some(body));
                     }

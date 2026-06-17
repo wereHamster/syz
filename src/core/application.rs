@@ -139,24 +139,22 @@ impl Application {
         RegistryRouter::new(registries)
     }
 
+    pub async fn project_platform_repository(
+        &self,
+        project_id: &str,
+    ) -> Result<Box<dyn super::platform::ProjectPlatformRepository>> {
+        let project = self.store.project(project_id).await?;
+        let platform = self.platforms.resolve(&project.platform)?;
+
+        Ok(platform.repository(&project.repository))
+    }
+
     pub async fn project_repository_view(
         &self,
         project_id: &str,
     ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryView>> {
-        let project = self.store.project(project_id).await?;
-        let platform = self.platforms.resolve(&project.platform)?;
-
-        platform.view(&project.repository).await
-    }
-
-    pub async fn project_repository_snapshot(
-        &self,
-        project_id: &str,
-    ) -> Result<Box<dyn super::engine::repository::ProjectRepositorySnapshot>> {
-        let view = self.project_repository_view(&project_id).await?;
-        let default_branch = view.get_default_branch().await?;
-        let revision = view.get_revision(default_branch.as_str()).await?;
-        Ok(view.snapshot(revision.as_str()))
+        let repository = self.project_platform_repository(project_id).await?;
+        repository.view().await
     }
 
     async fn run(mut self) -> Result<()> {
@@ -185,10 +183,8 @@ impl Application {
         &self,
         project_id: &str,
     ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryMutator>> {
-        let project = self.store.project(project_id).await?;
-        let platform = self.platforms.resolve(&project.platform)?;
-
-        platform.mutator(&project.repository).await
+        let repository = self.project_platform_repository(project_id).await?;
+        repository.mutator().await
     }
 
     pub fn advisory_resolver(&self) -> Box<dyn crate::core::engine::advisories::AdvisoryResolver> {
