@@ -13,6 +13,13 @@ pub struct Store {
     database: Database,
 }
 
+#[derive(Clone)]
+pub struct VacuumStats {
+    pub scans_deleted: usize,
+    pub dependencies_deleted: usize,
+    pub packages_deleted: usize,
+}
+
 impl Store {
     pub fn new(database: Database) -> Self {
         Self { database }
@@ -275,6 +282,144 @@ impl Store {
         }
 
         Err(anyhow::anyhow!("Bump not found"))
+    }
+
+    pub async fn vacuum(&self) -> Result<Vec<Op>> {
+        let conn = self.database.conn()?;
+        let mut ops = Vec::new();
+
+        conn.execute("BEGIN TRANSACTION", params![]).await?;
+
+        let mut stats = VacuumStats {
+            scans_deleted: 0,
+            dependencies_deleted: 0,
+            packages_deleted: 0,
+        };
+
+        let result: Result<Vec<Op>> = async {
+            let mut obsolete_scan_ids = Vec::new();
+            {
+                let mut stmt = conn.prepare("SELECT id FROM project").await?;
+                let mut project_rows = stmt.query(()).await?;
+                while let Some(row) = project_rows.next().await? {
+                    let project_id: String = row.get_value(0)?.as_text().unwrap().to_string();
+
+                    let mut scan_stmt = conn
+                        .prepare(
+                            "SELECT id FROM scan WHERE project_id = ? ORDER BY create_time DESC",
+                        )
+                        .await?;
+                    let mut scan_rows = scan_stmt.query((project_id.as_str(),)).await?;
+
+                    let mut latest_scan_id = None;
+                    let mut all_scans_in_project = Vec::new();
+
+                    while let Some(row) = scan_rows.next().await? {
+                        let sid: String = row.get_value(0)?.as_text().unwrap().to_string();
+                        if latest_scan_id.is_none() {
+                            latest_scan_id = Some(sid.clone());
+                        }
+                        all_scans_in_project.push(sid);
+                    }
+
+                    if let Some(latest) = latest_scan_id {
+                        for sid in all_scans_in_project {
+                            if sid != latest {
+                                obsolete_scan_ids.push(sid.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            stats.scans_deleted = obsolete_scan_ids.len();
+
+            let mut deps_to_delete = std::collections::HashSet::new();
+            let mut scans_to_delete = Vec::new();
+
+            for scan_id in &obsolete_scan_ids {
+                let mut deps_stmt = conn
+                    .prepare("SELECT id FROM dependency WHERE scan_id = ?")
+                    .await?;
+                let mut deps_rows = deps_stmt.query((scan_id.as_str(),)).await?;
+                while let Some(dep_row) = deps_rows.next().await? {
+                    deps_to_delete.insert(dep_row.get_value(0)?.as_text().unwrap().to_string());
+                }
+                scans_to_delete.push(scan_id.clone());
+            }
+
+            let mut unused_deps_stmt = conn
+                .prepare(
+                    "SELECT id FROM dependency WHERE id NOT IN (SELECT dependency_id FROM bumpdep)",
+                )
+                .await?;
+            let mut unused_deps_rows = unused_deps_stmt.query(()).await?;
+            while let Some(row) = unused_deps_rows.next().await? {
+                deps_to_delete.insert(row.get_value(0)?.as_text().unwrap().to_string());
+            }
+
+            for dep_id in deps_to_delete {
+                stats.dependencies_deleted += 1;
+                ops.push(Op::Delete {
+                    path: format!("dependency/{}", dep_id),
+                });
+                conn.execute(
+                    "DELETE FROM dependency WHERE id = ?",
+                    params![dep_id.as_str()],
+                )
+                .await?;
+            }
+
+            for scan_id in scans_to_delete {
+                ops.push(Op::Delete {
+                    path: format!("scan/{}", scan_id),
+                });
+                conn.execute("DELETE FROM scan WHERE id = ?", params![scan_id.as_str()])
+                    .await?;
+            }
+
+            let mut unused_pkg_stmt = conn
+                .prepare(
+                    "SELECT id FROM package WHERE id NOT IN (SELECT package_id FROM dependency)",
+                )
+                .await?;
+            let mut unused_pkg_rows = unused_pkg_stmt.query(()).await?;
+            let mut pkg_to_delete = Vec::new();
+            while let Some(row) = unused_pkg_rows.next().await? {
+                pkg_to_delete.push(row.get_value(0)?.as_text().unwrap().to_string());
+            }
+
+            for pkg_id in pkg_to_delete {
+                stats.packages_deleted += 1;
+                ops.push(Op::Delete {
+                    path: format!("package/{}", pkg_id),
+                });
+                conn.execute("DELETE FROM package WHERE id = ?", params![pkg_id.as_str()])
+                    .await?;
+            }
+
+            Ok(ops)
+        }
+        .await;
+
+        match result {
+            Ok(ops) => {
+                conn.execute("COMMIT", params![]).await?;
+
+                tracing::info!(
+                    "Vacuum completed: {} scans, {} dependencies. {} packages",
+                    stats.scans_deleted,
+                    stats.dependencies_deleted,
+                    stats.packages_deleted
+                );
+
+                Ok(ops)
+            }
+            Err(e) => {
+                conn.execute("ROLLBACK", params![]).await?;
+                Err(e)
+            }
+        }
     }
 
     pub async fn list_bumpdeps(&self) -> Result<Vec<BumpDep>> {

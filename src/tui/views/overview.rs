@@ -86,6 +86,9 @@ impl View for OverviewView {
                         Payload::AnalyzeAllProjectsDependencies,
                     )];
                 }
+                KeyCode::Char('v') => {
+                    return vec![ViewAction::SendPayload(Payload::Vacuum)];
+                }
                 _ => {}
             }
         }
@@ -226,9 +229,15 @@ impl View for OverviewView {
     }
 
     fn hotkeys(&self) -> Vec<HotkeyDescriptor> {
-        vec![HotkeyDescriptor {
-            key: "S".to_string(),
-            description: "Scan".to_string(),
-        }]
+        vec![
+            HotkeyDescriptor {
+                key: "S".to_string(),
+                description: "Scan".to_string(),
+            },
+            HotkeyDescriptor {
+                key: "V".to_string(),
+                description: "Vacuum".to_string(),
+            },
+        ]
     }
 }

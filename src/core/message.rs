@@ -30,6 +30,10 @@ pub enum Payload {
         trigger_bumps: bool,
     },
 
+    /// Remove all but the latest scan for each project, and delete all
+    /// unreferenced dependency and package records.
+    Vacuum,
+
     /// Add a new project to the database.
     AddProject {
         platform: String,
@@ -87,6 +91,7 @@ impl std::fmt::Display for Payload {
             Payload::Bootstrap => write!(f, "Bootstrap"),
             Payload::AnalyzeAllProjectsDependencies => write!(f, "AnalyzeAllProjectsDependencies"),
             Payload::AnalyzeProjectDependencies { .. } => write!(f, "AnalyzeProjectDependencies"),
+            Payload::Vacuum => write!(f, "Vacuum"),
             Payload::AddProject { .. } => write!(f, "AddProject"),
             Payload::RemoveProject { .. } => write!(f, "RemoveProject"),
             Payload::ApproveBump { .. } => write!(f, "ApproveBump"),
@@ -247,6 +252,11 @@ impl Payload {
 
             Payload::UpdateVulnerableDependencies { project_id } => {
                 super::actions::update_vulnerable_dependencies::run(app, project_id).await
+            }
+
+            Payload::Vacuum => {
+                app.store().vacuum().await?;
+                Ok(())
             }
 
             Payload::PersistBumpResult {
