@@ -66,6 +66,12 @@ impl CargoPatcher {
     }
 }
 
+impl Default for CargoPatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Patcher for CargoPatcher {
     fn updated_requirement(&self, old_req: &str, target_version: &str) -> Option<String> {

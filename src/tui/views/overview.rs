@@ -25,6 +25,12 @@ impl OverviewView {
     }
 }
 
+impl Default for OverviewView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl View for OverviewView {
     fn update(&mut self, event: &Event, backend: &Backend) -> Vec<ViewAction> {
         if let Event::Term(crossterm::event::Event::Key(key)) = event {

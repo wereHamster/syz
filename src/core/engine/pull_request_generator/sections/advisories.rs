@@ -40,7 +40,7 @@ impl PullRequestSectionGenerator for AdvisoriesSection {
             let mut body = String::new();
             body.push_str("> [!NOTE]\n> This update resolves the following security advisories:\n");
             body.push_str(&advisories_md);
-            body.push_str("\n");
+            body.push('\n');
             Ok(Some(body))
         } else {
             Ok(None)

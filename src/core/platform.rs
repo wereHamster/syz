@@ -136,3 +136,9 @@ impl PlatformRegistry {
             .ok_or_else(|| anyhow::anyhow!("Unsupported project platform: {}", id))
     }
 }
+
+impl Default for PlatformRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}

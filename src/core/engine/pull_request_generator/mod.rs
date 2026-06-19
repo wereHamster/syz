@@ -165,7 +165,7 @@ impl AuditPullRequestGenerator for DefaultAuditPullRequestGenerator {
             pr_body.push_str(&format!("### `{}`\n", module_name));
 
             if bump.before_versions.is_empty() && bump.after_versions.is_empty() {
-                pr_body.push_str(&format!("- Bumped\n"));
+                pr_body.push_str("- Bumped\n");
             } else {
                 let before_str = bump.before_versions.join(", ");
                 let after_str = bump.after_versions.join(", ");
@@ -205,7 +205,7 @@ impl AuditPullRequestGenerator for DefaultAuditPullRequestGenerator {
                     pr_body.push_str(&line);
                 }
             }
-            pr_body.push_str("\n");
+            pr_body.push('\n');
         }
 
         Ok(pr_body)

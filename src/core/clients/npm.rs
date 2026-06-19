@@ -267,7 +267,7 @@ fn clean_repo_url(url: &str) -> String {
     if clean_url.contains("github.com/") {
         let parts: Vec<&str> = clean_url.split("github.com/").collect();
         if parts.len() == 2 {
-            let mut sub_parts = parts[1].split(|c| c == '/' || c == '#' || c == '?');
+            let mut sub_parts = parts[1].split(['/', '#', '?']);
             let owner = sub_parts.next().unwrap_or("");
             let repo = sub_parts.next().unwrap_or("");
             if !owner.is_empty() && !repo.is_empty() {

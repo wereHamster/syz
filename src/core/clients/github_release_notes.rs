@@ -22,7 +22,7 @@ impl GithubReleaseNotesResolver {
         let clean_url = clean_url.trim_end_matches(".git");
 
         let parts: Vec<&str> = clean_url.split('/').collect();
-        let owner = parts.get(0).unwrap_or(&"").to_string();
+        let owner = parts.first().unwrap_or(&"").to_string();
         let repo = parts.get(1).unwrap_or(&"").to_string();
 
         Self {
@@ -206,12 +206,12 @@ impl GithubReleaseNotesResolver {
             };
 
             let base_version = version.split('+').next().unwrap_or(version);
-            let mut lines = markdown.lines();
+            let lines = markdown.lines();
             let mut extracted = String::new();
             let mut found = false;
             let mut target_level = 0;
 
-            while let Some(line) = lines.next() {
+            for line in lines {
                 let trimmed = line.trim();
 
                 let mut is_heading = false;
@@ -269,7 +269,7 @@ pub fn shift_markdown_headings(markdown: &str, target_top_level: usize, version:
     let mut lines = markdown.lines();
     let mut remaining_markdown: Vec<&str> = Vec::new();
 
-    while let Some(line) = lines.next() {
+    for line in lines.by_ref() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;

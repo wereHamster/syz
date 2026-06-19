@@ -23,10 +23,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
         return Ok(Vec::new());
     }
 
-    let workspace_yaml = match repo.read_file("pnpm-workspace.yaml").await {
-        Ok(yaml) => Some(yaml),
-        Err(_) => None,
-    };
+    let workspace_yaml = repo.read_file("pnpm-workspace.yaml").await.ok();
 
     let mut minimum_release_age = None;
     if let Some(workspace_yaml) = workspace_yaml {
@@ -119,7 +116,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
                             version,
                         },
                         requirement: req_str.to_string(),
-                        minimum_release_age: minimum_release_age,
+                        minimum_release_age,
                     });
                 }
             }
@@ -149,7 +146,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
                             version,
                         },
                         requirement: req_str.to_string(),
-                        minimum_release_age: minimum_release_age,
+                        minimum_release_age,
                     });
                 }
             }

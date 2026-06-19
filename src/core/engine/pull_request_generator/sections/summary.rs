@@ -125,7 +125,7 @@ impl PullRequestSectionGenerator for SummarySection {
                         body.push_str(&format!("- `{}`\n", t.name));
                     }
                 }
-                body.push_str("\n");
+                body.push('\n');
             } else {
                 body.push_str(&format!(
                     "This PR updates {} dependencies from the **{}** group.\n\n",
@@ -191,7 +191,7 @@ impl PullRequestSectionGenerator for SummarySection {
                         ));
                     }
                 }
-                body.push_str("\n");
+                body.push('\n');
             }
         }
 

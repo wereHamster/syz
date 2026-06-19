@@ -259,7 +259,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                                         (pkg_name.as_str(), pkg_info.as_mapping())
                                     {
                                         if let Some(version_val) = info
-                                            .get(&serde_yml::Value::String("version".to_string()))
+                                            .get(serde_yml::Value::String("version".to_string()))
                                         {
                                             if let Some(version_str) = version_val.as_str() {
                                                 let clean_version = version_str
@@ -563,7 +563,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             Vec<(semver::Version, chrono::DateTime<chrono::Utc>)>,
         > = std::collections::HashMap::new();
 
-        for (_id, adv) in &baseline_advisories {
+        for adv in baseline_advisories.values() {
             if let (Some(module), Some(vulnerable)) = (
                 adv.get("module_name").and_then(|m| m.as_str()),
                 adv.get("vulnerable_versions").and_then(|p| p.as_str()),
@@ -859,7 +859,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             extract_versions_from_lock(updated_lock.as_deref().unwrap_or_default());
 
         let mut still_vulnerable = std::collections::HashSet::new();
-        for (id, _adv) in &baseline_advisories {
+        for id in baseline_advisories.keys() {
             if after_advisories.contains(id) {
                 still_vulnerable.insert(id.clone());
             }
@@ -1018,8 +1018,8 @@ pub(crate) fn extract_versions_from_lock(
         if let Some(packages) = lock_val.get("packages").and_then(|p| p.as_mapping()) {
             for (k, _) in packages {
                 if let Some(path) = k.as_str() {
-                    if path.starts_with('/') {
-                        let parts: Vec<&str> = path[1..].split('@').collect();
+                    if let Some(stripped) = path.strip_prefix('/') {
+                        let parts: Vec<&str> = stripped.split('@').collect();
                         if parts.len() == 2 {
                             let name = parts[0];
                             let version = parts[1].split('(').next().unwrap_or("").to_string();
@@ -1028,7 +1028,7 @@ pub(crate) fn extract_versions_from_lock(
                                 .or_insert_with(std::collections::HashSet::new)
                                 .insert(version);
                         } else {
-                            let parts: Vec<&str> = path[1..].split('/').collect();
+                            let parts: Vec<&str> = stripped.split('/').collect();
                             if parts.len() >= 2 {
                                 let version = parts
                                     .last()

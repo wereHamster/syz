@@ -90,7 +90,7 @@ impl Tangled {
                     if let ipld_core::ipld::Ipld::String(name) = &**val {
                         if name == repo_name {
                             found_rkey =
-                                Some(record.uri.split('/').last().unwrap_or("").to_string());
+                                Some(record.uri.split('/').next_back().unwrap_or("").to_string());
                             found_uri = Some(record.uri.clone());
                             break;
                         }
@@ -619,7 +619,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
                             record
                                 .uri
                                 .split('/')
-                                .last()
+                                .next_back()
                                 .unwrap_or("unknown")
                                 .to_string(),
                         );

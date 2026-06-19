@@ -144,41 +144,46 @@ impl App {
     pub fn update(&mut self, event: Event) -> Vec<Effect> {
         let mut external_effects = Vec::new();
         match event {
-            Event::Term(ref term_event) => match term_event {
-                crossterm::event::Event::Key(key) => match key.code {
-                    KeyCode::Char('q') => {
-                        self.lifecycle = Lifecycle::Exiting;
-                    }
-                    _ => {
-                        let actions = match self.current_view_type {
-                            ViewType::Overview => self.overview_view.update(&event, &self.backend),
-                            ViewType::Project(_) => self.project_view.update(&event, &self.backend),
-                        };
+            Event::Term(ref term_event) => {
+                if let crossterm::event::Event::Key(key) = term_event {
+                    match key.code {
+                        KeyCode::Char('q') => {
+                            self.lifecycle = Lifecycle::Exiting;
+                        }
+                        _ => {
+                            let actions = match self.current_view_type {
+                                ViewType::Overview => {
+                                    self.overview_view.update(&event, &self.backend)
+                                }
+                                ViewType::Project(_) => {
+                                    self.project_view.update(&event, &self.backend)
+                                }
+                            };
 
-                        for action in actions {
-                            match action {
-                                ViewAction::SwitchView(new_view) => {
-                                    self.current_view_type = new_view;
-                                    if let ViewType::Project(id) = &self.current_view_type {
-                                        if id != &self.project_view.project_id {
-                                            self.project_view.project_id = id.clone();
-                                            self.project_view.selected_bump_index = 0;
-                                            self.project_view.bump_table_state =
-                                                TableState::default();
-                                            self.project_view.bump_table_state.select(Some(0));
+                            for action in actions {
+                                match action {
+                                    ViewAction::SwitchView(new_view) => {
+                                        self.current_view_type = new_view;
+                                        if let ViewType::Project(id) = &self.current_view_type {
+                                            if id != &self.project_view.project_id {
+                                                self.project_view.project_id = id.clone();
+                                                self.project_view.selected_bump_index = 0;
+                                                self.project_view.bump_table_state =
+                                                    TableState::default();
+                                                self.project_view.bump_table_state.select(Some(0));
+                                            }
                                         }
                                     }
-                                }
-                                ViewAction::SendPayload(payload) => {
-                                    external_effects.push(Effect::SendPayload(payload));
+                                    ViewAction::SendPayload(payload) => {
+                                        external_effects.push(Effect::SendPayload(payload));
+                                    }
                                 }
                             }
+                            self.dirty = true;
                         }
-                        self.dirty = true;
                     }
-                },
-                _ => {}
-            },
+                }
+            }
 
             Event::Core(core_event) => {
                 self.backend.process_server_event(core_event);

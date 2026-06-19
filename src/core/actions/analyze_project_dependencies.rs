@@ -3,16 +3,13 @@ use futures::future;
 use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 
-use crate::{
-    core::{
-        application::Application,
-        database::pk,
-        engine::{
-            repository::{ProjectRepositorySnapshot, ProjectRepositoryView},
-            DependencyUpdateOption, DiscoveredDependency,
-        },
+use crate::core::{
+    application::Application,
+    database::pk,
+    engine::{
+        repository::{ProjectRepositorySnapshot, ProjectRepositoryView},
+        DependencyUpdateOption, DiscoveredDependency,
     },
-    tui::views,
 };
 
 #[derive(Clone)]

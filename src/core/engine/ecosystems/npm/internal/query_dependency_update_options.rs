@@ -84,13 +84,11 @@ fn get_update_type(current_req: &str, latest_allowed: &str) -> UpdateType {
     };
 
     if latest_allowed_ver > current_ver {
-        if latest_allowed_ver.major > current_ver.major {
-            UpdateType::Major
-        } else if current_ver.major == 0 && latest_allowed_ver.minor > current_ver.minor {
-            UpdateType::Major
-        } else if current_ver.major == 0
-            && current_ver.minor == 0
-            && latest_allowed_ver.patch > current_ver.patch
+        if (latest_allowed_ver.major > current_ver.major)
+            || (current_ver.major == 0 && latest_allowed_ver.minor > current_ver.minor)
+            || (current_ver.major == 0
+                && current_ver.minor == 0
+                && latest_allowed_ver.patch > current_ver.patch)
         {
             UpdateType::Major
         } else if latest_allowed_ver.minor > current_ver.minor {

@@ -214,7 +214,7 @@ fn coerce_version(v: &str) -> Option<semver::Version> {
         return Some(ver);
     }
 
-    let (base, rest) = if let Some(idx) = v.find(|c| c == '-' || c == '+') {
+    let (base, rest) = if let Some(idx) = v.find(['-', '+']) {
         (&v[..idx], &v[idx..])
     } else {
         (v, "")

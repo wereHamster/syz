@@ -28,121 +28,111 @@ impl ProjectView {
 
 impl View for ProjectView {
     fn update(&mut self, event: &Event, backend: &Backend) -> Vec<ViewAction> {
-        if let Event::Term(ref term_event) = event {
-            if let crossterm::event::Event::Key(key) = term_event {
-                match key.code {
-                    KeyCode::Up => {
-                        let mut bumps: Vec<Bump> = backend
-                            .db
-                            .iter()
-                            .filter(|(path, _)| path.starts_with("bump/"))
-                            .filter_map(|(_, value)| {
-                                serde_json::from_value::<Bump>(value.clone()).ok()
-                            })
-                            .filter(|b| b.project_id == self.project_id)
-                            .collect();
-                        bumps.sort_by(|a, b| a.name.cmp(&b.name));
+        if let Event::Term(crossterm::event::Event::Key(key)) = event {
+            match key.code {
+                KeyCode::Up => {
+                    let mut bumps: Vec<Bump> = backend
+                        .db
+                        .iter()
+                        .filter(|(path, _)| path.starts_with("bump/"))
+                        .filter_map(|(_, value)| serde_json::from_value::<Bump>(value.clone()).ok())
+                        .filter(|b| b.project_id == self.project_id)
+                        .collect();
+                    bumps.sort_by(|a, b| a.name.cmp(&b.name));
 
-                        if !bumps.is_empty() {
-                            if self.selected_bump_index > 0 {
-                                self.selected_bump_index -= 1;
-                            } else {
-                                self.selected_bump_index = bumps.len() - 1;
-                            }
-                            self.bump_table_state.select(Some(self.selected_bump_index));
+                    if !bumps.is_empty() {
+                        if self.selected_bump_index > 0 {
+                            self.selected_bump_index -= 1;
+                        } else {
+                            self.selected_bump_index = bumps.len() - 1;
                         }
+                        self.bump_table_state.select(Some(self.selected_bump_index));
                     }
-                    KeyCode::Down => {
-                        let mut bumps: Vec<Bump> = backend
-                            .db
-                            .iter()
-                            .filter(|(path, _)| path.starts_with("bump/"))
-                            .filter_map(|(_, value)| {
-                                serde_json::from_value::<Bump>(value.clone()).ok()
-                            })
-                            .filter(|b| b.project_id == self.project_id)
-                            .collect();
-                        bumps.sort_by(|a, b| a.name.cmp(&b.name));
-
-                        if !bumps.is_empty() {
-                            if self.selected_bump_index < bumps.len() - 1 {
-                                self.selected_bump_index += 1;
-                            } else {
-                                self.selected_bump_index = 0;
-                            }
-                            self.bump_table_state.select(Some(self.selected_bump_index));
-                        }
-                    }
-                    KeyCode::Left => {
-                        return vec![ViewAction::SwitchView(ViewType::Overview)];
-                    }
-                    KeyCode::Char(' ') => {
-                        let mut bumps: Vec<Bump> = backend
-                            .db
-                            .iter()
-                            .filter(|(path, _)| path.starts_with("bump/"))
-                            .filter_map(|(_, value)| {
-                                serde_json::from_value::<Bump>(value.clone()).ok()
-                            })
-                            .filter(|b| b.project_id == self.project_id)
-                            .collect();
-                        bumps.sort_by(|a, b| a.name.cmp(&b.name));
-
-                        if let Some(bump) = bumps.get(self.selected_bump_index) {
-                            let payload = if bump.approved {
-                                Payload::RetractBumpApproval {
-                                    bump_id: bump.id.clone(),
-                                }
-                            } else {
-                                Payload::ApproveBump {
-                                    bump_id: bump.id.clone(),
-                                }
-                            };
-                            return vec![ViewAction::SendPayload(payload)];
-                        }
-                    }
-                    KeyCode::Char('s') | KeyCode::Char('S') => {
-                        return vec![ViewAction::SendPayload(
-                            Payload::AnalyzeProjectDependencies {
-                                project_id: self.project_id.clone(),
-                                trigger_bumps: false,
-                            },
-                        )];
-                    }
-                    KeyCode::Char('p') | KeyCode::Char('P') => {
-                        let mut bumps: Vec<Bump> = backend
-                            .db
-                            .iter()
-                            .filter(|(path, _)| path.starts_with("bump/"))
-                            .filter_map(|(_, value)| {
-                                serde_json::from_value::<Bump>(value.clone()).ok()
-                            })
-                            .filter(|b| b.project_id == self.project_id)
-                            .collect();
-                        bumps.sort_by(|a, b| a.name.cmp(&b.name));
-
-                        if let Some(bump) = bumps.get(self.selected_bump_index) {
-                            return vec![ViewAction::SendPayload(Payload::ProcessBump {
-                                bump_id: bump.id.clone(),
-                            })];
-                        }
-                    }
-                    KeyCode::Char('a') | KeyCode::Char('A') => {
-                        return vec![ViewAction::SendPayload(
-                            Payload::UpdateVulnerableDependencies {
-                                project_id: self.project_id.clone(),
-                            },
-                        )];
-                    }
-                    KeyCode::Char('t') | KeyCode::Char('T') => {
-                        return vec![ViewAction::SendPayload(
-                            Payload::UpdateTransitiveDependencies {
-                                project_id: self.project_id.clone(),
-                            },
-                        )];
-                    }
-                    _ => {}
                 }
+                KeyCode::Down => {
+                    let mut bumps: Vec<Bump> = backend
+                        .db
+                        .iter()
+                        .filter(|(path, _)| path.starts_with("bump/"))
+                        .filter_map(|(_, value)| serde_json::from_value::<Bump>(value.clone()).ok())
+                        .filter(|b| b.project_id == self.project_id)
+                        .collect();
+                    bumps.sort_by(|a, b| a.name.cmp(&b.name));
+
+                    if !bumps.is_empty() {
+                        if self.selected_bump_index < bumps.len() - 1 {
+                            self.selected_bump_index += 1;
+                        } else {
+                            self.selected_bump_index = 0;
+                        }
+                        self.bump_table_state.select(Some(self.selected_bump_index));
+                    }
+                }
+                KeyCode::Left => {
+                    return vec![ViewAction::SwitchView(ViewType::Overview)];
+                }
+                KeyCode::Char(' ') => {
+                    let mut bumps: Vec<Bump> = backend
+                        .db
+                        .iter()
+                        .filter(|(path, _)| path.starts_with("bump/"))
+                        .filter_map(|(_, value)| serde_json::from_value::<Bump>(value.clone()).ok())
+                        .filter(|b| b.project_id == self.project_id)
+                        .collect();
+                    bumps.sort_by(|a, b| a.name.cmp(&b.name));
+
+                    if let Some(bump) = bumps.get(self.selected_bump_index) {
+                        let payload = if bump.approved {
+                            Payload::RetractBumpApproval {
+                                bump_id: bump.id.clone(),
+                            }
+                        } else {
+                            Payload::ApproveBump {
+                                bump_id: bump.id.clone(),
+                            }
+                        };
+                        return vec![ViewAction::SendPayload(payload)];
+                    }
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    return vec![ViewAction::SendPayload(
+                        Payload::AnalyzeProjectDependencies {
+                            project_id: self.project_id.clone(),
+                            trigger_bumps: false,
+                        },
+                    )];
+                }
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    let mut bumps: Vec<Bump> = backend
+                        .db
+                        .iter()
+                        .filter(|(path, _)| path.starts_with("bump/"))
+                        .filter_map(|(_, value)| serde_json::from_value::<Bump>(value.clone()).ok())
+                        .filter(|b| b.project_id == self.project_id)
+                        .collect();
+                    bumps.sort_by(|a, b| a.name.cmp(&b.name));
+
+                    if let Some(bump) = bumps.get(self.selected_bump_index) {
+                        return vec![ViewAction::SendPayload(Payload::ProcessBump {
+                            bump_id: bump.id.clone(),
+                        })];
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    return vec![ViewAction::SendPayload(
+                        Payload::UpdateVulnerableDependencies {
+                            project_id: self.project_id.clone(),
+                        },
+                    )];
+                }
+                KeyCode::Char('t') | KeyCode::Char('T') => {
+                    return vec![ViewAction::SendPayload(
+                        Payload::UpdateTransitiveDependencies {
+                            project_id: self.project_id.clone(),
+                        },
+                    )];
+                }
+                _ => {}
             }
         }
         vec![]
@@ -245,7 +235,7 @@ impl View for ProjectView {
                             let mut v = currents[0].clone();
                             if v.len() > 15 {
                                 v.truncate(14);
-                                v.push_str("…");
+                                v.push('…');
                             }
                             v
                         } else {
@@ -258,7 +248,7 @@ impl View for ProjectView {
                             let mut v = targets[0].clone();
                             if v.len() > 15 {
                                 v.truncate(14);
-                                v.push_str("…");
+                                v.push('…');
                             }
                             v
                         } else {
@@ -271,7 +261,7 @@ impl View for ProjectView {
                             let mut v = heads[0].clone();
                             if v.len() > 15 {
                                 v.truncate(14);
-                                v.push_str("…");
+                                v.push('…');
                             }
                             v
                         } else {

@@ -33,7 +33,7 @@ impl HttpAgent {
             .build();
 
         Self {
-            client: client,
+            client,
             semaphore: Arc::new(Semaphore::new(10)),
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -127,5 +127,11 @@ impl HttpAgent {
         let json = serde_json::from_slice(&bytes)?;
 
         Ok(json)
+    }
+}
+
+impl Default for HttpAgent {
+    fn default() -> Self {
+        Self::new()
     }
 }
