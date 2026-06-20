@@ -1,4 +1,4 @@
-use crate::core::database::{Bump, Project};
+use crate::core::database::{Bump, BumpDep, Project};
 use crate::core::message::Payload;
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crossterm::event::KeyCode;
@@ -133,21 +133,42 @@ impl View for OverviewView {
                 .then_with(|| a.repository.cmp(&b.repository))
         });
 
-        let mut bumps_by_project: HashMap<String, (usize, usize, usize)> = HashMap::new();
+        let mut bump_data: HashMap<String, (String, bool, bool, bool)> = HashMap::new();
+
         for (path, value) in backend.db.iter() {
             if path.starts_with("bump/") {
                 if let Ok(bump) = serde_json::from_value::<Bump>(value.clone()) {
-                    let stats = bumps_by_project
-                        .entry(bump.project_id.clone())
-                        .or_insert((0, 0, 0));
-                    stats.0 += 1;
-                    if bump.approved {
-                        stats.1 += 1;
-                    }
-                    if bump.url.is_some() {
-                        stats.2 += 1;
+                    bump_data.insert(bump.id.clone(), (bump.project_id.clone(), bump.approved, bump.url.is_some(), true));
+                }
+            }
+        }
+
+        for (path, value) in backend.db.iter() {
+            if path.starts_with("bumpdep/") {
+                if let Ok(bd) = serde_json::from_value::<BumpDep>(value.clone()) {
+                    if bd.target_version != bd.head_version {
+                        if let Some(data) = bump_data.get_mut(&bd.bump_id) {
+                            data.3 = false;
+                        }
                     }
                 }
+            }
+        }
+
+        let mut bumps_by_project: HashMap<String, (usize, usize, usize, usize)> = HashMap::new();
+        for (_id, (project_id, approved, url_is_some, up_to_date)) in bump_data {
+            let stats = bumps_by_project
+                .entry(project_id)
+                .or_insert((0, 0, 0, 0));
+            stats.0 += 1;
+            if approved {
+                stats.1 += 1;
+            }
+            if url_is_some {
+                stats.2 += 1;
+            }
+            if up_to_date {
+                stats.3 += 1;
             }
         }
 
@@ -169,8 +190,8 @@ impl View for OverviewView {
                     Style::default().fg(Color::Gray)
                 };
 
-                let (total_bumps, approved_bumps, pr_bumps) =
-                    bumps_by_project.get(&p.id).cloned().unwrap_or((0, 0, 0));
+                let (total_bumps, approved_bumps, pr_bumps, up_to_date_bumps) =
+                    bumps_by_project.get(&p.id).cloned().unwrap_or((0, 0, 0, 0));
 
                 let mut bumps_spans = Vec::new();
 
@@ -200,6 +221,11 @@ impl View for OverviewView {
                     " | ".to_string(),
                     Style::default().fg(Color::DarkGray),
                 ));
+                add_bump_spans(up_to_date_bumps, &mut bumps_spans);
+                bumps_spans.push(Span::styled(
+                    " | ".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
                 add_bump_spans(approved_bumps, &mut bumps_spans);
                 bumps_spans.push(Span::styled(
                     " | ".to_string(),
@@ -223,7 +249,7 @@ impl View for OverviewView {
             [
                 Constraint::Length(platform_width as u16),
                 Constraint::Min(0),
-                Constraint::Length(20),
+                Constraint::Length(25),
             ],
         )
         .header(
