@@ -1,42 +1,40 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    systems.url = "github:nix-systems/default";
   };
 
   outputs =
     {
       nixpkgs,
-      flake-utils,
+      systems,
       ...
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
+    let
+      forAllSystems =
+        function: nixpkgs.lib.genAttrs (import systems) (system: function nixpkgs.legacyPackages.${system});
+
+    in
+    {
+      packages = forAllSystems (pkgs: {
+        default = pkgs.rustPlatform.buildRustPackage {
+          pname = "syz";
+          version = "0.1.0";
+
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+
+          nativeBuildInputs = with pkgs; [
+            perl
+            gnumake
+          ];
+
+          doCheck = false;
         };
+      });
 
-      in
-      {
-        packages = {
-          default = pkgs.rustPlatform.buildRustPackage {
-            pname = "syz";
-            version = "0.1.0";
-
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
-
-            nativeBuildInputs = with pkgs; [
-              perl
-              gnumake
-            ];
-
-            doCheck = false;
-          };
-        };
-
-        devShells.default = pkgs.mkShell {
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
             rustc
             cargo
@@ -48,6 +46,6 @@
             pnpm
           ];
         };
-      }
-    );
+      });
+    };
 }
