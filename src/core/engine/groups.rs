@@ -50,6 +50,9 @@ pub fn get_group(package_info: &PackageInfo) -> Option<String> {
         if url.contains("github.com/formatjs/formatjs") {
             return Some("FormatJS".to_string());
         }
+        if url.contains("github.com/airbnb/visx") {
+            return Some("visx".to_string());
+        }
     }
     None
 }
