@@ -145,6 +145,13 @@ impl PullRequestSectionGenerator for SummarySection {
                         }
                     }
 
+                    let is_major_bump = semver::Version::parse(target.current_version.version.trim_start_matches('v'))
+                        .ok()
+                        .zip(semver::Version::parse(target.target_version.version.trim_start_matches('v')).ok())
+                        .map(|(old, new)| old.major != new.major)
+                        .unwrap_or(false);
+                    let major_suffix = if is_major_bump { " (major)" } else { "" };
+
                     if !repo_url.is_empty() {
                         if ecosystem == "npm" {
                             let diff_url = npmx_diff_url(
@@ -153,20 +160,22 @@ impl PullRequestSectionGenerator for SummarySection {
                                 &target.target_version.version,
                             );
                             body.push_str(&format!(
-                                "- [{}]({}) from [`{}` to `{}`]({})\n",
+                                "- [{}]({}) from [`{}` to `{}`]({}){}\n",
                                 target.name,
                                 repo_url,
                                 target.current_version.version,
                                 target.target_version.version,
-                                diff_url
+                                diff_url,
+                                major_suffix
                             ));
                         } else {
                             body.push_str(&format!(
-                                "- [{}]({}) from `{}` to `{}`\n",
+                                "- [{}]({}) from `{}` to `{}`{}\n",
                                 target.name,
                                 repo_url,
                                 target.current_version.version,
-                                target.target_version.version
+                                target.target_version.version,
+                                major_suffix
                             ));
                         }
                     } else if ecosystem == "npm" {
@@ -176,18 +185,20 @@ impl PullRequestSectionGenerator for SummarySection {
                             &target.target_version.version,
                         );
                         body.push_str(&format!(
-                            "- `{}` from [`{}` to `{}`]({})\n",
+                            "- `{}` from [`{}` to `{}`]({}){}\n",
                             target.name,
                             target.current_version.version,
                             target.target_version.version,
-                            diff_url
+                            diff_url,
+                            major_suffix
                         ));
                     } else {
                         body.push_str(&format!(
-                            "- `{}` from `{}` to `{}`\n",
+                            "- `{}` from `{}` to `{}`{}\n",
                             target.name,
                             target.current_version.version,
-                            target.target_version.version
+                            target.target_version.version,
+                            major_suffix
                         ));
                     }
                 }
