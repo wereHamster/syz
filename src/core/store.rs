@@ -348,16 +348,6 @@ impl Store {
                 scans_to_delete.push(scan_id.clone());
             }
 
-            let mut unused_deps_stmt = conn
-                .prepare(
-                    "SELECT id FROM dependency WHERE id NOT IN (SELECT dependency_id FROM bumpdep)",
-                )
-                .await?;
-            let mut unused_deps_rows = unused_deps_stmt.query(()).await?;
-            while let Some(row) = unused_deps_rows.next().await? {
-                deps_to_delete.insert(row.get_value(0)?.as_text().unwrap().to_string());
-            }
-
             for dep_id in deps_to_delete {
                 stats.dependencies_deleted += 1;
                 ops.push(Op::Delete {
