@@ -43,6 +43,7 @@
             rust-analyzer
 
             turso
+            nodejs
             pnpm
           ];
         };
