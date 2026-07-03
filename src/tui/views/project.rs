@@ -268,11 +268,16 @@ impl View for ProjectView {
                             "multiple".to_string()
                         };
 
-                        let final_head_col = if target_col == head_col
-                            && target_col != "multiple"
-                            && !target_col.is_empty()
-                        {
-                            "-".to_string()
+                        let all_deps_matched = bump_deps_map.get(&b.id)
+                            .map(|deps| deps.iter().all(|bd| bd.target_version == bd.head_version))
+                            .unwrap_or(false);
+
+                        let final_head_col = if target_col == head_col && !target_col.is_empty() {
+                            if all_deps_matched {
+                                "-".to_string()
+                            } else {
+                                head_col.clone()
+                            }
                         } else {
                             head_col
                         };
