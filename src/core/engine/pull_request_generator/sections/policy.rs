@@ -32,7 +32,7 @@ impl PullRequestSectionGenerator for PolicySection {
             if target.latest_version != target.target_version.version
                 && target.minimum_release_age.is_some()
             {
-                if let Ok(history) = ctx
+                if let Ok(mut history) = ctx
                     .registry_router
                     .fetch_release_history(
                         ctx.ecosystem,
@@ -42,6 +42,17 @@ impl PullRequestSectionGenerator for PolicySection {
                     )
                     .await
                 {
+                    // Ignore pre-release versions (alpha, beta, rc, etc.)
+                    history.retain(|r| {
+                        semver::Version::parse(&r.version)
+                            .map(|v| v.pre.is_empty())
+                            .unwrap_or(false)
+                    });
+
+                    if history.is_empty() {
+                        continue;
+                    }
+
                     let count = history.len().saturating_sub(1);
 
                     let format_availability = |time: chrono::DateTime<chrono::Utc>| -> String {
