@@ -90,6 +90,10 @@ pub struct TransitiveUpdateSummary {
     pub removed: Vec<(String, String)>,
     pub major_bumps: Vec<(String, String)>,
     pub minor_bumps: Vec<(String, String)>,
+    /// Security vulnerabilities resolved by this update.
+    /// Populated by the action layer after patcher execution.
+    pub resolved_advisories:
+        std::collections::HashMap<String, crate::core::engine::advisories::ResolvedAdvisoryBump>,
 }
 
 pub struct TransitiveUpdateResult {

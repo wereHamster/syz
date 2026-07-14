@@ -56,6 +56,61 @@ impl TransitiveUpdatesPullRequestGenerator for DefaultTransitiveUpdatesPullReque
     ) -> Result<String> {
         let mut pr_body = "This pull request automatically bumps all transitive dependencies to their latest versions.\n\n".to_string();
 
+        if !summary.resolved_advisories.is_empty() {
+            pr_body.push_str("### Resolved Vulnerabilities\n\n");
+
+            let mut sorted_modules: Vec<String> =
+                summary.resolved_advisories.keys().cloned().collect();
+            sorted_modules.sort();
+
+            for module_name in sorted_modules {
+                let bump = summary.resolved_advisories.get(&module_name).unwrap();
+                pr_body.push_str(&format!("#### `{}`\n", module_name));
+
+                let before_str = bump.before_versions.join(", ");
+                let after_str = bump.after_versions.join(", ");
+                pr_body.push_str(&format!("`{}` -> `{}`\n\n", before_str, after_str));
+
+                pr_body.push_str("Resolved advisories:\n");
+                let mut seen_advisories = std::collections::HashSet::new();
+                for adv in &bump.advisories {
+                    let title = adv
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("Unknown Advisory");
+
+                    let line = if let Some(gh_id) =
+                        adv.get("github_advisory_id").and_then(|i| i.as_str())
+                    {
+                        let url = adv
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| format!("https://github.com/advisories/{}", gh_id));
+                        format!("- [{}]({}) - {}\n", gh_id, url, title)
+                    } else if let Some(id) = adv.get("id").and_then(|i| {
+                        if i.is_number() {
+                            i.as_i64().map(|n| n.to_string())
+                        } else {
+                            i.as_str().map(|s| s.to_string())
+                        }
+                    }) {
+                        let url = adv.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                        format!("- [{}]({}) - {}\n", id, url, title)
+                    } else {
+                        format!("- {}\n", title)
+                    };
+
+                    if seen_advisories.insert(line.clone()) {
+                        pr_body.push_str(&line);
+                    }
+                }
+                pr_body.push('\n');
+            }
+
+            pr_body.push_str("---\n\n");
+        }
+
         if !summary.major_bumps.is_empty() {
             pr_body.push_str("### Major Version Bumps\n");
             for (module, desc) in &summary.major_bumps {

@@ -459,6 +459,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             removed,
             major_bumps,
             minor_bumps,
+            resolved_advisories: std::collections::HashMap::new(),
         };
 
         Ok(Some(crate::core::engine::TransitiveUpdateResult {
