@@ -103,6 +103,10 @@ impl Application {
         self.handle.clone()
     }
 
+    pub async fn purge_cache(&self) {
+        self.http_agent.purge().await;
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }

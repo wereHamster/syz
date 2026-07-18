@@ -83,6 +83,9 @@ pub enum Payload {
         scan_result: AnalyzedProjectDependencies,
         trigger_bumps: bool,
     },
+
+    /// Purge all caches.
+    Purge,
 }
 
 impl std::fmt::Display for Payload {
@@ -107,6 +110,7 @@ impl std::fmt::Display for Payload {
             Payload::PersistAnalyzedProjectDependencies { .. } => {
                 write!(f, "PersistAnalyzedProjectDependencies")
             }
+            Payload::Purge => write!(f, "Purge"),
         }
     }
 }
@@ -306,6 +310,11 @@ impl Payload {
                             .map_err(|e| anyhow::anyhow!(e))?;
                     }
                 }
+                Ok(())
+            }
+
+            Payload::Purge => {
+                app.purge_cache().await;
                 Ok(())
             }
         }

@@ -92,6 +92,9 @@ impl View for OverviewView {
                         Payload::AnalyzeAllProjectsDependencies,
                     )];
                 }
+                KeyCode::Char('x') => {
+                    return vec![ViewAction::SendPayload(Payload::Purge)];
+                }
                 KeyCode::Char('v') => {
                     return vec![ViewAction::SendPayload(Payload::Vacuum)];
                 }
@@ -269,6 +272,10 @@ impl View for OverviewView {
             HotkeyDescriptor {
                 key: "V".to_string(),
                 description: "Vacuum".to_string(),
+            },
+            HotkeyDescriptor {
+                key: "X".to_string(),
+                description: "Purge Cache".to_string(),
             },
         ]
     }
