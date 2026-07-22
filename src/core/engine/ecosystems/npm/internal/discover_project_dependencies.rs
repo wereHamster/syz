@@ -95,6 +95,9 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
         if let Some(deps) = pkg.get("dependencies").and_then(|d| d.as_object()) {
             for (name, req) in deps {
                 if let Some(req_str) = req.as_str() {
+                    if req_str.starts_with("workspace:") {
+                        continue;
+                    }
                     let version = locked_versions.get(name).cloned();
                     let (namespace, parsed_name) = if name.starts_with('@') {
                         let parts: Vec<&str> = name.splitn(2, '/').collect();
@@ -125,6 +128,9 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
         if let Some(deps) = pkg.get("devDependencies").and_then(|d| d.as_object()) {
             for (name, req) in deps {
                 if let Some(req_str) = req.as_str() {
+                    if req_str.starts_with("workspace:") {
+                        continue;
+                    }
                     let version = locked_versions.get(name).cloned();
                     let (namespace, parsed_name) = if name.starts_with('@') {
                         let parts: Vec<&str> = name.splitn(2, '/').collect();

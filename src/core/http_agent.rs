@@ -83,10 +83,19 @@ impl HttpAgent {
         }
 
         let response = self.get(url).await?;
+        let status = response.status();
         let bytes = response.bytes().await?;
 
         let mut cache = self.cache.write().await;
         cache.insert(url.to_string(), bytes.clone());
+
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "HTTP error: {} - {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            ));
+        }
 
         let json = serde_json::from_slice(&bytes)?;
 
