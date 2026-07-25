@@ -138,7 +138,7 @@ impl View for ProjectView {
         vec![]
     }
 
-    fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect) {
+    fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect, focused: bool) {
         let project_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -195,7 +195,7 @@ impl View for ProjectView {
                     .iter()
                     .enumerate()
                     .map(|(i, b)| {
-                        let style = if Some(i) == self.bump_table_state.selected() {
+                        let style = if focused && Some(i) == self.bump_table_state.selected() {
                             Style::default().bg(Color::Blue).fg(Color::White)
                         } else {
                             Style::default().fg(Color::Gray)

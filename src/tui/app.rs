@@ -1,5 +1,7 @@
 use crate::core::event::Op;
 use crate::core::message::Payload;
+use crate::tui::views::bump_detail::BumpDetailView;
+use crate::tui::views::bumps::BumpsView;
 use crate::tui::views::overview::OverviewView;
 use crate::tui::views::project::ProjectView;
 use crossterm::event::KeyCode;
@@ -56,8 +58,23 @@ pub enum ViewType {
     /// Overview showing all projects.
     Overview,
 
+    /// Bumps showing all bumps grouped by name, across all projects.
+    Bumps,
+
     /// Project view showing the details of a specific project.
     Project(String),
+
+    /// Bump detail view showing the projects affected by a specific bump group.
+    BumpDetail { name: String, major: bool },
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum Focus {
+    /// Keyboard focus is on the top-level tab bar.
+    TabBar,
+
+    /// Keyboard focus is on the active view's content.
+    Content,
 }
 
 pub enum ViewAction {
@@ -101,8 +118,10 @@ pub trait View {
     /// Handles user input and returns a list of side-effects (e.g., sending payloads or switching views).
     fn update(&mut self, event: &Event, backend: &Backend) -> Vec<ViewAction>;
 
-    /// Renders the view's content into the provided terminal area.
-    fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect);
+    /// Renders the view's content into the provided terminal area. `focused` indicates
+    /// whether keyboard focus is on this view's content (vs. e.g. the tab bar), and
+    /// should be used to decide whether to show the selected-row highlight.
+    fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect, focused: bool);
 
     /// Returns a list of hotkeys supported by this view for the UI footer.
     fn hotkeys(&self) -> Vec<HotkeyDescriptor>;
@@ -118,8 +137,11 @@ pub struct App {
     pub lifecycle: Lifecycle,
     pub backend: Backend,
     pub current_view_type: ViewType,
+    pub focus: Focus,
     pub overview_view: OverviewView,
     pub project_view: ProjectView,
+    pub bumps_view: BumpsView,
+    pub bump_detail_view: BumpDetailView,
     pub dirty: bool,
 }
 
@@ -135,8 +157,11 @@ impl App {
             lifecycle: Lifecycle::Running,
             backend: Backend::new(),
             current_view_type: ViewType::Overview,
+            focus: Focus::Content,
             overview_view: OverviewView::new(),
             project_view: ProjectView::new("".to_string()),
+            bumps_view: BumpsView::new(),
+            bump_detail_view: BumpDetailView::new("".to_string(), false),
             dirty: false,
         }
     }
@@ -150,13 +175,49 @@ impl App {
                         KeyCode::Char('q') => {
                             self.lifecycle = Lifecycle::Exiting;
                         }
+                        KeyCode::Tab => {
+                            self.focus = match self.focus {
+                                Focus::TabBar => Focus::Content,
+                                Focus::Content => Focus::TabBar,
+                            };
+                            self.dirty = true;
+                        }
+                        KeyCode::Left
+                            if self.focus == Focus::Content
+                                && matches!(
+                                    self.current_view_type,
+                                    ViewType::Overview | ViewType::Bumps
+                                ) =>
+                        {
+                            self.focus = Focus::TabBar;
+                            self.dirty = true;
+                        }
+                        _ if self.focus == Focus::TabBar => {
+                            match key.code {
+                                KeyCode::Left => {
+                                    self.current_view_type = ViewType::Overview;
+                                }
+                                KeyCode::Right => {
+                                    self.current_view_type = ViewType::Bumps;
+                                }
+                                KeyCode::Down => {
+                                    self.focus = Focus::Content;
+                                }
+                                _ => {}
+                            }
+                            self.dirty = true;
+                        }
                         _ => {
                             let actions = match self.current_view_type {
                                 ViewType::Overview => {
                                     self.overview_view.update(&event, &self.backend)
                                 }
+                                ViewType::Bumps => self.bumps_view.update(&event, &self.backend),
                                 ViewType::Project(_) => {
                                     self.project_view.update(&event, &self.backend)
+                                }
+                                ViewType::BumpDetail { .. } => {
+                                    self.bump_detail_view.update(&event, &self.backend)
                                 }
                             };
 
@@ -171,6 +232,20 @@ impl App {
                                                 self.project_view.bump_table_state =
                                                     TableState::default();
                                                 self.project_view.bump_table_state.select(Some(0));
+                                            }
+                                        }
+                                        if let ViewType::BumpDetail { name, major } =
+                                            &self.current_view_type
+                                        {
+                                            if name != &self.bump_detail_view.name
+                                                || *major != self.bump_detail_view.major
+                                            {
+                                                self.bump_detail_view.name = name.clone();
+                                                self.bump_detail_view.major = *major;
+                                                self.bump_detail_view.selected_index = 0;
+                                                self.bump_detail_view.table_state =
+                                                    TableState::default();
+                                                self.bump_detail_view.table_state.select(Some(0));
                                             }
                                         }
                                     }
@@ -202,7 +277,9 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(0),
+                Constraint::Length(1), // Tab bar
+                Constraint::Length(1), // line below tab bar
+                Constraint::Min(0),    // Top area
                 Constraint::Length(1), // Blank line above Logs
                 Constraint::Length(8), // 1 (line) + 1 (header) + 1 (blank) + 4 (logs) + 1 (blank)
                 Constraint::Length(1), // line above hotkeys
@@ -210,17 +287,69 @@ impl App {
             ])
             .split(area);
 
-        let log_section_area = chunks[2];
-        let line_above_hotkeys_area = chunks[3];
-        let hotkeys_area = chunks[4];
+        let tab_bar_area = chunks[0];
+        let line_below_tab_bar_area = chunks[1];
+        let top_area = chunks[2];
+        let log_section_area = chunks[4];
+        let line_above_hotkeys_area = chunks[5];
+        let hotkeys_area = chunks[6];
 
-        // 1. Top area
+        // 1. Tab bar
+        let active_tab = match self.current_view_type {
+            ViewType::Overview | ViewType::Project(_) => "Projects",
+            ViewType::Bumps | ViewType::BumpDetail { .. } => "Bumps",
+        };
+
+        let tab_style = |label: &str| {
+            if label != active_tab {
+                return Style::default().fg(Color::Gray);
+            }
+            let style = Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD);
+            if self.focus == Focus::TabBar {
+                style.bg(Color::Blue)
+            } else {
+                style
+            }
+        };
+
+        let tab_line = Line::from(vec![
+            Span::styled(" Projects ", tab_style("Projects")),
+            Span::raw(" "),
+            Span::styled(" Bumps ", tab_style("Bumps")),
+        ]);
+        frame.render_widget(Paragraph::new(tab_line), tab_bar_area);
+
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::DarkGray)),
+            line_below_tab_bar_area,
+        );
+
+        // 2. Top area
+        let content_focused = self.focus == Focus::Content;
         match self.current_view_type {
-            ViewType::Overview => self.overview_view.draw(frame, &self.backend, chunks[0]),
-            ViewType::Project(_) => self.project_view.draw(frame, &self.backend, chunks[0]),
+            ViewType::Overview => {
+                self.overview_view
+                    .draw(frame, &self.backend, top_area, content_focused)
+            }
+            ViewType::Bumps => {
+                self.bumps_view
+                    .draw(frame, &self.backend, top_area, content_focused)
+            }
+            ViewType::Project(_) => {
+                self.project_view
+                    .draw(frame, &self.backend, top_area, content_focused)
+            }
+            ViewType::BumpDetail { .. } => {
+                self.bump_detail_view
+                    .draw(frame, &self.backend, top_area, content_focused)
+            }
         }
 
-        // 2. Log section
+        // 3. Log section
         let log_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -262,7 +391,7 @@ impl App {
             log_chunks[3],
         );
 
-        // 3. Line above hotkeys
+        // 4. Line above hotkeys
         frame.render_widget(
             Block::default()
                 .borders(Borders::TOP)
@@ -270,7 +399,7 @@ impl App {
             line_above_hotkeys_area,
         );
 
-        // 4. Hotkeys
+        // 5. Hotkeys
         let mut hotkey_spans = Vec::new();
 
         let quit_hotkey = HotkeyDescriptor {
@@ -279,9 +408,18 @@ impl App {
         };
         hotkey_spans.extend(quit_hotkey.render());
 
+        hotkey_spans.push(Span::from("    "));
+        let tab_hotkey = HotkeyDescriptor {
+            key: "Tab".to_string(),
+            description: "Switch Focus".to_string(),
+        };
+        hotkey_spans.extend(tab_hotkey.render());
+
         let view_hotkeys = match self.current_view_type {
             ViewType::Overview => self.overview_view.hotkeys(),
+            ViewType::Bumps => self.bumps_view.hotkeys(),
             ViewType::Project(_) => self.project_view.hotkeys(),
+            ViewType::BumpDetail { .. } => self.bump_detail_view.hotkeys(),
         };
 
         for hotkey in view_hotkeys {

@@ -5,7 +5,7 @@ use crossterm::event::KeyCode;
 use ratatui::{
     prelude::*,
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Table, TableState},
+    widgets::{Cell, Row, Table, TableState},
 };
 use std::collections::HashMap;
 
@@ -104,25 +104,7 @@ impl View for OverviewView {
         vec![]
     }
 
-    fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect) {
-        let overview_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Header
-                Constraint::Length(1), // Blank
-                Constraint::Min(0),    // Table
-            ])
-            .split(area);
-
-        // Header
-        frame.render_widget(
-            Paragraph::new("Projects").style(Style::default().add_modifier(Modifier::BOLD)),
-            overview_chunks[0],
-        );
-
-        // Blank
-        frame.render_widget(Paragraph::new(""), overview_chunks[1]);
-
+    fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect, focused: bool) {
         // Table
         let mut projects: Vec<Project> = backend
             .db
@@ -181,13 +163,13 @@ impl View for OverviewView {
             .max()
             .unwrap_or(0)
             .max(8);
-        let platform_width = (max_platform_len + 2).min(overview_chunks[2].width as usize);
+        let platform_width = (max_platform_len + 2).min(area.width as usize);
 
         let table_rows: Vec<Row> = projects
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let style = if Some(i) == self.table_state.selected() {
+                let style = if focused && Some(i) == self.table_state.selected() {
                     Style::default().bg(Color::Blue).fg(Color::White)
                 } else {
                     Style::default().fg(Color::Gray)
@@ -260,7 +242,7 @@ impl View for OverviewView {
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         );
 
-        frame.render_stateful_widget(table, overview_chunks[2], &mut self.table_state);
+        frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 
     fn hotkeys(&self) -> Vec<HotkeyDescriptor> {
