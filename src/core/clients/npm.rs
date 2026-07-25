@@ -121,7 +121,7 @@ impl Npm {
             }
         }
 
-        releases.sort_by(|a, b| b.publish_time.cmp(&a.publish_time));
+        releases.sort_by_key(|r| std::cmp::Reverse(r.publish_time));
 
         Ok(releases)
     }

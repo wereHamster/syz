@@ -397,47 +397,45 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                     let vers: Vec<_> = old_vers.iter().cloned().collect();
                     removed.push((module, vers.join(", ")));
                 }
-                (Some(old_vers), Some(new_vers)) => {
-                    if old_vers != new_vers {
-                        let mut old_sorted: Vec<_> = old_vers.iter().cloned().collect();
-                        let mut new_sorted: Vec<_> = new_vers.iter().cloned().collect();
-                        old_sorted.sort();
-                        new_sorted.sort();
+                (Some(old_vers), Some(new_vers)) if old_vers != new_vers => {
+                    let mut old_sorted: Vec<_> = old_vers.iter().cloned().collect();
+                    let mut new_sorted: Vec<_> = new_vers.iter().cloned().collect();
+                    old_sorted.sort();
+                    new_sorted.sort();
 
-                        let mut old_majors = std::collections::HashSet::new();
-                        for o in &old_sorted {
-                            if let Ok(ver) = semver::Version::parse(o) {
-                                if ver.major == 0 {
-                                    old_majors.insert((0, ver.minor));
-                                } else {
-                                    old_majors.insert((ver.major, 0));
-                                }
+                    let mut old_majors = std::collections::HashSet::new();
+                    for o in &old_sorted {
+                        if let Ok(ver) = semver::Version::parse(o) {
+                            if ver.major == 0 {
+                                old_majors.insert((0, ver.minor));
+                            } else {
+                                old_majors.insert((ver.major, 0));
                             }
                         }
+                    }
 
-                        let mut is_major = false;
-                        for n in &new_sorted {
-                            if let Ok(ver) = semver::Version::parse(n) {
-                                let major_key = if ver.major == 0 {
-                                    (0, ver.minor)
-                                } else {
-                                    (ver.major, 0)
-                                };
+                    let mut is_major = false;
+                    for n in &new_sorted {
+                        if let Ok(ver) = semver::Version::parse(n) {
+                            let major_key = if ver.major == 0 {
+                                (0, ver.minor)
+                            } else {
+                                (ver.major, 0)
+                            };
 
-                                if !old_majors.contains(&major_key) {
-                                    is_major = true;
-                                    break;
-                                }
+                            if !old_majors.contains(&major_key) {
+                                is_major = true;
+                                break;
                             }
                         }
+                    }
 
-                        let label =
-                            format!("`{}` -> `{}`", old_sorted.join(", "), new_sorted.join(", "));
-                        if is_major {
-                            major_bumps.push((module, label));
-                        } else {
-                            minor_bumps.push((module, label));
-                        }
+                    let label =
+                        format!("`{}` -> `{}`", old_sorted.join(", "), new_sorted.join(", "));
+                    if is_major {
+                        major_bumps.push((module, label));
+                    } else {
+                        minor_bumps.push((module, label));
                     }
                 }
                 _ => {}

@@ -192,10 +192,7 @@ impl PullRequestSectionGenerator for HistorySection {
 
                 let notes_results = futures::future::join_all(notes_futures).await;
 
-                for (release, notes_res) in history_to_process
-                    .into_iter()
-                    .zip(notes_results.into_iter())
-                {
+                for (release, notes_res) in history_to_process.into_iter().zip(notes_results) {
                     let mut time_str = "Published ".to_string();
                     let now = chrono::Utc::now();
                     let diff = now.signed_duration_since(release.publish_time);

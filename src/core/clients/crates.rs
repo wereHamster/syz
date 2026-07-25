@@ -110,7 +110,7 @@ impl Crates {
             }
         }
 
-        history.sort_by(|a, b| b.publish_time.cmp(&a.publish_time));
+        history.sort_by_key(|r| std::cmp::Reverse(r.publish_time));
 
         Ok(history)
     }
