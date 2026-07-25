@@ -31,7 +31,7 @@ reqwest = { version = "0.13.3", features = ["json", "stream"] }
 async-trait = "0.1.89"
 octocrab = "0.54.0"
 jsonwebtoken = "10.3.0"
-base64 = "0.22.1"
+base64 = "0.23.0"
 rustls = "0.23.40"
 chrono = "0.4.44"
 regex = "1.12.3"
