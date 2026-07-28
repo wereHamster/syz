@@ -77,6 +77,19 @@ pub enum Payload {
         pull_request_url: Option<String>,
     },
 
+    /// Clear a bump's stored pull request URL, e.g. because the PR was closed
+    /// without being merged.
+    #[serde(skip)]
+    ClearBumpUrl {
+        bump_id: String,
+    },
+
+    /// Remove a bump entirely, e.g. because its pull request was merged.
+    #[serde(skip)]
+    RemoveBump {
+        bump_id: String,
+    },
+
     #[serde(skip)]
     PersistAnalyzedProjectDependencies {
         project_id: String,
@@ -107,6 +120,8 @@ impl std::fmt::Display for Payload {
                 write!(f, "UpdateVulnerableDependencies")
             }
             Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
+            Payload::ClearBumpUrl { .. } => write!(f, "ClearBumpUrl"),
+            Payload::RemoveBump { .. } => write!(f, "RemoveBump"),
             Payload::PersistAnalyzedProjectDependencies { .. } => {
                 write!(f, "PersistAnalyzedProjectDependencies")
             }
@@ -278,6 +293,28 @@ impl Payload {
                         data: serde_json::to_value(updated_bump).unwrap_or_default(),
                     }],
                 })?;
+
+                Ok(())
+            }
+
+            Payload::ClearBumpUrl { bump_id } => {
+                let updated_bump = app.store().clear_bump_url(&bump_id).await?;
+
+                app.handle().broadcast(crate::core::event::Event::Commit {
+                    ops: vec![crate::core::event::Op::Upsert {
+                        path: format!("bump/{}", updated_bump.id),
+                        data: serde_json::to_value(updated_bump).unwrap_or_default(),
+                    }],
+                })?;
+
+                Ok(())
+            }
+
+            Payload::RemoveBump { bump_id } => {
+                let ops = app.store().remove_bump(&bump_id).await?;
+
+                app.handle()
+                    .broadcast(crate::core::event::Event::Commit { ops })?;
 
                 Ok(())
             }

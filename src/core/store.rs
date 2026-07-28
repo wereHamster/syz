@@ -284,6 +284,58 @@ impl Store {
         Err(anyhow::anyhow!("Bump not found"))
     }
 
+    pub async fn bump_by_url(&self, url: &str) -> Result<Option<Bump>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT id, project_id, name, major, approved, url FROM bump WHERE url = ?1")
+            .await?;
+
+        let mut rows = stmt.query((url,)).await?;
+
+        if let Some(row) = rows.next().await? {
+            return Ok(Some(Bump {
+                id: row.get(0).unwrap_or_default(),
+                project_id: row.get(1).unwrap_or_default(),
+                name: row.get(2).unwrap_or_default(),
+                major: row.get(3).unwrap_or_default(),
+                approved: row.get(4).unwrap_or_default(),
+                url: row.get(5).unwrap_or_default(),
+            }));
+        }
+
+        Ok(None)
+    }
+
+    pub async fn remove_bump(&self, bump_id: &str) -> Result<Vec<Op>> {
+        let conn = self.database.conn()?;
+        let mut ops = Vec::new();
+
+        let mut bumpdeps_stmt = conn
+            .prepare("SELECT dependency_id FROM bumpdep WHERE bump_id = ?1")
+            .await?;
+        let mut bumpdeps_rows = bumpdeps_stmt.query((bump_id,)).await?;
+        while let Some(dep_row) = bumpdeps_rows.next().await? {
+            let dep_id = dep_row.get_value(0)?.as_text().unwrap().to_string();
+            ops.push(Op::Delete {
+                path: format!("bumpdep/{}/{}", bump_id, dep_id),
+            });
+        }
+        ops.push(Op::Delete {
+            path: format!("bump/{}", bump_id),
+        });
+
+        conn.execute(
+            "DELETE FROM bumpdep WHERE bump_id = ?1",
+            params![bump_id],
+        )
+        .await?;
+        conn.execute("DELETE FROM bump WHERE id = ?1", params![bump_id])
+            .await?;
+
+        Ok(ops)
+    }
+
     pub async fn vacuum(&self) -> Result<Vec<Op>> {
         let conn = self.database.conn()?;
         let mut ops = Vec::new();
@@ -484,6 +536,13 @@ impl Store {
             .await?;
         }
 
+        self.bump(bump_id).await
+    }
+
+    pub async fn clear_bump_url(&self, bump_id: &str) -> Result<Bump> {
+        let conn = self.database.conn()?;
+        conn.execute("UPDATE bump SET url = NULL WHERE id = ?", params![bump_id])
+            .await?;
         self.bump(bump_id).await
     }
 
