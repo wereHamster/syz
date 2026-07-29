@@ -48,6 +48,8 @@ impl std::fmt::Display for Platform {
 
 /// A seam for interacting with different project hosting platforms.
 pub trait ProjectPlatform: Send + Sync {
+    fn platform(&self) -> Platform;
+
     fn repository(&self, repository: &str) -> Box<dyn ProjectPlatformRepository>;
 }
 
@@ -80,6 +82,10 @@ impl GitHubPlatformAdapter {
 
 #[async_trait]
 impl ProjectPlatform for GitHubPlatformAdapter {
+    fn platform(&self) -> Platform {
+        Platform::GitHub
+    }
+
     fn repository(&self, repository: &str) -> Box<dyn ProjectPlatformRepository> {
         Box::new(GitHubPlatformRepository {
             client: self.client.clone(),
@@ -122,6 +128,10 @@ impl TangledPlatformAdapter {
 
 #[async_trait]
 impl ProjectPlatform for TangledPlatformAdapter {
+    fn platform(&self) -> Platform {
+        Platform::Tangled
+    }
+
     fn repository(&self, repository: &str) -> Box<dyn ProjectPlatformRepository> {
         Box::new(TangledPlatformRepository {
             client: self.client.clone(),
@@ -164,7 +174,8 @@ impl PlatformRegistry {
         }
     }
 
-    pub fn register(&mut self, id: Platform, platform: Arc<dyn ProjectPlatform>) {
+    pub fn register(&mut self, platform: Arc<dyn ProjectPlatform>) {
+        let id = platform.platform();
         self.platforms.insert(id, platform);
     }
 

@@ -4,9 +4,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::Instrument;
 
 use crate::core::clients;
-use crate::core::platform::{
-    GitHubPlatformAdapter, Platform, PlatformRegistry, TangledPlatformAdapter,
-};
+use crate::core::platform::{GitHubPlatformAdapter, PlatformRegistry, TangledPlatformAdapter};
 
 use super::clients::github::GitHub;
 use super::clients::tangled::Tangled;
@@ -49,14 +47,8 @@ impl Application {
         let tangled = Tangled::new().await?;
 
         let mut platforms = PlatformRegistry::new();
-        platforms.register(
-            Platform::GitHub,
-            Arc::new(GitHubPlatformAdapter::new(github.clone())),
-        );
-        platforms.register(
-            Platform::Tangled,
-            Arc::new(TangledPlatformAdapter::new(tangled)),
-        );
+        platforms.register(Arc::new(GitHubPlatformAdapter::new(github.clone())));
+        platforms.register(Arc::new(TangledPlatformAdapter::new(tangled)));
 
         Ok(Self {
             store: store.clone(),
