@@ -47,11 +47,8 @@ impl Application {
         let tangled = Tangled::new().await?;
 
         let mut platforms = PlatformRegistry::new();
-        platforms.register(
-            "github",
-            Arc::new(GitHubPlatformAdapter::new(github.clone())),
-        );
-        platforms.register("tangled", Arc::new(TangledPlatformAdapter::new(tangled)));
+        platforms.register(Arc::new(GitHubPlatformAdapter::new(github.clone())));
+        platforms.register(Arc::new(TangledPlatformAdapter::new(tangled)));
 
         Ok(Self {
             store: store.clone(),
@@ -148,7 +145,7 @@ impl Application {
         project_id: &str,
     ) -> Result<Box<dyn super::platform::ProjectPlatformRepository>> {
         let project = self.store.project(project_id).await?;
-        let platform = self.platforms.resolve(&project.platform)?;
+        let platform = self.platforms.resolve(project.platform)?;
 
         Ok(platform.repository(&project.repository))
     }

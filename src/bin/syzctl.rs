@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use syz::core::platform::Platform;
 use syz::tui::{run, Options};
 
 #[derive(Parser, Debug)]
@@ -41,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Invalid argument format. Expected platform:repository");
             }
 
-            let platform = parts[0].to_string();
+            let platform: Platform = parts[0].parse()?;
             let repository = parts[1].to_string();
 
             let client = reqwest::Client::new();
@@ -66,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Invalid argument format. Expected platform:repository");
             }
 
-            let platform = parts[0].to_string();
+            let platform: Platform = parts[0].parse()?;
             let repository = parts[1].to_string();
 
             let client = reqwest::Client::new();

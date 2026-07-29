@@ -6,7 +6,7 @@ use axum::{
 use serde_json::Value;
 
 use super::AppState;
-use crate::core::{database::pk, message::Payload};
+use crate::core::{database::pk, message::Payload, platform::Platform};
 
 pub async fn post(
     State(state): State<AppState>,
@@ -77,7 +77,7 @@ async fn handle_push(
 
     let project = projects
         .into_iter()
-        .find(|p| p.platform == "github" && p.repository == db_repo_name);
+        .find(|p| p.platform == Platform::GitHub && p.repository == db_repo_name);
 
     let project = match project {
         Some(p) => p,

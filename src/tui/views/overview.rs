@@ -159,7 +159,7 @@ impl View for OverviewView {
 
         let max_platform_len = projects
             .iter()
-            .map(|p| p.platform.len())
+            .map(|p| p.platform.as_str().len())
             .max()
             .unwrap_or(0)
             .max(8);
@@ -221,7 +221,7 @@ impl View for OverviewView {
                 let bumps_line = Line::from(bumps_spans);
 
                 Row::new(vec![
-                    Cell::from(p.platform.clone()),
+                    Cell::from(p.platform.as_str()),
                     Cell::from(p.repository.clone()),
                     Cell::from(bumps_line),
                 ])
