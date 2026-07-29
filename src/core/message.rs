@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use super::actions::analyze_project_dependencies::AnalyzedProjectDependencies;
 use super::application::Application;
+use super::platform::Platform;
 
 #[derive(Clone)]
 pub struct Message {
@@ -36,13 +37,13 @@ pub enum Payload {
 
     /// Add a new project to the database.
     AddProject {
-        platform: String,
+        platform: Platform,
         repository: String,
     },
 
     /// Remove a project from the database.
     RemoveProject {
-        platform: String,
+        platform: Platform,
         repository: String,
     },
 

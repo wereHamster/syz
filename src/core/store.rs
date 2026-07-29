@@ -7,6 +7,7 @@ use crate::core::actions::analyze_project_dependencies::{
 };
 use crate::core::database::{pk, Bump, BumpDep, Database, Dependency, Package, Project};
 use crate::core::event::Op;
+use crate::core::platform::Platform;
 
 #[derive(Clone)]
 pub struct Store {
@@ -40,9 +41,10 @@ impl Store {
 
         let mut projects = Vec::new();
         while let Some(row) = rows.next().await? {
+            let platform: String = row.get(1).unwrap_or_default();
             projects.push(Project {
                 id: row.get(0).unwrap_or_default(),
-                platform: row.get(1).unwrap_or_default(),
+                platform: platform.parse().context("Invalid platform in database")?,
                 repository: row.get(2).unwrap_or_default(),
             });
         }
@@ -60,9 +62,10 @@ impl Store {
         let mut rows = stmt.query((project_id,)).await?;
 
         if let Some(row) = rows.next().await? {
+            let platform: String = row.get(1).unwrap_or_default();
             return Ok(Project {
                 id: row.get(0).unwrap_or_default(),
-                platform: row.get(1).unwrap_or_default(),
+                platform: platform.parse().context("Invalid platform in database")?,
                 repository: row.get(2).unwrap_or_default(),
             });
         }
@@ -70,7 +73,7 @@ impl Store {
         Err(anyhow::anyhow!("Project not found"))
     }
 
-    pub async fn add_project(&self, platform: String, repository: String) -> Result<Project> {
+    pub async fn add_project(&self, platform: Platform, repository: String) -> Result<Project> {
         let conn = self.database.conn()?;
         let id = pk();
 
@@ -88,7 +91,7 @@ impl Store {
         })
     }
 
-    pub async fn remove_project(&self, platform: String, repository: String) -> Result<Vec<Op>> {
+    pub async fn remove_project(&self, platform: Platform, repository: String) -> Result<Vec<Op>> {
         let conn = self.database.conn()?;
 
         // Find the project

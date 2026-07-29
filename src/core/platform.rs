@@ -1,11 +1,50 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::core::clients::github::GitHub;
 use crate::core::clients::tangled::Tangled;
 use crate::core::engine::repository::{ProjectRepositoryMutator, ProjectRepositoryView};
+
+/// The project hosting platform a project lives on.
+///
+/// This is the in-core representation; strings only appear at IO edges (CLI
+/// arguments, database rows) and are parsed into this enum immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    GitHub,
+    Tangled,
+}
+
+impl Platform {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Platform::GitHub => "github",
+            Platform::Tangled => "tangled",
+        }
+    }
+}
+
+impl std::str::FromStr for Platform {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "github" => Ok(Platform::GitHub),
+            "tangled" => Ok(Platform::Tangled),
+            other => anyhow::bail!("Unsupported project platform: {}", other),
+        }
+    }
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
 
 /// A seam for interacting with different project hosting platforms.
 pub trait ProjectPlatform: Send + Sync {
@@ -115,7 +154,7 @@ impl ProjectPlatformRepository for TangledPlatformRepository {
 
 /// Registry for resolving project platforms by their identifier.
 pub struct PlatformRegistry {
-    platforms: HashMap<String, Arc<dyn ProjectPlatform>>,
+    platforms: HashMap<Platform, Arc<dyn ProjectPlatform>>,
 }
 
 impl PlatformRegistry {
@@ -125,13 +164,13 @@ impl PlatformRegistry {
         }
     }
 
-    pub fn register(&mut self, id: &str, platform: Arc<dyn ProjectPlatform>) {
-        self.platforms.insert(id.to_string(), platform);
+    pub fn register(&mut self, id: Platform, platform: Arc<dyn ProjectPlatform>) {
+        self.platforms.insert(id, platform);
     }
 
-    pub fn resolve(&self, id: &str) -> Result<Arc<dyn ProjectPlatform>> {
+    pub fn resolve(&self, id: Platform) -> Result<Arc<dyn ProjectPlatform>> {
         self.platforms
-            .get(id)
+            .get(&id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Unsupported project platform: {}", id))
     }

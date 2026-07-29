@@ -3,6 +3,8 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use turso::{Builder, Connection};
 
+use crate::core::platform::Platform;
+
 #[derive(Clone)]
 pub struct Database {
     db: turso::Database,
@@ -34,7 +36,7 @@ pub fn pk() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
-    pub platform: String,
+    pub platform: Platform,
     pub repository: String,
 }
 

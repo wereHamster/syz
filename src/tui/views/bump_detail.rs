@@ -1,5 +1,6 @@
 use crate::core::database::{Bump, BumpDep, Dependency, Package, Project};
 use crate::core::message::Payload;
+use crate::core::platform::Platform;
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -10,7 +11,7 @@ use ratatui::{
 struct AffectedProjectRow {
     project_id: String,
     bump_id: String,
-    platform: String,
+    platform: Platform,
     repository: String,
     current: String,
     target: String,
@@ -232,7 +233,7 @@ impl View for BumpDetailView {
 
         let max_platform_len = rows
             .iter()
-            .map(|r| r.platform.len())
+            .map(|r| r.platform.as_str().len())
             .max()
             .unwrap_or(0)
             .max(8);
@@ -260,7 +261,7 @@ impl View for BumpDetailView {
 
                 Row::new(vec![
                     Cell::from(approved_checkbox),
-                    Cell::from(r.platform.clone()),
+                    Cell::from(r.platform.as_str()),
                     Cell::from(r.repository.clone()),
                     Cell::from(r.current.clone()),
                     Cell::from(r.target.clone()),
