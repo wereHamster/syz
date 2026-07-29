@@ -41,7 +41,7 @@ impl Store {
 
         let mut projects = Vec::new();
         while let Some(row) = rows.next().await? {
-            let platform: String = row.get(1).unwrap_or_default();
+            let platform: String = row.get(1).context("Missing platform column")?;
             projects.push(Project {
                 id: row.get(0).unwrap_or_default(),
                 platform: platform.parse().context("Invalid platform in database")?,
@@ -62,7 +62,7 @@ impl Store {
         let mut rows = stmt.query((project_id,)).await?;
 
         if let Some(row) = rows.next().await? {
-            let platform: String = row.get(1).unwrap_or_default();
+            let platform: String = row.get(1).context("Missing platform column")?;
             return Ok(Project {
                 id: row.get(0).unwrap_or_default(),
                 platform: platform.parse().context("Invalid platform in database")?,
