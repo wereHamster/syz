@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
             let client = reqwest::Client::new();
             let payload = serde_json::json!({
                 "type": "AddProject",
-                "platform": platform.as_str(),
+                "platform": platform,
                 "repository": repository,
             });
 
@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
             let client = reqwest::Client::new();
             let payload = serde_json::json!({
                 "type": "RemoveProject",
-                "platform": platform.as_str(),
+                "platform": platform,
                 "repository": repository,
             });
 
