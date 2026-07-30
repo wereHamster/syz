@@ -155,10 +155,15 @@ impl Patcher for CargoPatcher {
             }
         }
 
-        let mut cmd = Command::new("cargo");
-        cmd.arg("generate-lockfile").current_dir(temp_dir);
-
-        let status = cmd.status()?;
+        let temp_dir_owned = temp_dir.to_path_buf();
+        let status = tokio::task::spawn_blocking(move || {
+            Command::new("cargo")
+                .arg("generate-lockfile")
+                .current_dir(&temp_dir_owned)
+                .status()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
         if !status.success() {
             tracing::warn!("cargo generate-lockfile failed, continuing anyway...");
         }
