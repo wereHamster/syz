@@ -522,16 +522,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         tracing::info!("Running pnpm install --lockfile-only to set baseline...");
-        let mut cmd = Command::new("pnpm");
-        cmd.arg("install")
-            .arg("--lockfile-only")
-            .arg("--ignore-scripts");
-
-        if workspace.is_some() {
-            cmd.arg("--recursive");
-        }
-
-        if !cmd.current_dir(temp_dir).status()?.success() {
+        if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), true, false).await? {
             tracing::warn!("pnpm install failed, continuing anyway...");
         }
 
@@ -756,25 +747,12 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         tracing::info!(
             "Running pnpm install in temp directory to update lockfile with forced fixes..."
         );
-        let mut install_cmd = Command::new("pnpm");
-        install_cmd
-            .arg("install")
-            .arg("--lockfile-only")
-            .arg("--ignore-scripts");
-
-        if workspace.is_some() {
-            install_cmd.arg("--recursive");
-        }
-
-        if !install_cmd.current_dir(temp_dir).status()?.success() {
+        if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), true, false).await? {
             tracing::warn!("pnpm install failed, continuing anyway...");
         }
 
         tracing::info!("Running pnpm dedupe...");
-        let mut dedupe_cmd = Command::new("pnpm");
-        dedupe_cmd.arg("dedupe").arg("--ignore-scripts");
-        let dedupe_status = dedupe_cmd.current_dir(temp_dir).status()?;
-        if !dedupe_status.success() {
+        if !run_pnpm_dedupe(temp_dir.to_path_buf(), false).await? {
             tracing::warn!("pnpm dedupe failed, continuing anyway...");
         }
 
@@ -795,17 +773,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             tracing::info!(
                 "Running pnpm install --lockfile-only to remove override markers from lockfile..."
             );
-            let mut final_install_cmd = Command::new("pnpm");
-            final_install_cmd
-                .arg("install")
-                .arg("--lockfile-only")
-                .arg("--ignore-scripts");
-
-            if workspace.is_some() {
-                final_install_cmd.arg("--recursive");
-            }
-
-            if !final_install_cmd.current_dir(temp_dir).status()?.success() {
+            if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), true, false).await? {
                 tracing::warn!("Final pnpm install failed, continuing anyway...");
             }
         }
