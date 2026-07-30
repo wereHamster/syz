@@ -3,7 +3,9 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
+use hmac::{Hmac, Mac};
 use serde_json::Value;
+use sha2::Sha256;
 
 use super::AppState;
 use crate::core::{database::pk, message::Payload, platform::Platform};
@@ -13,6 +15,16 @@ pub async fn post(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let signature = headers
+        .get("X-Hub-Signature-256")
+        .and_then(|v| v.to_str().ok())
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing X-Hub-Signature-256 header".to_string(),
+        ))?;
+
+    verify_signature(&state.github_webhook_secret, signature, &body)?;
+
     let event = headers
         .get("X-GitHub-Event")
         .and_then(|v| v.to_str().ok())
@@ -33,6 +45,57 @@ pub async fn post(
         "push" => handle_push(state, payload).await,
         "pull_request" => handle_pull_request(state, payload).await,
         _ => Ok(StatusCode::OK),
+    }
+}
+
+/// Verify the `X-Hub-Signature-256` header against the HMAC-SHA256 of the raw
+/// request body, as described in
+/// <https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries>.
+fn verify_signature(
+    secret: &str,
+    signature: &str,
+    body: &[u8],
+) -> Result<(), (StatusCode, String)> {
+    let invalid = || (StatusCode::UNAUTHORIZED, "Invalid signature".to_string());
+
+    let digest = signature.strip_prefix("sha256=").ok_or_else(invalid)?;
+    let digest = hex::decode(digest).map_err(|_| invalid())?;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC-SHA256 accepts keys of any size");
+    mac.update(body);
+    mac.verify_slice(&digest).map_err(|_| invalid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Test vector from the GitHub documentation.
+    const SECRET: &str = "It's a Secret to Everybody";
+    const BODY: &[u8] = b"Hello, World!";
+    const SIGNATURE: &str =
+        "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17";
+
+    #[test]
+    fn accepts_a_valid_signature() {
+        assert!(verify_signature(SECRET, SIGNATURE, BODY).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_tampered_body() {
+        assert!(verify_signature(SECRET, SIGNATURE, b"Goodbye, World!").is_err());
+    }
+
+    #[test]
+    fn rejects_a_wrong_secret() {
+        assert!(verify_signature("nope", SIGNATURE, BODY).is_err());
+    }
+
+    #[test]
+    fn rejects_a_malformed_signature() {
+        assert!(verify_signature(SECRET, "not-a-signature", BODY).is_err());
+        assert!(verify_signature(SECRET, "sha256=zzzz", BODY).is_err());
     }
 }
 

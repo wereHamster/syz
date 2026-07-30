@@ -7,4 +7,5 @@ pub mod root;
 pub struct AppState {
     pub handle: crate::core::application::Handle,
     pub token: String,
+    pub github_webhook_secret: String,
 }

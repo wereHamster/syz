@@ -4,8 +4,16 @@ use anyhow::Result;
 use axum::{routing::get, routing::post, Router};
 use tokio::net::TcpListener;
 
-pub async fn start(handle: crate::core::application::Handle, token: String) -> Result<()> {
-    let app_state = handlers::AppState { handle, token };
+pub async fn start(
+    handle: crate::core::application::Handle,
+    token: String,
+    github_webhook_secret: String,
+) -> Result<()> {
+    let app_state = handlers::AppState {
+        handle,
+        token,
+        github_webhook_secret,
+    };
 
     let app = Router::new()
         .route("/", get(handlers::root::ascii_art))

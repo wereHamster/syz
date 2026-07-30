@@ -15,7 +15,9 @@ async fn main() -> Result<()> {
     let handle = application.start();
 
     let token = std::env::var("SYZD_AUTH_TOKEN").expect("SYZD_AUTH_TOKEN must be set");
-    syz::server::start(handle, token).await?;
+    let github_webhook_secret =
+        std::env::var("GITHUB_WEBHOOK_SECRET").expect("GITHUB_WEBHOOK_SECRET must be set");
+    syz::server::start(handle, token, github_webhook_secret).await?;
 
     tracing::info!("exiting...");
 

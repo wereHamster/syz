@@ -18,12 +18,14 @@ You must set the following environment variables:
 
 - `GITHUB_TOKEN`: Your GitHub personal access token (required for GitHub ecosystem support).
 - `SYZD_AUTH_TOKEN`: A secret string used to authenticate clients to the server.
+- `GITHUB_WEBHOOK_SECRET`: The secret configured on the GitHub webhook, used to verify incoming deliveries.
 
 If you use [direnv](https://direnv.net/), you can simply create a `.env` file in the project root:
 
 ```bash
 echo "GITHUB_TOKEN=your_github_token" > .env
 echo "SYZD_AUTH_TOKEN=your_random_secret_string" >> .env
+echo "GITHUB_WEBHOOK_SECRET=your_webhook_secret" >> .env
 ```
 
 ### 2. Running the Server
