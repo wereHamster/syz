@@ -5,6 +5,8 @@ use turso::{Builder, Connection};
 
 use crate::core::platform::Platform;
 
+const SCHEMA: &str = include_str!("database/schema.sql");
+
 #[derive(Clone)]
 pub struct Database {
     db: turso::Database,
@@ -12,10 +14,24 @@ pub struct Database {
 
 impl Database {
     pub async fn open() -> Result<Self> {
+        std::fs::create_dir_all("data").context("Failed to create data directory")?;
+
         let db = Builder::new_local("data/turso.db")
             .build()
             .await
             .context("Failed to build turso database")?;
+
+        let conn = db.connect().context("Failed to create connection")?;
+        let migration = tdsm::plan(&conn, SCHEMA)
+            .await
+            .context("Failed to plan database migration")?;
+        if !migration.is_empty() {
+            migration
+                .apply()
+                .await
+                .context("Failed to apply database migration")?;
+            tracing::info!("Applied database schema:\n{migration}");
+        }
 
         Ok(Self { db })
     }
