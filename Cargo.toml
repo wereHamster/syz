@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/tdsm"]
+
 [package]
 name = "syz"
 version = "0.1.0"
