@@ -41,12 +41,14 @@ pub fn parse_schema(sql: &str) -> Result<DesiredSchema> {
     let statements =
         Parser::parse_sql(&SQLiteDialect {}, sql).context("failed to parse desired schema SQL")?;
 
+    let object_name = |name: &ObjectName| name.to_string();
+
     let mut schema = DesiredSchema::default();
 
     for statement in statements {
         match &statement {
             Statement::CreateTable(create_table) => {
-                let name = object_name_to_string(&create_table.name);
+                let name = object_name(&create_table.name);
                 let columns = create_table
                     .columns
                     .iter()
@@ -66,7 +68,7 @@ pub fn parse_schema(sql: &str) -> Result<DesiredSchema> {
                 let name = create_index
                     .name
                     .as_ref()
-                    .map(object_name_to_string)
+                    .map(object_name)
                     .context("CREATE INDEX without a name is not supported")?;
 
                 schema.indexes.push(DesiredIndex {
@@ -79,8 +81,4 @@ pub fn parse_schema(sql: &str) -> Result<DesiredSchema> {
     }
 
     Ok(schema)
-}
-
-fn object_name_to_string(name: &ObjectName) -> String {
-    name.to_string()
 }

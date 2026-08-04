@@ -1,6 +1,11 @@
 [workspace]
 members = ["crates/tdsm"]
 
+[workspace.dependencies]
+anyhow = "1.0.102"
+turso = "0.7.0"
+tokio = "1.50.0"
+
 [package]
 name = "syz"
 version = "0.1.0"
@@ -15,12 +20,12 @@ name = "syzctl"
 path = "src/bin/syzctl.rs"
 
 [dependencies]
-tokio = { version = "1.50.0", features = ["full", "macros"] }
+tokio = { workspace = true, features = ["full", "macros"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tracing-journald = "0.3.2"
-anyhow = "1.0.102"
-turso = "0.7.0"
+anyhow.workspace = true
+turso.workspace = true
 rand = "0.10.1"
 bs58 = "0.5.1"
 serde = { version = "1.0.228", features = ["derive"] }

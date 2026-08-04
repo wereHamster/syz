@@ -5,9 +5,9 @@ edition = "2021"
 description = "Turso Declarative Schema Migration: diff a desired SQL schema against a live Turso database and apply the difference."
 
 [dependencies]
-anyhow = "1.0.102"
-turso = "0.7.0"
+anyhow.workspace = true
+turso.workspace = true
 sqlparser = "0.62.0"
 
 [dev-dependencies]
-tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

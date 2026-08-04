@@ -3,9 +3,10 @@
 //!
 //! This first version is intentionally simple: it only ever *adds* things —
 //! missing tables, missing columns on existing tables, and missing indexes.
-//! Renames, deletions, and column type/constraint changes are out of scope;
-//! such differences between the desired schema and the live database are
-//! silently ignored rather than acted upon.
+//! Renames, deletions, and column type/constraint changes are out of scope
+//! by design (not a runtime failure mode): tables/columns/indexes that exist
+//! live but are absent from the desired schema are deliberately left alone,
+//! not diffed as removals.
 
 mod diff;
 mod introspect;
@@ -18,15 +19,45 @@ use turso::Connection;
 
 /// An ordered, human-readable list of DDL statements needed to bring the
 /// live database's tables/columns/indexes up to date with the desired
-/// schema. Empty when the database is already up to date.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// schema, bound to the connection it will run against. Empty when the
+/// database is already up to date.
+#[derive(Clone)]
 pub struct Migration {
     pub statements: Vec<String>,
+    conn: Connection,
 }
 
 impl Migration {
     pub fn is_empty(&self) -> bool {
         self.statements.is_empty()
+    }
+
+    /// Execute the migration against the connection it was planned from,
+    /// inside a single transaction. Idempotent: applying an empty
+    /// [`Migration`] writes nothing.
+    pub async fn apply(&self) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        self.conn
+            .execute("BEGIN TRANSACTION", ())
+            .await
+            .context("failed to begin migration transaction")?;
+
+        for statement in &self.statements {
+            if let Err(err) = self.conn.execute(statement, ()).await {
+                let _ = self.conn.execute("ROLLBACK", ()).await;
+                return Err(err).with_context(|| format!("failed to execute: {statement}"));
+            }
+        }
+
+        self.conn
+            .execute("COMMIT", ())
+            .await
+            .context("failed to commit migration transaction")?;
+
+        Ok(())
     }
 }
 
@@ -44,34 +75,11 @@ impl fmt::Display for Migration {
 pub async fn plan(conn: &Connection, desired_schema_sql: &str) -> Result<Migration> {
     let desired = parse::parse_schema(desired_schema_sql)?;
     let live = introspect::introspect(conn).await?;
-    Ok(diff::diff(&desired, &live))
-}
-
-/// Compute the migration and execute it against `conn`, inside a single
-/// transaction. Idempotent: converging an already-up-to-date database
-/// returns an empty [`Migration`] and writes nothing.
-pub async fn apply(conn: &Connection, desired_schema_sql: &str) -> Result<Migration> {
-    let migration = plan(conn, desired_schema_sql).await?;
-    if migration.is_empty() {
-        return Ok(migration);
-    }
-
-    conn.execute("BEGIN TRANSACTION", ())
-        .await
-        .context("failed to begin migration transaction")?;
-
-    for statement in &migration.statements {
-        if let Err(err) = conn.execute(statement, ()).await {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(err).with_context(|| format!("failed to execute: {statement}"));
-        }
-    }
-
-    conn.execute("COMMIT", ())
-        .await
-        .context("failed to commit migration transaction")?;
-
-    Ok(migration)
+    let statements = diff::diff(&desired, &live);
+    Ok(Migration {
+        statements,
+        conn: conn.clone(),
+    })
 }
 
 pub(crate) fn quote_ident(ident: &str) -> String {

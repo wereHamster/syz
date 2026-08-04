@@ -1,13 +1,13 @@
 use crate::introspect::LiveSchema;
 use crate::parse::DesiredSchema;
-use crate::{quote_ident, Migration};
+use crate::quote_ident;
 
 /// Compare `desired` against `live` and produce the additive-only set of
 /// statements needed to converge: `CREATE TABLE` for missing tables,
 /// `ALTER TABLE ... ADD COLUMN` for missing columns on existing tables, and
 /// `CREATE INDEX` for missing indexes. Tables/columns/indexes present in
 /// `live` but absent from `desired` are left alone.
-pub fn diff(desired: &DesiredSchema, live: &LiveSchema) -> Migration {
+pub fn diff(desired: &DesiredSchema, live: &LiveSchema) -> Vec<String> {
     let mut statements = Vec::new();
 
     for table in &desired.tables {
@@ -38,5 +38,5 @@ pub fn diff(desired: &DesiredSchema, live: &LiveSchema) -> Migration {
         }
     }
 
-    Migration { statements }
+    statements
 }
