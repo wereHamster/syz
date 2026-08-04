@@ -4875,6 +4875,7 @@ dependencies = [
  "serde_json",
  "serde_yml",
  "sha2",
+ "tdsm",
  "tempfile",
  "tokio",
  "toml_edit",
