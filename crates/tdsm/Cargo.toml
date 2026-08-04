@@ -1,0 +1,13 @@
+[package]
+name = "tdsm"
+version = "0.1.0"
+edition = "2021"
+description = "Turso Declarative Schema Migration: diff a desired SQL schema against a live Turso database and apply the difference."
+
+[dependencies]
+anyhow.workspace = true
+turso.workspace = true
+sqlparser = "0.62.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
