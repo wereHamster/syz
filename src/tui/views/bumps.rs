@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 struct BumpGroupRow {
     name: String,
     major: bool,
+    ecosystem: String,
     current: String,
     target: String,
     head: String,
@@ -20,6 +21,43 @@ struct BumpGroupRow {
     prs: usize,
     /// (bump id, approved) for every bump in this group, across all affected projects.
     bumps: Vec<(String, bool)>,
+}
+
+/// A human-readable label for an ecosystem group header, shared by the bumps overview
+/// and the per-project view.
+pub(crate) fn ecosystem_label(ecosystem: &str) -> String {
+    match ecosystem {
+        "npm" => "NPM".to_string(),
+        "cargo" => "Cargo".to_string(),
+        "github-actions" => "GitHub Actions".to_string(),
+        "nix-flake" => "Nix Flake".to_string(),
+        "multiple" => "Multiple".to_string(),
+        "" => "Unknown".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// For every bump group (keyed by name + major), the number of distinct projects
+/// affected by it, across the whole system. Used to rank ecosystem groups by their
+/// most impactful bump, in both the bumps overview and the per-project view.
+pub(crate) fn affected_projects_by_bump_group(backend: &Backend) -> HashMap<(String, bool), usize> {
+    let mut projects_by_group: HashMap<(String, bool), HashSet<String>> = HashMap::new();
+
+    for (path, value) in backend.db.iter() {
+        if path.starts_with("bump/") {
+            if let Ok(bump) = serde_json::from_value::<Bump>(value.clone()) {
+                projects_by_group
+                    .entry((bump.name.clone(), bump.major))
+                    .or_default()
+                    .insert(bump.project_id.clone());
+            }
+        }
+    }
+
+    projects_by_group
+        .into_iter()
+        .map(|(key, project_ids)| (key, project_ids.len()))
+        .collect()
 }
 
 pub struct BumpsView {
@@ -71,6 +109,7 @@ impl BumpsView {
         }
 
         let mut currents_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
+        let mut ecosystems_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
         let mut targets_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
         let mut heads_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
 
@@ -78,20 +117,26 @@ impl BumpsView {
             if path.starts_with("bumpdep/") {
                 if let Ok(bd) = serde_json::from_value::<BumpDep>(value.clone()) {
                     if let Some(key) = bump_id_to_group.get(&bd.bump_id) {
-                        if let Some(current) = backend
+                        if let Some(pkg) = backend
                             .db
                             .get(&format!("dependency/{}", bd.dependency_id))
                             .and_then(|v| serde_json::from_value::<Dependency>(v.clone()).ok())
                             .and_then(|dep| {
-                                backend.db.get(&format!("package/{}", dep.package_id)).cloned()
+                                backend
+                                    .db
+                                    .get(&format!("package/{}", dep.package_id))
+                                    .cloned()
                             })
                             .and_then(|v| serde_json::from_value::<Package>(v).ok())
-                            .map(|pkg| pkg.version)
                         {
                             currents_by_group
                                 .entry(key.clone())
                                 .or_default()
-                                .push(current);
+                                .push(pkg.version);
+                            ecosystems_by_group
+                                .entry(key.clone())
+                                .or_default()
+                                .push(pkg.r#type);
                         }
                         targets_by_group
                             .entry(key.clone())
@@ -116,6 +161,15 @@ impl BumpsView {
                     "".to_string()
                 } else if currents.iter().all(|v| v == &currents[0]) {
                     currents[0].clone()
+                } else {
+                    "multiple".to_string()
+                };
+
+                let ecosystems = ecosystems_by_group.get(&key).cloned().unwrap_or_default();
+                let ecosystem = if ecosystems.is_empty() {
+                    "".to_string()
+                } else if ecosystems.iter().all(|v| v == &ecosystems[0]) {
+                    ecosystems[0].clone()
                 } else {
                     "multiple".to_string()
                 };
@@ -146,6 +200,7 @@ impl BumpsView {
                 BumpGroupRow {
                     name,
                     major,
+                    ecosystem,
                     current,
                     target,
                     head,
@@ -157,9 +212,19 @@ impl BumpsView {
             })
             .collect();
 
+        // Order ecosystem groups by the max number of projects affected by any single
+        // bump within that ecosystem, so the most consequential ecosystem sorts first.
+        let mut max_by_ecosystem: HashMap<String, usize> = HashMap::new();
+        for row in &rows {
+            let entry = max_by_ecosystem.entry(row.ecosystem.clone()).or_insert(0);
+            *entry = (*entry).max(row.affected_projects);
+        }
+
         rows.sort_by(|a, b| {
-            b.affected_projects
-                .cmp(&a.affected_projects)
+            max_by_ecosystem[&b.ecosystem]
+                .cmp(&max_by_ecosystem[&a.ecosystem])
+                .then_with(|| a.ecosystem.cmp(&b.ecosystem))
+                .then_with(|| b.affected_projects.cmp(&a.affected_projects))
                 .then_with(|| a.name.cmp(&b.name))
                 .then_with(|| a.major.cmp(&b.major))
         });
@@ -260,6 +325,19 @@ impl View for BumpsView {
 
         let max_name_len = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
 
+        let column_widths = [
+            Constraint::Length(3),
+            Constraint::Length((max_name_len + 2) as u16),
+            Constraint::Length(7),
+            Constraint::Length(15),
+            Constraint::Length(15),
+            Constraint::Length(15),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Min(5),
+        ];
+        let column_count = column_widths.len() as u16;
+
         let add_count_spans = |val: usize, spans: &mut Vec<Span>| {
             if val == 0 {
                 spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
@@ -273,31 +351,50 @@ impl View for BumpsView {
             }
         };
 
-        let table_rows: Vec<Row> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let style = if focused && Some(i) == self.table_state.selected() {
-                    Style::default().bg(Color::Blue).fg(Color::White)
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
+        // Group rows are already ordered by ecosystem (see `grouped_rows`). Walk them once,
+        // inserting a header row whenever the ecosystem changes, and remember the table-row
+        // index that corresponds to `self.selected_index` so the scroll offset stays correct.
+        let mut table_rows: Vec<Row> = Vec::new();
+        let mut selected_table_index: Option<usize> = None;
+        let mut last_ecosystem: Option<&str> = None;
 
-                let mut projects_spans = Vec::new();
-                add_count_spans(r.affected_projects, &mut projects_spans);
-                let mut approved_spans = Vec::new();
-                add_count_spans(r.approved, &mut approved_spans);
-                let mut prs_spans = Vec::new();
-                add_count_spans(r.prs, &mut prs_spans);
+        for (data_index, r) in rows.iter().enumerate() {
+            if last_ecosystem != Some(r.ecosystem.as_str()) {
+                if last_ecosystem.is_some() {
+                    table_rows.push(Row::new(Vec::<Cell>::new()));
+                }
+                table_rows.push(Row::new(vec![Cell::new(ecosystem_label(&r.ecosystem))
+                    .style(Style::default().add_modifier(Modifier::BOLD))
+                    .column_span(column_count)]));
+                last_ecosystem = Some(r.ecosystem.as_str());
+            }
 
-                let approved_checkbox = if r.approved == 0 {
-                    "[ ]"
-                } else if r.approved == r.bumps.len() {
-                    "[x]"
-                } else {
-                    "[-]"
-                };
+            if data_index == self.selected_index {
+                selected_table_index = Some(table_rows.len());
+            }
 
+            let style = if focused && data_index == self.selected_index {
+                Style::default().bg(Color::Blue).fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+
+            let mut projects_spans = Vec::new();
+            add_count_spans(r.affected_projects, &mut projects_spans);
+            let mut approved_spans = Vec::new();
+            add_count_spans(r.approved, &mut approved_spans);
+            let mut prs_spans = Vec::new();
+            add_count_spans(r.prs, &mut prs_spans);
+
+            let approved_checkbox = if r.approved == 0 {
+                "[ ]"
+            } else if r.approved == r.bumps.len() {
+                "[x]"
+            } else {
+                "[-]"
+            };
+
+            table_rows.push(
                 Row::new(vec![
                     Cell::from(approved_checkbox),
                     Cell::from(r.name.clone()),
@@ -309,25 +406,13 @@ impl View for BumpsView {
                     Cell::from(Line::from(approved_spans)),
                     Cell::from(Line::from(prs_spans)),
                 ])
-                .style(style)
-            })
-            .collect();
+                .style(style),
+            );
+        }
 
-        let table = Table::new(
-            table_rows,
-            [
-                Constraint::Length(3),
-                Constraint::Length((max_name_len + 2) as u16),
-                Constraint::Length(7),
-                Constraint::Length(15),
-                Constraint::Length(15),
-                Constraint::Length(15),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Min(5),
-            ],
-        )
-        .header(
+        self.table_state.select(selected_table_index);
+
+        let table = Table::new(table_rows, column_widths).header(
             Row::new(vec![
                 "", "Name", "Type", "Current", "Target", "Head", "Projects", "Approved", "PRs",
             ])
