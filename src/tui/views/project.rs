@@ -191,6 +191,44 @@ impl View for ProjectView {
 
                 let max_name_len = bumps.iter().map(|b| b.name.len()).max().unwrap_or(0);
 
+                let ecosystem_cols: Vec<String> = bumps
+                    .iter()
+                    .map(|b| {
+                        let mut ecosystems = Vec::new();
+                        if let Some(deps) = bump_deps_map.get(&b.id) {
+                            for bd in deps {
+                                if let Some(pkg_type) = backend
+                                    .db
+                                    .get(&format!("dependency/{}", bd.dependency_id))
+                                    .and_then(|v| serde_json::from_value::<Dependency>(v.clone()).ok())
+                                    .and_then(|dep| {
+                                        backend.db.get(&format!("package/{}", dep.package_id)).cloned()
+                                    })
+                                    .and_then(|v| serde_json::from_value::<Package>(v).ok())
+                                    .map(|pkg| pkg.r#type)
+                                {
+                                    ecosystems.push(pkg_type);
+                                }
+                            }
+                        }
+
+                        if ecosystems.is_empty() {
+                            "".to_string()
+                        } else if ecosystems.iter().all(|v| v == &ecosystems[0]) {
+                            ecosystems[0].clone()
+                        } else {
+                            "multiple".to_string()
+                        }
+                    })
+                    .collect();
+
+                let max_ecosystem_len = ecosystem_cols
+                    .iter()
+                    .map(|s| s.len())
+                    .max()
+                    .unwrap_or(0)
+                    .max("Ecosystem".len());
+
                 let table_rows: Vec<Row> = bumps
                     .iter()
                     .enumerate()
@@ -287,6 +325,7 @@ impl View for ProjectView {
 
                         Row::new(vec![
                             Cell::from(approved_checkbox),
+                            Cell::from(ecosystem_cols[i].clone()),
                             Cell::from(b.name.clone()),
                             Cell::from(current_col),
                             Cell::from(target_col),
@@ -301,6 +340,7 @@ impl View for ProjectView {
                     table_rows,
                     [
                         Constraint::Length(3),
+                        Constraint::Length((max_ecosystem_len + 2) as u16),
                         Constraint::Length((max_name_len + 2) as u16),
                         Constraint::Length(15),
                         Constraint::Length(15),
@@ -311,6 +351,7 @@ impl View for ProjectView {
                 .header(
                     Row::new(vec![
                         "",
+                        "Ecosystem",
                         "Name",
                         "Current",
                         "Target",
