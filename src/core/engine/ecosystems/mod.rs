@@ -8,6 +8,7 @@ use crate::core::engine::{
 
 pub mod cargo;
 pub mod github_actions;
+pub mod nix_flake;
 pub mod npm;
 pub mod registry_router;
 
