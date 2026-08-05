@@ -189,7 +189,60 @@ impl View for ProjectView {
                     }
                 }
 
-                let max_name_len = bumps.iter().map(|b| b.name.len()).max().unwrap_or(0);
+                // Option B: prefix the package name with its ecosystem (e.g. "npm:react")
+                // instead of a separate column.
+                let ecosystem_by_bump: HashMap<String, String> = bumps
+                    .iter()
+                    .map(|b| {
+                        let mut ecosystems = Vec::new();
+                        if let Some(deps) = bump_deps_map.get(&b.id) {
+                            for bd in deps {
+                                if let Some(pkg_type) = backend
+                                    .db
+                                    .get(&format!("dependency/{}", bd.dependency_id))
+                                    .and_then(|v| {
+                                        serde_json::from_value::<Dependency>(v.clone()).ok()
+                                    })
+                                    .and_then(|dep| {
+                                        backend
+                                            .db
+                                            .get(&format!("package/{}", dep.package_id))
+                                            .cloned()
+                                    })
+                                    .and_then(|v| serde_json::from_value::<Package>(v).ok())
+                                    .map(|pkg| pkg.r#type)
+                                {
+                                    ecosystems.push(pkg_type);
+                                }
+                            }
+                        }
+
+                        let ecosystem = if ecosystems.is_empty() {
+                            "".to_string()
+                        } else if ecosystems.iter().all(|v| v == &ecosystems[0]) {
+                            ecosystems[0].clone()
+                        } else {
+                            "multiple".to_string()
+                        };
+
+                        (b.id.clone(), ecosystem)
+                    })
+                    .collect();
+
+                let display_name = |b: &Bump| {
+                    let ecosystem = ecosystem_by_bump.get(&b.id).cloned().unwrap_or_default();
+                    if ecosystem.is_empty() {
+                        b.name.clone()
+                    } else {
+                        format!("{}:{}", ecosystem, b.name)
+                    }
+                };
+
+                let max_name_len = bumps
+                    .iter()
+                    .map(|b| display_name(b).len())
+                    .max()
+                    .unwrap_or(0);
 
                 let table_rows: Vec<Row> = bumps
                     .iter()
@@ -268,7 +321,8 @@ impl View for ProjectView {
                             "multiple".to_string()
                         };
 
-                        let all_deps_matched = bump_deps_map.get(&b.id)
+                        let all_deps_matched = bump_deps_map
+                            .get(&b.id)
                             .map(|deps| deps.iter().all(|bd| bd.target_version == bd.head_version))
                             .unwrap_or(false);
 
@@ -287,7 +341,7 @@ impl View for ProjectView {
 
                         Row::new(vec![
                             Cell::from(approved_checkbox),
-                            Cell::from(b.name.clone()),
+                            Cell::from(display_name(b)),
                             Cell::from(current_col),
                             Cell::from(target_col),
                             Cell::from(final_head_col),

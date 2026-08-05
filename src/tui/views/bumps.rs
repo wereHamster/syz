@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 struct BumpGroupRow {
     name: String,
     major: bool,
+    ecosystem: String,
     current: String,
     target: String,
     head: String,
@@ -71,6 +72,7 @@ impl BumpsView {
         }
 
         let mut currents_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
+        let mut ecosystems_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
         let mut targets_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
         let mut heads_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
 
@@ -78,20 +80,26 @@ impl BumpsView {
             if path.starts_with("bumpdep/") {
                 if let Ok(bd) = serde_json::from_value::<BumpDep>(value.clone()) {
                     if let Some(key) = bump_id_to_group.get(&bd.bump_id) {
-                        if let Some(current) = backend
+                        if let Some(pkg) = backend
                             .db
                             .get(&format!("dependency/{}", bd.dependency_id))
                             .and_then(|v| serde_json::from_value::<Dependency>(v.clone()).ok())
                             .and_then(|dep| {
-                                backend.db.get(&format!("package/{}", dep.package_id)).cloned()
+                                backend
+                                    .db
+                                    .get(&format!("package/{}", dep.package_id))
+                                    .cloned()
                             })
                             .and_then(|v| serde_json::from_value::<Package>(v).ok())
-                            .map(|pkg| pkg.version)
                         {
                             currents_by_group
                                 .entry(key.clone())
                                 .or_default()
-                                .push(current);
+                                .push(pkg.version);
+                            ecosystems_by_group
+                                .entry(key.clone())
+                                .or_default()
+                                .push(pkg.r#type);
                         }
                         targets_by_group
                             .entry(key.clone())
@@ -116,6 +124,15 @@ impl BumpsView {
                     "".to_string()
                 } else if currents.iter().all(|v| v == &currents[0]) {
                     currents[0].clone()
+                } else {
+                    "multiple".to_string()
+                };
+
+                let ecosystems = ecosystems_by_group.get(&key).cloned().unwrap_or_default();
+                let ecosystem = if ecosystems.is_empty() {
+                    "".to_string()
+                } else if ecosystems.iter().all(|v| v == &ecosystems[0]) {
+                    ecosystems[0].clone()
                 } else {
                     "multiple".to_string()
                 };
@@ -146,6 +163,7 @@ impl BumpsView {
                 BumpGroupRow {
                     name,
                     major,
+                    ecosystem,
                     current,
                     target,
                     head,
@@ -258,7 +276,22 @@ impl View for BumpsView {
     fn draw(&mut self, frame: &mut Frame, backend: &Backend, area: Rect, focused: bool) {
         let rows = Self::grouped_rows(backend);
 
-        let max_name_len = rows.iter().map(|r| r.name.len()).max().unwrap_or(0).max(4);
+        // Option B: prefix the package name with its ecosystem (e.g. "npm:react") instead
+        // of a separate column.
+        let display_name = |r: &BumpGroupRow| {
+            if r.ecosystem.is_empty() {
+                r.name.clone()
+            } else {
+                format!("{}:{}", r.ecosystem, r.name)
+            }
+        };
+
+        let max_name_len = rows
+            .iter()
+            .map(|r| display_name(r).len())
+            .max()
+            .unwrap_or(0)
+            .max(4);
 
         let add_count_spans = |val: usize, spans: &mut Vec<Span>| {
             if val == 0 {
@@ -300,7 +333,7 @@ impl View for BumpsView {
 
                 Row::new(vec![
                     Cell::from(approved_checkbox),
-                    Cell::from(r.name.clone()),
+                    Cell::from(display_name(r)),
                     Cell::from(if r.major { "major" } else { "minor" }),
                     Cell::from(r.current.clone()),
                     Cell::from(r.target.clone()),
