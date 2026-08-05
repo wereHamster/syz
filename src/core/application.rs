@@ -13,6 +13,7 @@ use super::database::Database;
 use super::engine::ecosystems::{
     cargo::{CargoRegistry, CargoScanner},
     github_actions::{GitHubRegistry, GitHubScanner},
+    nix_flake::{NixFlakePatcher, NixFlakeRegistry, NixFlakeScanner},
     npm::{NpmRegistry, NpmScanner},
     registry_router::RegistryRouter,
     Registry, Scanner,
@@ -113,6 +114,7 @@ impl Application {
             Box::new(CargoScanner),
             Box::new(NpmScanner),
             Box::new(GitHubScanner),
+            Box::new(NixFlakeScanner),
         ]
     }
 
@@ -136,6 +138,7 @@ impl Application {
             "github-actions".to_string(),
             Box::new(GitHubRegistry::new(self.github.clone())),
         );
+        registries.insert("nix-flake".to_string(), Box::new(NixFlakeRegistry));
 
         RegistryRouter::new(registries)
     }
@@ -245,6 +248,7 @@ impl Application {
                 "cargo",
                 Box::new(crate::core::engine::ecosystems::cargo::CargoPatcher::new()),
             ),
+            ("nix-flake", Box::new(NixFlakePatcher)),
         ]
     }
 
@@ -266,6 +270,7 @@ impl Application {
             "cargo" => Some(Box::new(
                 crate::core::engine::ecosystems::cargo::CargoPatcher::new(),
             )),
+            "nix-flake" => Some(Box::new(NixFlakePatcher)),
             _ => None,
         }
     }
