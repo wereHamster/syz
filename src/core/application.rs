@@ -138,7 +138,10 @@ impl Application {
             "github-actions".to_string(),
             Box::new(GitHubRegistry::new(self.github.clone())),
         );
-        registries.insert("nix-flake".to_string(), Box::new(NixFlakeRegistry));
+        registries.insert(
+            "nix-flake".to_string(),
+            Box::new(NixFlakeRegistry::new(self.github.clone())),
+        );
 
         RegistryRouter::new(registries)
     }

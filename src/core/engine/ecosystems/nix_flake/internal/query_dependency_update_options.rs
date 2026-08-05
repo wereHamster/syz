@@ -1,10 +1,51 @@
 use anyhow::Result;
 
-use crate::core::engine::{DependencyUpdateOption, DiscoveredDependency, PackageInfo};
+use crate::core::{
+    clients,
+    engine::{DependencyUpdateOption, DiscoveredDependency, PackageInfo, ProposedBump, UpdateType},
+};
 
-pub async fn run(_dependency: &DiscoveredDependency) -> Result<DependencyUpdateOption> {
+use super::helpers;
+
+pub async fn run(
+    github_client: clients::github::GitHub,
+    dependency: &DiscoveredDependency,
+) -> Result<DependencyUpdateOption> {
+    let repo = match helpers::parse_github_repo(&dependency.purl.name) {
+        Some(r) => r,
+        None => {
+            return Ok(DependencyUpdateOption {
+                package_info: PackageInfo { repo_url: None },
+                bumps: Vec::new(),
+            })
+        }
+    };
+
+    let reference = if dependency.requirement.is_empty() {
+        None
+    } else {
+        Some(dependency.requirement.as_str())
+    };
+
+    let repo_url = Some(format!("https://github.com/{}/{}", repo.owner, repo.repo));
+
+    let latest_sha =
+        helpers::get_latest_commit_sha(&github_client, &repo.owner, &repo.repo, reference).await;
+
+    let bumps = match latest_sha {
+        Some(sha) if Some(sha.as_str()) != dependency.purl.version.as_deref() => {
+            vec![ProposedBump {
+                target_version: sha.clone(),
+                head_version: sha,
+                is_major: false,
+                update_type: UpdateType::Minor,
+            }]
+        }
+        _ => Vec::new(),
+    };
+
     Ok(DependencyUpdateOption {
-        package_info: PackageInfo { repo_url: None },
-        bumps: Vec::new(),
+        package_info: PackageInfo { repo_url },
+        bumps,
     })
 }
