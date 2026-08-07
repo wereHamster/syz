@@ -43,6 +43,20 @@ fn commit_route(owner: &str, repo: &str, reference: Option<&str>) -> String {
     }
 }
 
+pub async fn get_commit_date(
+    github_client: &GitHub,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let route = commit_route(owner, repo, Some(sha));
+    let res = github_client.get_json(&route).await.ok()?;
+    let date_str = res.get("commit")?.get("committer")?.get("date")?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(date_str)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
 pub async fn get_latest_commit_sha(
     github_client: &GitHub,
     owner: &str,

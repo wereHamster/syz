@@ -54,10 +54,10 @@ pub struct NixFlakePatcher;
 impl Patcher for NixFlakePatcher {
     async fn apply_updates(
         &self,
-        _snapshot: &dyn ProjectRepositorySnapshot,
-        _temp_dir: &std::path::Path,
-        _targets: &[UpdateTarget],
+        snapshot: &dyn ProjectRepositorySnapshot,
+        temp_dir: &std::path::Path,
+        targets: &[UpdateTarget],
     ) -> Result<Vec<FileModification>> {
-        Ok(Vec::new())
+        internal::apply_updates::run(snapshot, temp_dir, targets).await
     }
 }

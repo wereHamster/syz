@@ -92,7 +92,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         let branch_name = generate_branch_name(&bump_name, is_major);
 
         let pr_url_opt = match async {
-            let title = pr_generator.generate_pull_request_title(&bump_name, &eco_type, &targets, is_major).await?;
+            let title = pr_generator.generate_pull_request_title(&bump_name, &eco_type, &targets, is_major, snapshot.as_ref()).await?;
             let body = pr_generator.generate_pull_request_body(&bump_name, &eco_type, &targets, is_major).await?;
 
             // 4. Commit changes
