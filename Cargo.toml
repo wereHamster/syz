@@ -54,7 +54,7 @@ ipld-core = "0.4.3"
 urlencoding = "2.1.3"
 atrium-api = "0.25.8"
 atrium-xrpc-client = "0.5.15"
-git2 = { version = "0.21.0", features = ["vendored-openssl", "ssh"] }
+git2 = { version = "0.21.0", features = ["vendored-openssl", "https", "ssh"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 ratatui = "0.30.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }

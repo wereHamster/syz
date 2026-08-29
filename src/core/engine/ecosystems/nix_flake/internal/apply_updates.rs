@@ -74,7 +74,7 @@ pub async fn run(
     }
 }
 
-/// For each root input whose `original` github ref matches an approved target, returns
+/// For each root input whose `original` ref matches an approved target, returns
 /// `(local_alias, override_flake_ref)` pairs suitable for `nix flake lock --override-input`.
 /// `override_flake_ref` pins to the target's exact approved SHA, not the ref's current tip.
 fn override_args_for_targets(
@@ -83,16 +83,30 @@ fn override_args_for_targets(
 ) -> Vec<(String, String)> {
     let mut overrides = Vec::new();
 
-    for input in flake_lock::github_root_inputs(lock) {
-        let normalized = helpers::format_github_ref(input.owner, input.repo, input.git_ref);
+    for input in flake_lock::root_inputs(lock) {
+        let normalized = match &input {
+            flake_lock::RootInput::Github(gh) => {
+                helpers::format_github_ref(gh.owner, gh.repo, gh.git_ref)
+            }
+            flake_lock::RootInput::Git(g) => helpers::format_git_ref(g.url, g.git_ref),
+        };
 
-        if let Some(target) = target_map.get(normalized.as_str()) {
-            let override_ref = format!(
+        let target = match target_map.get(normalized.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let override_ref = match &input {
+            flake_lock::RootInput::Github(gh) => format!(
                 "github:{}/{}/{}",
-                input.owner, input.repo, target.target_version.version
-            );
-            overrides.push((input.alias.to_string(), override_ref));
-        }
+                gh.owner, gh.repo, target.target_version.version
+            ),
+            flake_lock::RootInput::Git(g) => {
+                format!("git+{}?rev={}", g.url, target.target_version.version)
+            }
+        };
+
+        overrides.push((input.alias().to_string(), override_ref));
     }
 
     overrides.sort();
@@ -193,13 +207,13 @@ mod tests {
     }
 
     #[test]
-    fn test_override_args_skips_non_github_input() {
+    fn test_override_args_skips_unsupported_input_type() {
         let content = r#"
         {
           "nodes": {
             "nixpkgs": {
-              "locked": { "type": "git", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-              "original": { "type": "git", "url": "https://example.com/nixpkgs.git" }
+              "locked": { "type": "indirect", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "indirect", "id": "nixpkgs" }
             },
             "root": { "inputs": { "nixpkgs": "nixpkgs" } }
           },
@@ -209,10 +223,43 @@ mod tests {
         "#;
         let lock: FlakeLock = serde_json::from_str(content).unwrap();
 
-        let target = make_target("git:https://example.com/nixpkgs.git", "sha");
+        let target = make_target("indirect:nixpkgs", "sha");
         let target_map: HashMap<&str, &UpdateTarget> = [(target.name.as_str(), &target)].into();
 
         assert!(override_args_for_targets(&lock, &target_map).is_empty());
+    }
+
+    #[test]
+    fn test_override_args_matches_direct_git_input() {
+        let content = r#"
+        {
+          "nodes": {
+            "core": {
+              "locked": { "type": "git", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "git", "url": "https://tangled.org/@tangled.org/core" }
+            },
+            "root": { "inputs": { "core": "core" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        let target = make_target(
+            "git+https://tangled.org/@tangled.org/core",
+            "cccccccccccccccccccccccccccccccccccccccc",
+        );
+        let target_map: HashMap<&str, &UpdateTarget> = [(target.name.as_str(), &target)].into();
+
+        let overrides = override_args_for_targets(&lock, &target_map);
+        assert_eq!(
+            overrides,
+            vec![(
+                "core".to_string(),
+                "git+https://tangled.org/@tangled.org/core?rev=cccccccccccccccccccccccccccccccccccccccc".to_string()
+            )]
+        );
     }
 
     #[test]
