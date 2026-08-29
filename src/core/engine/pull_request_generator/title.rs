@@ -1,3 +1,4 @@
+use crate::core::engine::repository::ProjectRepositorySnapshot;
 use crate::core::engine::UpdateTarget;
 
 pub async fn generate_title(
@@ -6,8 +7,38 @@ pub async fn generate_title(
     targets: &[UpdateTarget],
     is_major: bool,
     github: Option<&crate::core::clients::github::GitHub>,
+    project_repo: &dyn ProjectRepositorySnapshot,
 ) -> String {
-    let mut title = if targets.len() == 1 {
+    let mut title = if targets.len() == 1 && ecosystem == "nix-flake" {
+        let target = &targets[0];
+        let sha = &target.target_version.version;
+        let short_sha = &sha[..sha.len().min(7)];
+
+        let display_name = crate::core::engine::ecosystems::nix_flake::internal::find_input_alias::run(
+            project_repo,
+            &target.name,
+        )
+        .await
+        .unwrap_or_else(|| package_group.to_string());
+
+        let date_suffix = match github {
+            Some(gh) => match crate::core::engine::ecosystems::nix_flake::internal::helpers::parse_github_repo(&target.name) {
+                Some(repo) => crate::core::engine::ecosystems::nix_flake::internal::helpers::get_commit_date(
+                    gh, &repo.owner, &repo.repo, sha,
+                )
+                .await
+                .map(|d| format!(" ({})", d.format("%Y-%m-%d")))
+                .unwrap_or_default(),
+                None => String::new(),
+            },
+            None => String::new(),
+        };
+
+        format!(
+            "Update Nix Flake input `{}` to {}{}",
+            display_name, short_sha, date_suffix
+        )
+    } else if targets.len() == 1 {
         let target = &targets[0];
         let mut clean_new = target.target_version.version.clone();
 
@@ -110,6 +141,38 @@ mod tests {
     use super::*;
     use crate::core::engine::{PackageInfo, RequirementVersion};
 
+    struct MockSnapshot {
+        files: std::collections::HashMap<String, String>,
+    }
+
+    impl MockSnapshot {
+        fn empty() -> Self {
+            Self {
+                files: std::collections::HashMap::new(),
+            }
+        }
+
+        fn with_file(path: &str, content: &str) -> Self {
+            let mut files = std::collections::HashMap::new();
+            files.insert(path.to_string(), content.to_string());
+            Self { files }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProjectRepositorySnapshot for MockSnapshot {
+        async fn list_files(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self.files.keys().cloned().collect())
+        }
+
+        async fn read_file(&self, path: &str) -> anyhow::Result<String> {
+            self.files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+    }
+
     fn make_target(name: &str, current: &str, target: &str) -> UpdateTarget {
         UpdateTarget {
             name: name.to_string(),
@@ -130,11 +193,84 @@ mod tests {
     #[tokio::test]
     async fn test_generate_title_single_target() {
         let targets = vec![make_target("react", "17.0.0", "18.0.0")];
-        let title = generate_title("React", "npm", &targets, false, None).await;
+        let repo = MockSnapshot::empty();
+        let title = generate_title("React", "npm", &targets, false, None, &repo).await;
         assert_eq!(title, "Update React to 18.0.0");
 
-        let title_major = generate_title("React", "npm", &targets, true, None).await;
+        let title_major = generate_title("React", "npm", &targets, true, None, &repo).await;
         assert_eq!(title_major, "Update React to 18.0.0 (major)");
+    }
+
+    #[tokio::test]
+    async fn test_generate_title_nix_flake_single_target_resolves_alias() {
+        let targets = vec![make_target(
+            "github:NixOS/nixpkgs/nixpkgs-unstable",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "104240a772428cc2e20d8fd86c9ddbb886bbaff2",
+        )];
+        let flake_lock = r#"
+        {
+          "nodes": {
+            "nixpkgs": {
+              "locked": { "type": "github", "owner": "NixOS", "repo": "nixpkgs", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "github", "owner": "NixOS", "repo": "nixpkgs", "ref": "nixpkgs-unstable" }
+            },
+            "root": { "inputs": { "nixpkgs": "nixpkgs" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+        let repo = MockSnapshot::with_file("flake.lock", flake_lock);
+
+        let title = generate_title(
+            "github:NixOS/nixpkgs/nixpkgs-unstable",
+            "nix-flake",
+            &targets,
+            false,
+            None,
+            &repo,
+        )
+        .await;
+        assert_eq!(title, "Update Nix Flake input `nixpkgs` to 104240a");
+
+        let title_major = generate_title(
+            "github:NixOS/nixpkgs/nixpkgs-unstable",
+            "nix-flake",
+            &targets,
+            true,
+            None,
+            &repo,
+        )
+        .await;
+        assert_eq!(
+            title_major,
+            "Update Nix Flake input `nixpkgs` to 104240a (major)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_title_nix_flake_falls_back_to_package_group_without_flake_lock() {
+        let targets = vec![make_target(
+            "github:NixOS/nixpkgs/nixpkgs-unstable",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "104240a772428cc2e20d8fd86c9ddbb886bbaff2",
+        )];
+        let repo = MockSnapshot::empty();
+
+        let title = generate_title(
+            "github:NixOS/nixpkgs/nixpkgs-unstable",
+            "nix-flake",
+            &targets,
+            false,
+            None,
+            &repo,
+        )
+        .await;
+        assert_eq!(
+            title,
+            "Update Nix Flake input `github:NixOS/nixpkgs/nixpkgs-unstable` to 104240a"
+        );
     }
 
     #[tokio::test]
@@ -143,7 +279,8 @@ mod tests {
             make_target("react", "17.0.0", "18.0.0"),
             make_target("react-dom", "17.0.0", "18.0.0"),
         ];
-        let title = generate_title("React", "npm", &targets, false, None).await;
+        let repo = MockSnapshot::empty();
+        let title = generate_title("React", "npm", &targets, false, None, &repo).await;
         assert_eq!(title, "Update React to 18.0.0");
     }
 
@@ -154,7 +291,8 @@ mod tests {
             make_target("babel-cli", "7.0.0", "7.2.5"),
             make_target("babel-preset-env", "7.0.0", "7.0.5"),
         ];
-        let title = generate_title("Babel", "npm", &targets, false, None).await;
+        let repo = MockSnapshot::empty();
+        let title = generate_title("Babel", "npm", &targets, false, None, &repo).await;
         assert_eq!(title, "Update Babel to 7.0.5 ~ 7.2.5");
     }
 }

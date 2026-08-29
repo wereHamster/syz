@@ -1,37 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::Result;
-use serde::Deserialize;
 
 use crate::core::engine::repository::ProjectRepositorySnapshot;
 use crate::core::engine::{DiscoveredDependency, PURL};
 
+use super::flake_lock::FlakeLock;
 use super::helpers;
-
-#[derive(Deserialize)]
-struct FlakeLock {
-    nodes: HashMap<String, FlakeNode>,
-    root: String,
-}
-
-#[derive(Deserialize, Default)]
-struct FlakeNode {
-    #[serde(default)]
-    inputs: HashMap<String, serde_json::Value>,
-    original: Option<FlakeRef>,
-    locked: Option<FlakeRef>,
-}
-
-#[derive(Deserialize)]
-struct FlakeRef {
-    #[serde(rename = "type", default)]
-    ref_type: String,
-    owner: Option<String>,
-    repo: Option<String>,
-    #[serde(rename = "ref")]
-    git_ref: Option<String>,
-    rev: Option<String>,
-}
 
 pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredDependency>> {
     let content = match repo.read_file("flake.lock").await {

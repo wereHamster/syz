@@ -2,7 +2,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::core::engine::{
-    advisories::SecurityUpdateSummary, TransitiveUpdateSummary, UpdateTarget,
+    advisories::SecurityUpdateSummary, repository::ProjectRepositorySnapshot,
+    TransitiveUpdateSummary, UpdateTarget,
 };
 
 pub mod context;
@@ -24,6 +25,7 @@ pub trait PullRequestGenerator: Send + Sync {
         ecosystem: &str,
         targets: &[UpdateTarget],
         is_major: bool,
+        repo: &dyn ProjectRepositorySnapshot,
     ) -> Result<String>;
 
     async fn generate_pull_request_body(
@@ -295,6 +297,7 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
         ecosystem: &str,
         targets: &[UpdateTarget],
         is_major: bool,
+        repo: &dyn ProjectRepositorySnapshot,
     ) -> Result<String> {
         Ok(title::generate_title(
             package_group,
@@ -302,6 +305,7 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
             targets,
             is_major,
             Some(&self.github),
+            repo,
         )
         .await)
     }
