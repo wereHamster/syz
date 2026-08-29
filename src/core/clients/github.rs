@@ -2,8 +2,14 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
 use jsonwebtoken::EncodingKey;
-use octocrab::{models::AppId, Octocrab};
+use octocrab::{
+    models::{AppId, InstallationId},
+    Octocrab,
+};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::core::engine::repository::{
     FileModification, FileState, ProjectRepositoryMutator, ProjectRepositorySnapshot,
@@ -14,6 +20,7 @@ use crate::core::engine::repository::{
 pub struct GitHub {
     octocrab: Octocrab,
     public_client: Octocrab,
+    installation_clients: Arc<Mutex<HashMap<String, Octocrab>>>,
 }
 
 impl GitHub {
@@ -49,7 +56,44 @@ impl GitHub {
         Ok(GitHub {
             octocrab,
             public_client,
+            installation_clients: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Finds the GitHub App installation whose account matches `owner` (case-insensitively).
+    async fn find_installation(&self, owner: &str) -> Option<InstallationId> {
+        let installations = self.octocrab.apps().installations().send().await.ok()?;
+        installations
+            .items
+            .into_iter()
+            .find(|inst| inst.account.login.eq_ignore_ascii_case(owner))
+            .map(|inst| inst.id)
+    }
+
+    /// Returns an installation-scoped client authorized for `owner`, falling back to
+    /// `public_client` when no installation covers that owner (e.g. a public repo with
+    /// no app installation at all). Resolved clients are cached per owner.
+    async fn client_for_owner(&self, owner: &str) -> Octocrab {
+        let cache_key = owner.to_lowercase();
+
+        {
+            let cache = self.installation_clients.lock().await;
+            if let Some(client) = cache.get(&cache_key) {
+                return client.clone();
+            }
+        }
+
+        let client = match self.find_installation(owner).await {
+            Some(inst_id) => self
+                .octocrab
+                .installation(inst_id)
+                .unwrap_or_else(|_| self.public_client.clone()),
+            None => self.public_client.clone(),
+        };
+
+        let mut cache = self.installation_clients.lock().await;
+        cache.insert(cache_key, client.clone());
+        client
     }
 
     pub async fn get_release_history(
@@ -125,28 +169,14 @@ impl GitHub {
         owner: String,
         repo: String,
     ) -> Result<GitHubProjectRepositoryView> {
-        let installations = self
-            .octocrab
-            .apps()
-            .installations()
-            .send()
+        let inst_id = self
+            .find_installation(&owner)
             .await
-            .context("Failed to fetch GitHub App installations")?;
-
-        let mut installation_id = None;
-        for inst in installations.items {
-            if inst.account.login == owner {
-                installation_id = Some(inst.id.0);
-                break;
-            }
-        }
-
-        let inst_id = installation_id
-            .context(format!("GitHub App is not installed for owner '{}'", owner))?;
+            .with_context(|| format!("GitHub App is not installed for owner '{}'", owner))?;
 
         let octocrab = self
             .octocrab
-            .installation(octocrab::models::InstallationId(inst_id))
+            .installation(inst_id)
             .context("Failed to create installation client")?;
 
         Ok(GitHubProjectRepositoryView {
@@ -170,8 +200,12 @@ impl GitHub {
     }
 
     pub async fn get_json(&self, route: &str) -> Result<serde_json::Value> {
-        match self
-            .public_client
+        let client = match Self::parse_owner_from_route(route) {
+            Some(owner) => self.client_for_owner(&owner).await,
+            None => self.public_client.clone(),
+        };
+
+        match client
             .get::<serde_json::Value, _, _>(route, None::<&()>)
             .await
         {
@@ -186,6 +220,15 @@ impl GitHub {
             }
             Err(e) => anyhow::bail!("Request error: {}", e),
         }
+    }
+
+    /// Extracts the owner from a `/repos/{owner}/{repo}/...` route.
+    fn parse_owner_from_route(route: &str) -> Option<String> {
+        let mut parts = route.trim_start_matches('/').split('/');
+        if parts.next()? != "repos" {
+            return None;
+        }
+        parts.next().map(|s| s.to_string())
     }
 
     pub async fn get_foreign_file(
