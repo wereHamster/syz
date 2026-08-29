@@ -40,6 +40,29 @@ pub async fn run(
         });
     }
 
+    if let Some(location) = helpers::parse_tarball_url(&dependency.purl.name) {
+        let latest_location = helpers::get_latest_tarball_location(&location.url).await;
+
+        let bumps = match latest_location {
+            Some(url) if Some(url.as_str()) != dependency.purl.version.as_deref() => {
+                vec![ProposedBump {
+                    target_version: url.clone(),
+                    head_version: url,
+                    is_major: false,
+                    update_type: UpdateType::Minor,
+                }]
+            }
+            _ => Vec::new(),
+        };
+
+        return Ok(DependencyUpdateOption {
+            package_info: PackageInfo {
+                repo_url: Some(location.url),
+            },
+            bumps,
+        });
+    }
+
     let repo = match helpers::parse_github_repo(&dependency.purl.name) {
         Some(r) => r,
         None => {

@@ -149,6 +149,96 @@ fn resolve_latest_git_commit_sha(url: &str, reference: Option<&str>) -> Option<S
     }
 }
 
+pub struct TarballLocation {
+    pub url: String,
+}
+
+/// Formats a generic https tarball flake input as a normalized flake reference, e.g.
+/// `tarball+https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz`.
+pub fn format_tarball_ref(url: &str) -> String {
+    format!("tarball+{}", url)
+}
+
+/// Recovers the url from a normalized flake reference produced by [`format_tarball_ref`].
+pub fn parse_tarball_url(normalized: &str) -> Option<TarballLocation> {
+    let rest = normalized.strip_prefix("tarball+")?;
+    if rest.is_empty() {
+        return None;
+    }
+    Some(TarballLocation {
+        url: rest.to_string(),
+    })
+}
+
+/// Resolves the "latest" pinned location for a generic https tarball flake input, by
+/// replicating nix's own tarball-fetcher protocol: redirects are followed one at a time
+/// until a response carries a `Link: <url>; rel="immutable"` header, whose URL is the
+/// canonical resolved location for that content (this is how nix itself locks e.g.
+/// FlakeHub inputs — the tracked URL redirects through a version-resolution step to an
+/// immutable, permanently-cacheable URL, which is what ends up as `locked.url` in
+/// `flake.lock`). A host that doesn't implement this convention has no reliable "latest"
+/// signal — notably, blindly following redirects to completion is not safe in general,
+/// since the final hop is commonly a presigned URL (expiring signature in the query
+/// string) that changes on every request regardless of whether the content did. Fails
+/// soft (`None`) in that case, same as when there is no update available.
+pub async fn get_latest_tarball_location(url: &str) -> Option<String> {
+    // Some hosts along the redirect chain (e.g. api.flakehub.com) reject requests with no
+    // `User-Agent` header at all, so this can't just use `reqwest::Client::new()`.
+    let client = reqwest::Client::builder()
+        .user_agent(format!("Syz/{}", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+
+    let mut current = url.to_string();
+
+    for _ in 0..10 {
+        let response = client.head(&current).send().await.ok()?;
+
+        if let Some(immutable_url) = immutable_link_url(&response) {
+            return Some(immutable_url);
+        }
+
+        if !response.status().is_redirection() {
+            return None;
+        }
+
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)?
+            .to_str()
+            .ok()?;
+        current = response.url().join(location).ok()?.to_string();
+    }
+
+    None
+}
+
+fn immutable_link_url(response: &reqwest::Response) -> Option<String> {
+    let header_value = response.headers().get(reqwest::header::LINK)?.to_str().ok()?;
+    parse_immutable_link(header_value).map(|url| url.split('?').next().unwrap_or(&url).to_string())
+}
+
+/// Parses an RFC 8288 `Link` header value for a `rel="immutable"` entry, returning its URL.
+fn parse_immutable_link(header_value: &str) -> Option<String> {
+    for entry in header_value.split(',') {
+        let mut segments = entry.trim().split(';');
+        let url = segments
+            .next()?
+            .trim()
+            .strip_prefix('<')?
+            .strip_suffix('>')?;
+
+        let is_immutable = segments
+            .any(|param| matches!(param.trim(), "rel=\"immutable\"" | "rel=immutable"));
+
+        if is_immutable {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +327,52 @@ mod tests {
 
         assert!(parse_git_url("github:NixOS/nixpkgs").is_none());
         assert!(parse_git_url("git+").is_none());
+    }
+
+    #[test]
+    fn test_format_tarball_ref() {
+        assert_eq!(
+            format_tarball_ref("https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz"),
+            "tarball+https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_parse_tarball_url() {
+        let location = parse_tarball_url(
+            "tarball+https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz",
+        )
+        .unwrap();
+        assert_eq!(
+            location.url,
+            "https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz"
+        );
+
+        assert!(parse_tarball_url("github:NixOS/nixpkgs").is_none());
+        assert!(parse_tarball_url("tarball+").is_none());
+    }
+
+    #[test]
+    fn test_parse_immutable_link_matches_quoted_rel() {
+        let header = r#"<https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.22.2/uuid/source.tar.gz?rev=abc&revCount=1>; rel="immutable""#;
+        assert_eq!(
+            parse_immutable_link(header).as_deref(),
+            Some("https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.22.2/uuid/source.tar.gz?rev=abc&revCount=1")
+        );
+    }
+
+    #[test]
+    fn test_parse_immutable_link_ignores_other_rels() {
+        let header = r#"<https://example.com/next>; rel="next", <https://example.com/pinned>; rel="immutable""#;
+        assert_eq!(
+            parse_immutable_link(header).as_deref(),
+            Some("https://example.com/pinned")
+        );
+    }
+
+    #[test]
+    fn test_parse_immutable_link_returns_none_without_immutable_rel() {
+        let header = r#"<https://example.com/next>; rel="next""#;
+        assert!(parse_immutable_link(header).is_none());
     }
 }

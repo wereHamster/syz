@@ -43,10 +43,17 @@ pub(super) struct GitRootInput<'a> {
     pub(super) rev: Option<&'a str>,
 }
 
+pub(super) struct TarballRootInput<'a> {
+    pub(super) alias: &'a str,
+    pub(super) url: &'a str,
+    pub(super) locked_url: Option<&'a str>,
+}
+
 /// A direct (non-`follows`) root input, paired with its local alias.
 pub(super) enum RootInput<'a> {
     Github(GithubRootInput<'a>),
     Git(GitRootInput<'a>),
+    Tarball(TarballRootInput<'a>),
 }
 
 impl<'a> RootInput<'a> {
@@ -54,12 +61,14 @@ impl<'a> RootInput<'a> {
         match self {
             RootInput::Github(input) => input.alias,
             RootInput::Git(input) => input.alias,
+            RootInput::Tarball(input) => input.alias,
         }
     }
 }
 
-/// Direct (non-`follows`) root inputs whose `original` is a github ref or a generic git ref
-/// (nix's host-agnostic `git+https://`/`git+ssh://` fetcher), paired with their local alias.
+/// Direct (non-`follows`) root inputs whose `original` is a github ref, a generic git ref
+/// (nix's host-agnostic `git+https://`/`git+ssh://` fetcher), or a plain https tarball ref,
+/// paired with their local alias.
 pub(super) fn root_inputs(lock: &FlakeLock) -> Vec<RootInput<'_>> {
     let mut result = Vec::new();
     let root_node = match lock.nodes.get(&lock.root) {
@@ -113,6 +122,20 @@ pub(super) fn root_inputs(lock: &FlakeLock) -> Vec<RootInput<'_>> {
                     url,
                     git_ref: original.git_ref.as_deref(),
                     rev,
+                }));
+            }
+            "tarball" => {
+                let url = match &original.url {
+                    Some(u) => u.as_str(),
+                    None => continue,
+                };
+
+                let locked_url = node.locked.as_ref().and_then(|l| l.url.as_deref());
+
+                result.push(RootInput::Tarball(TarballRootInput {
+                    alias,
+                    url,
+                    locked_url,
                 }));
             }
             _ => continue,

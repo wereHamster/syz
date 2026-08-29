@@ -89,6 +89,7 @@ fn override_args_for_targets(
                 helpers::format_github_ref(gh.owner, gh.repo, gh.git_ref)
             }
             flake_lock::RootInput::Git(g) => helpers::format_git_ref(g.url, g.git_ref),
+            flake_lock::RootInput::Tarball(t) => helpers::format_tarball_ref(t.url),
         };
 
         let target = match target_map.get(normalized.as_str()) {
@@ -103,6 +104,9 @@ fn override_args_for_targets(
             ),
             flake_lock::RootInput::Git(g) => {
                 format!("git+{}?rev={}", g.url, target.target_version.version)
+            }
+            flake_lock::RootInput::Tarball(_) => {
+                format!("tarball+{}", target.target_version.version)
             }
         };
 
@@ -202,6 +206,39 @@ mod tests {
             vec![(
                 "flake-utils".to_string(),
                 "github:numtide/flake-utils/cccccccccccccccccccccccccccccccccccccccc".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_override_args_matches_direct_tarball_input() {
+        let content = r#"
+        {
+          "nodes": {
+            "determinate": {
+              "locked": { "type": "tarball", "url": "https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.15.2/uuid/source.tar.gz" },
+              "original": { "type": "tarball", "url": "https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz" }
+            },
+            "root": { "inputs": { "determinate": "determinate" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        let target = make_target(
+            "tarball+https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz",
+            "https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.22.2/other-uuid/source.tar.gz",
+        );
+        let target_map: HashMap<&str, &UpdateTarget> = [(target.name.as_str(), &target)].into();
+
+        let overrides = override_args_for_targets(&lock, &target_map);
+        assert_eq!(
+            overrides,
+            vec![(
+                "determinate".to_string(),
+                "tarball+https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.22.2/other-uuid/source.tar.gz".to_string()
             )]
         );
     }

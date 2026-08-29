@@ -34,6 +34,7 @@ fn parse_flake_lock(content: &str) -> Vec<DiscoveredDependency> {
                 gh.rev,
             ),
             RootInput::Git(g) => (helpers::format_git_ref(g.url, g.git_ref), g.git_ref, g.rev),
+            RootInput::Tarball(t) => (helpers::format_tarball_ref(t.url), None, t.locked_url),
         };
 
         let rev = match rev {
@@ -156,6 +157,35 @@ mod tests {
             "git+https://tangled.org/@tangled.org/core?ref=main"
         );
         assert_eq!(deps[0].requirement, "main");
+    }
+
+    #[test]
+    fn test_parse_flake_lock_direct_tarball_input() {
+        let content = r#"
+        {
+          "nodes": {
+            "determinate": {
+              "locked": { "type": "tarball", "url": "https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.15.2/uuid/source.tar.gz" },
+              "original": { "type": "tarball", "url": "https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz" }
+            },
+            "root": { "inputs": { "determinate": "determinate" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+
+        let deps = parse_flake_lock(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].purl.name,
+            "tarball+https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz"
+        );
+        assert_eq!(
+            deps[0].purl.version.as_deref(),
+            Some("https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.15.2/uuid/source.tar.gz")
+        );
+        assert_eq!(deps[0].requirement, "");
     }
 
     #[test]
