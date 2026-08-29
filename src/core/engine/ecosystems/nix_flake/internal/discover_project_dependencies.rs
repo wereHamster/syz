@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::core::engine::repository::ProjectRepositorySnapshot;
 use crate::core::engine::{DiscoveredDependency, PURL};
 
-use super::flake_lock::FlakeLock;
+use super::flake_lock::{self, FlakeLock, RootInput};
 use super::helpers;
 
 pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredDependency>> {
@@ -23,56 +23,24 @@ fn parse_flake_lock(content: &str) -> Vec<DiscoveredDependency> {
         Err(_) => return Vec::new(),
     };
 
-    let root_node = match lock.nodes.get(&lock.root) {
-        Some(n) => n,
-        None => return Vec::new(),
-    };
-
     let mut deps = Vec::new();
     let mut seen = HashSet::new();
 
-    for input_ref in root_node.inputs.values() {
-        // Only direct node references are handled; "follows" chains (array values) alias
-        // another node's lock rather than owning one, so they're skipped for now.
-        let node_name = match input_ref.as_str() {
-            Some(n) => n,
+    for input in flake_lock::root_inputs(&lock) {
+        let (normalized, git_ref, rev) = match &input {
+            RootInput::Github(gh) => (
+                helpers::format_github_ref(gh.owner, gh.repo, gh.git_ref),
+                gh.git_ref,
+                gh.rev,
+            ),
+            RootInput::Git(g) => (helpers::format_git_ref(g.url, g.git_ref), g.git_ref, g.rev),
+        };
+
+        let rev = match rev {
+            Some(r) => r.to_string(),
             None => continue,
         };
 
-        let node = match lock.nodes.get(node_name) {
-            Some(n) => n,
-            None => continue,
-        };
-
-        let original = match &node.original {
-            Some(o) => o,
-            None => continue,
-        };
-
-        if original.ref_type != "github" {
-            continue;
-        }
-
-        let owner = match &original.owner {
-            Some(o) => o.clone(),
-            None => continue,
-        };
-        let repo_name = match &original.repo {
-            Some(r) => r.clone(),
-            None => continue,
-        };
-        let git_ref = original.git_ref.clone();
-
-        let locked = match &node.locked {
-            Some(l) => l,
-            None => continue,
-        };
-        let rev = match &locked.rev {
-            Some(r) => r.clone(),
-            None => continue,
-        };
-
-        let normalized = helpers::format_github_ref(&owner, &repo_name, git_ref.as_deref());
         if !seen.insert(normalized.clone()) {
             continue;
         }
@@ -85,7 +53,7 @@ fn parse_flake_lock(content: &str) -> Vec<DiscoveredDependency> {
                 subpath: None,
                 version: Some(rev),
             },
-            requirement: git_ref.unwrap_or_default(),
+            requirement: git_ref.unwrap_or_default().to_string(),
             minimum_release_age: None,
         });
     }
@@ -137,13 +105,67 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_flake_lock_skips_non_github_input() {
+    fn test_parse_flake_lock_direct_git_input() {
+        let content = r#"
+        {
+          "nodes": {
+            "core": {
+              "locked": { "type": "git", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "git", "url": "https://tangled.org/@tangled.org/core" }
+            },
+            "root": { "inputs": { "core": "core" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+
+        let deps = parse_flake_lock(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].purl.name,
+            "git+https://tangled.org/@tangled.org/core"
+        );
+        assert_eq!(
+            deps[0].purl.version.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(deps[0].requirement, "");
+    }
+
+    #[test]
+    fn test_parse_flake_lock_direct_git_input_with_ref() {
+        let content = r#"
+        {
+          "nodes": {
+            "core": {
+              "locked": { "type": "git", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "git", "url": "https://tangled.org/@tangled.org/core", "ref": "main" }
+            },
+            "root": { "inputs": { "core": "core" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+
+        let deps = parse_flake_lock(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(
+            deps[0].purl.name,
+            "git+https://tangled.org/@tangled.org/core?ref=main"
+        );
+        assert_eq!(deps[0].requirement, "main");
+    }
+
+    #[test]
+    fn test_parse_flake_lock_skips_unsupported_input_type() {
         let content = r#"
         {
           "nodes": {
             "nixpkgs": {
-              "locked": { "type": "git", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-              "original": { "type": "git", "url": "https://example.com/nixpkgs.git" }
+              "locked": { "type": "indirect", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "indirect", "id": "nixpkgs" }
             },
             "root": { "inputs": { "nixpkgs": "nixpkgs" } }
           },

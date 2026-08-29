@@ -1,10 +1,11 @@
 use crate::core::engine::repository::ProjectRepositorySnapshot;
 
-use super::flake_lock::{self, FlakeLock};
+use super::flake_lock::{self, FlakeLock, RootInput};
 use super::helpers;
 
-/// Resolves the local flake input alias (e.g. `"nixpkgs"`) whose normalized github ref matches
-/// `target_name` (e.g. `"github:NixOS/nixpkgs/nixpkgs-unstable"`), by re-reading `flake.lock`.
+/// Resolves the local flake input alias (e.g. `"nixpkgs"`) whose normalized ref matches
+/// `target_name` (e.g. `"github:NixOS/nixpkgs/nixpkgs-unstable"` or
+/// `"git+https://tangled.org/@tangled.org/core"`), by re-reading `flake.lock`.
 pub async fn run(repo: &dyn ProjectRepositorySnapshot, target_name: &str) -> Option<String> {
     let content = repo.read_file("flake.lock").await.ok()?;
     let lock: FlakeLock = serde_json::from_str(&content).ok()?;
@@ -12,10 +13,16 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot, target_name: &str) -> Opt
 }
 
 fn find_alias(lock: &FlakeLock, target_name: &str) -> Option<String> {
-    flake_lock::github_root_inputs(lock)
+    flake_lock::root_inputs(lock)
         .into_iter()
-        .find(|input| helpers::format_github_ref(input.owner, input.repo, input.git_ref) == target_name)
-        .map(|input| input.alias.to_string())
+        .find(|input| {
+            let normalized = match input {
+                RootInput::Github(gh) => helpers::format_github_ref(gh.owner, gh.repo, gh.git_ref),
+                RootInput::Git(g) => helpers::format_git_ref(g.url, g.git_ref),
+            };
+            normalized == target_name
+        })
+        .map(|input| input.alias().to_string())
 }
 
 #[cfg(test)]
@@ -76,13 +83,36 @@ mod tests {
     }
 
     #[test]
-    fn test_find_alias_skips_non_github_input() {
+    fn test_find_alias_matches_direct_git_input() {
+        let content = r#"
+        {
+          "nodes": {
+            "core": {
+              "locked": { "type": "git", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "git", "url": "https://tangled.org/@tangled.org/core" }
+            },
+            "root": { "inputs": { "core": "core" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        assert_eq!(
+            find_alias(&lock, "git+https://tangled.org/@tangled.org/core"),
+            Some("core".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_alias_skips_unsupported_input_type() {
         let content = r#"
         {
           "nodes": {
             "nixpkgs": {
-              "locked": { "type": "git", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-              "original": { "type": "git", "url": "https://example.com/nixpkgs.git" }
+              "locked": { "type": "indirect", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "indirect", "id": "nixpkgs" }
             },
             "root": { "inputs": { "nixpkgs": "nixpkgs" } }
           },
@@ -92,7 +122,7 @@ mod tests {
         "#;
         let lock: FlakeLock = serde_json::from_str(content).unwrap();
 
-        assert_eq!(find_alias(&lock, "git:https://example.com/nixpkgs.git"), None);
+        assert_eq!(find_alias(&lock, "indirect:nixpkgs"), None);
     }
 
     #[test]

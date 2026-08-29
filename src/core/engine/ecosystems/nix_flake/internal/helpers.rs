@@ -77,6 +77,78 @@ pub async fn get_latest_commit_sha(
     }
 }
 
+pub struct GitRepo {
+    pub url: String,
+}
+
+/// Formats a generic git flake input as a normalized flake reference, e.g.
+/// `git+https://tangled.org/@tangled.org/core?ref=main`, or `git+<url>` if no ref is tracked.
+pub fn format_git_ref(url: &str, reference: Option<&str>) -> String {
+    match reference {
+        Some(r) if !r.is_empty() => format!("git+{}?ref={}", url, r),
+        _ => format!("git+{}", url),
+    }
+}
+
+/// Recovers the url from a normalized flake reference produced by [`format_git_ref`].
+pub fn parse_git_url(normalized: &str) -> Option<GitRepo> {
+    let rest = normalized.strip_prefix("git+")?;
+    let url = rest.split('?').next().unwrap_or(rest);
+    if url.is_empty() {
+        return None;
+    }
+    Some(GitRepo {
+        url: url.to_string(),
+    })
+}
+
+/// Resolves the latest commit sha for a generic git flake input (`git+https://...`,
+/// `git+ssh://...`), using nix's own git-fetcher semantics: `refs/heads/{ref}` or
+/// `refs/tags/{ref}` when a ref is tracked, `HEAD` otherwise. Uses the SSH-agent credentials
+/// callback (as in `clients/tangled.rs`) for `git+ssh` URLs; `git+https` reads need no
+/// credentials for a public repo. Fails soft (`None`) on any error, matching
+/// [`get_latest_commit_sha`]'s contract.
+pub async fn get_latest_git_commit_sha(url: &str, reference: Option<&str>) -> Option<String> {
+    let url = url.to_string();
+    let reference = reference.map(|r| r.to_string());
+
+    tokio::task::spawn_blocking(move || resolve_latest_git_commit_sha(&url, reference.as_deref()))
+        .await
+        .ok()
+        .flatten()
+}
+
+fn resolve_latest_git_commit_sha(url: &str, reference: Option<&str>) -> Option<String> {
+    let mut remote = git2::Remote::create_detached(url).ok()?;
+
+    let mut callbacks = git2::RemoteCallbacks::new();
+    callbacks.credentials(|_url, username_from_url, _allowed_types| {
+        git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+    });
+
+    let connection = remote
+        .connect_auth(git2::Direction::Fetch, Some(callbacks), None)
+        .ok()?;
+
+    let heads = connection.list().ok()?;
+
+    match reference {
+        Some(r) => {
+            let branch_ref = format!("refs/heads/{}", r);
+            let tag_ref = format!("refs/tags/{}", r);
+            heads
+                .iter()
+                .find(|h| h.name() == branch_ref)
+                .or_else(|| heads.iter().find(|h| h.name() == tag_ref))
+                .map(|h| h.oid().to_string())
+        }
+        None => heads
+            .iter()
+            .find(|h| h.name() == "HEAD")
+            .map(|h| h.oid().to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +205,37 @@ mod tests {
 
         assert!(parse_github_repo("git:https://example.com/foo.git").is_none());
         assert!(parse_github_repo("github:justowner").is_none());
+    }
+
+    #[test]
+    fn test_format_git_ref_with_ref() {
+        assert_eq!(
+            format_git_ref("https://tangled.org/@tangled.org/core", Some("main")),
+            "git+https://tangled.org/@tangled.org/core?ref=main"
+        );
+    }
+
+    #[test]
+    fn test_format_git_ref_without_ref() {
+        assert_eq!(
+            format_git_ref("https://tangled.org/@tangled.org/core", None),
+            "git+https://tangled.org/@tangled.org/core"
+        );
+        assert_eq!(
+            format_git_ref("https://tangled.org/@tangled.org/core", Some("")),
+            "git+https://tangled.org/@tangled.org/core"
+        );
+    }
+
+    #[test]
+    fn test_parse_git_url() {
+        let repo = parse_git_url("git+https://tangled.org/@tangled.org/core?ref=main").unwrap();
+        assert_eq!(repo.url, "https://tangled.org/@tangled.org/core");
+
+        let repo = parse_git_url("git+https://tangled.org/@tangled.org/core").unwrap();
+        assert_eq!(repo.url, "https://tangled.org/@tangled.org/core");
+
+        assert!(parse_git_url("github:NixOS/nixpkgs").is_none());
+        assert!(parse_git_url("git+").is_none());
     }
 }

@@ -42,7 +42,8 @@ impl Registry for NixFlakeRegistry {
 
     async fn fetch_package_info(&self, name: &str) -> Result<crate::core::engine::PackageInfo> {
         let repo_url = internal::helpers::parse_github_repo(name)
-            .map(|repo| format!("https://github.com/{}/{}", repo.owner, repo.repo));
+            .map(|repo| format!("https://github.com/{}/{}", repo.owner, repo.repo))
+            .or_else(|| internal::helpers::parse_git_url(name).map(|repo| repo.url));
 
         Ok(crate::core::engine::PackageInfo { repo_url })
     }

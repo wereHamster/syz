@@ -22,6 +22,7 @@ pub(super) struct FlakeRef {
     pub(super) ref_type: String,
     pub(super) owner: Option<String>,
     pub(super) repo: Option<String>,
+    pub(super) url: Option<String>,
     #[serde(rename = "ref")]
     pub(super) git_ref: Option<String>,
     pub(super) rev: Option<String>,
@@ -32,10 +33,34 @@ pub(super) struct GithubRootInput<'a> {
     pub(super) owner: &'a str,
     pub(super) repo: &'a str,
     pub(super) git_ref: Option<&'a str>,
+    pub(super) rev: Option<&'a str>,
 }
 
-/// Direct (non-`follows`) root inputs whose `original` is a github ref, paired with their local alias.
-pub(super) fn github_root_inputs(lock: &FlakeLock) -> Vec<GithubRootInput<'_>> {
+pub(super) struct GitRootInput<'a> {
+    pub(super) alias: &'a str,
+    pub(super) url: &'a str,
+    pub(super) git_ref: Option<&'a str>,
+    pub(super) rev: Option<&'a str>,
+}
+
+/// A direct (non-`follows`) root input, paired with its local alias.
+pub(super) enum RootInput<'a> {
+    Github(GithubRootInput<'a>),
+    Git(GitRootInput<'a>),
+}
+
+impl<'a> RootInput<'a> {
+    pub(super) fn alias(&self) -> &'a str {
+        match self {
+            RootInput::Github(input) => input.alias,
+            RootInput::Git(input) => input.alias,
+        }
+    }
+}
+
+/// Direct (non-`follows`) root inputs whose `original` is a github ref or a generic git ref
+/// (nix's host-agnostic `git+https://`/`git+ssh://` fetcher), paired with their local alias.
+pub(super) fn root_inputs(lock: &FlakeLock) -> Vec<RootInput<'_>> {
     let mut result = Vec::new();
     let root_node = match lock.nodes.get(&lock.root) {
         Some(n) => n,
@@ -60,21 +85,38 @@ pub(super) fn github_root_inputs(lock: &FlakeLock) -> Vec<GithubRootInput<'_>> {
             None => continue,
         };
 
-        if original.ref_type != "github" {
-            continue;
-        }
+        let rev = node.locked.as_ref().and_then(|l| l.rev.as_deref());
 
-        let (owner, repo) = match (&original.owner, &original.repo) {
-            (Some(o), Some(r)) => (o.as_str(), r.as_str()),
+        match original.ref_type.as_str() {
+            "github" => {
+                let (owner, repo) = match (&original.owner, &original.repo) {
+                    (Some(o), Some(r)) => (o.as_str(), r.as_str()),
+                    _ => continue,
+                };
+
+                result.push(RootInput::Github(GithubRootInput {
+                    alias,
+                    owner,
+                    repo,
+                    git_ref: original.git_ref.as_deref(),
+                    rev,
+                }));
+            }
+            "git" => {
+                let url = match &original.url {
+                    Some(u) => u.as_str(),
+                    None => continue,
+                };
+
+                result.push(RootInput::Git(GitRootInput {
+                    alias,
+                    url,
+                    git_ref: original.git_ref.as_deref(),
+                    rev,
+                }));
+            }
             _ => continue,
-        };
-
-        result.push(GithubRootInput {
-            alias,
-            owner,
-            repo,
-            git_ref: original.git_ref.as_deref(),
-        });
+        }
     }
 
     result
