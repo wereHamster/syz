@@ -19,6 +19,7 @@ fn find_alias(lock: &FlakeLock, target_name: &str) -> Option<String> {
             let normalized = match input {
                 RootInput::Github(gh) => helpers::format_github_ref(gh.owner, gh.repo, gh.git_ref),
                 RootInput::Git(g) => helpers::format_git_ref(g.url, g.git_ref),
+                RootInput::Tarball(t) => helpers::format_tarball_ref(t.url),
             };
             normalized == target_name
         })
@@ -102,6 +103,32 @@ mod tests {
         assert_eq!(
             find_alias(&lock, "git+https://tangled.org/@tangled.org/core"),
             Some("core".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_alias_matches_direct_tarball_input() {
+        let content = r#"
+        {
+          "nodes": {
+            "determinate": {
+              "locked": { "type": "tarball", "url": "https://api.flakehub.com/f/pinned/DeterminateSystems/determinate/3.15.2/uuid/source.tar.gz" },
+              "original": { "type": "tarball", "url": "https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz" }
+            },
+            "root": { "inputs": { "determinate": "determinate" } }
+          },
+          "root": "root",
+          "version": 7
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        assert_eq!(
+            find_alias(
+                &lock,
+                "tarball+https://flakehub.com/f/DeterminateSystems/determinate/3.tar.gz"
+            ),
+            Some("determinate".to_string())
         );
     }
 
