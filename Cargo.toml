@@ -19,6 +19,13 @@ path = "src/bin/syzd.rs"
 name = "syzctl"
 path = "src/bin/syzctl.rs"
 
+[features]
+# Gates tests that require live network access and GITHUB_APP_ID /
+# GITHUB_APP_PRIVATE_KEY secrets (see src/core/clients/github_release_notes.rs).
+# Not run in CI. Run locally with:
+#   GITHUB_APP_ID=... GITHUB_APP_PRIVATE_KEY=... cargo test --features integration-tests
+integration-tests = []
+
 [dependencies]
 tokio = { workspace = true, features = ["full", "macros"] }
 tracing = "0.1.44"

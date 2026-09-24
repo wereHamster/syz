@@ -482,12 +482,14 @@ impl ReleaseNotesResolver for GithubReleaseNotesResolver {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "integration-tests")]
     async fn get_test_client() -> GitHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         GitHub::new().await.unwrap()
     }
 
+    #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_knip_release_notes() {
         let client = get_test_client().await;
@@ -504,6 +506,7 @@ mod tests {
         assert!(md.contains("Fix symbol reporter file paths"));
     }
 
+    #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_sentry_release_notes() {
         let client = get_test_client().await;
@@ -522,6 +525,7 @@ mod tests {
         assert!(md.contains("fix(browser/v7)"));
     }
 
+    #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_exifreader_release_notes() {
         let client = get_test_client().await;
