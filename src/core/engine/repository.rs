@@ -66,3 +66,47 @@ pub trait ProjectRepositoryMutator: Send + Sync {
     /// Closes an empty or abandoned Pull Request branch.
     async fn close_pull_request(&self, branch_name: &str, base_branch: &str) -> Result<()>;
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub struct MockSnapshot {
+        files: std::collections::HashMap<String, String>,
+    }
+
+    impl MockSnapshot {
+        pub fn empty() -> Self {
+            Self {
+                files: std::collections::HashMap::new(),
+            }
+        }
+
+        pub fn with_file(path: &str, content: &str) -> Self {
+            Self::with_files(&[(path, content)])
+        }
+
+        pub fn with_files(files: &[(&str, &str)]) -> Self {
+            Self {
+                files: files
+                    .iter()
+                    .map(|(path, content)| (path.to_string(), content.to_string()))
+                    .collect(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProjectRepositorySnapshot for MockSnapshot {
+        async fn list_files(&self) -> Result<Vec<String>> {
+            Ok(self.files.keys().cloned().collect())
+        }
+
+        async fn read_file(&self, path: &str) -> Result<String> {
+            self.files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+    }
+}

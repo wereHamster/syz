@@ -14,12 +14,13 @@ pub async fn generate_title(
         let sha = &target.target_version.version;
         let short_sha = &sha[..sha.len().min(7)];
 
-        let display_name = crate::core::engine::ecosystems::nix_flake::internal::find_input_alias::run(
-            project_repo,
-            &target.name,
-        )
-        .await
-        .unwrap_or_else(|| package_group.to_string());
+        let display_name =
+            crate::core::engine::ecosystems::nix_flake::internal::find_input_alias::run(
+                project_repo,
+                &target.name,
+            )
+            .await
+            .unwrap_or_else(|| package_group.to_string());
 
         let date_suffix = match github {
             Some(gh) => match crate::core::engine::ecosystems::nix_flake::internal::helpers::parse_github_repo(&target.name) {
@@ -139,39 +140,8 @@ pub async fn generate_title(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::engine::repository::test_support::MockSnapshot;
     use crate::core::engine::{PackageInfo, RequirementVersion};
-
-    struct MockSnapshot {
-        files: std::collections::HashMap<String, String>,
-    }
-
-    impl MockSnapshot {
-        fn empty() -> Self {
-            Self {
-                files: std::collections::HashMap::new(),
-            }
-        }
-
-        fn with_file(path: &str, content: &str) -> Self {
-            let mut files = std::collections::HashMap::new();
-            files.insert(path.to_string(), content.to_string());
-            Self { files }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ProjectRepositorySnapshot for MockSnapshot {
-        async fn list_files(&self) -> anyhow::Result<Vec<String>> {
-            Ok(self.files.keys().cloned().collect())
-        }
-
-        async fn read_file(&self, path: &str) -> anyhow::Result<String> {
-            self.files
-                .get(path)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("not found"))
-        }
-    }
 
     fn make_target(name: &str, current: &str, target: &str) -> UpdateTarget {
         UpdateTarget {
