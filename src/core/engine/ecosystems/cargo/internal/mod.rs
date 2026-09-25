@@ -1,2 +1,3 @@
 pub mod discover_project_dependencies;
 pub mod query_dependency_update_options;
+pub mod workspace;
