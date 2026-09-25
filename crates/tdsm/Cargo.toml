@@ -7,7 +7,7 @@ description = "Turso Declarative Schema Migration: diff a desired SQL schema aga
 [dependencies]
 anyhow.workspace = true
 turso.workspace = true
-sqlparser = "0.62.0"
+sqlparser = "0.63.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
