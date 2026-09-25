@@ -65,6 +65,6 @@ git2 = { version = "0.21.0", features = ["vendored-openssl", "https", "ssh"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
 ratatui = "0.30.0"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
-hmac = "0.12.1"
+hmac = "0.13.0"
 sha2 = "0.10.9"
 hex = "0.4.3"
