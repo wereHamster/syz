@@ -53,6 +53,9 @@ pub fn get_group(package_info: &PackageInfo) -> Option<String> {
         if url.contains("github.com/airbnb/visx") {
             return Some("visx".to_string());
         }
+        if url.contains("github.com/storybookjs/storybook") {
+            return Some("Storybook".to_string());
+        }
     }
     None
 }
