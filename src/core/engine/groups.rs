@@ -56,6 +56,9 @@ pub fn get_group(package_info: &PackageInfo) -> Option<String> {
         if url.contains("github.com/storybookjs/storybook") {
             return Some("Storybook".to_string());
         }
+        if url.contains("github.com/jestjs/jest") {
+            return Some("Jest".to_string());
+        }
     }
     None
 }
