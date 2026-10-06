@@ -1,5 +1,7 @@
 use anyhow::anyhow;
 
+pub use packageurl::PackageName;
+
 /// Absence of notes is a normal outcome and is `Ok(None)`, never an error.
 #[derive(Debug)]
 pub enum Error {
@@ -34,36 +36,6 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-/// A package name as it appears in the manifest, e.g. "knip", "@sentry/core".
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PackageName(String);
-
-impl PackageName {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Last `/` segment; equals `as_str` when unscoped.
-    pub fn short(&self) -> &str {
-        self.0.rsplit('/').next().unwrap_or(&self.0)
-    }
-
-    /// `true` when the name contains `/` (e.g. npm scoped packages).
-    pub fn is_scoped(&self) -> bool {
-        self.0.contains('/')
-    }
-}
-
-impl std::fmt::Display for PackageName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 /// A release/git tag, e.g. "v1.2.3", "knip@6.12.2", "@sentry/core@7.114.0".
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
