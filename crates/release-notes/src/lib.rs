@@ -12,7 +12,6 @@
 //! results ([`ReleaseNotes`], [`Source`]) with typed errors ([`Error`]).
 //! Absence of notes is a normal outcome: `Ok(None)`.
 
-pub mod cache;
 pub mod forge;
 pub mod github;
 pub mod http;
