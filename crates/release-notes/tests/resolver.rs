@@ -89,23 +89,45 @@ async fn changelog_file_tag_when_list_already_cached() {
         );
     let notes = resolve_of(forge, "knip", "1.0.0").await.unwrap().unwrap();
 
-    let tag_of = notes.source.tag().cloned();
     match &notes.source {
         Source::ChangelogFile { tag, .. } => {
             assert_eq!(tag, &Some(Tag::new("v1.0.0")));
         }
         _ => panic!("expected ChangelogFile source"),
     }
-    assert!(tag_of.is_some());
-    // Rebuild a notes value with the same source to check the URL.
-    let notes = release_notes::ReleaseNotes {
-        source: Source::ChangelogFile {
-            path: "CHANGELOG.md".to_string(),
-            tag: Some(Tag::new("v1.0.0")),
-        },
-        markdown: String::new(),
-    };
     assert!(notes.release_url("https://github.com/o/r").is_some());
+}
+
+#[tokio::test]
+async fn changelog_first_keeps_matched_tag_for_later_versions() {
+    // Releases exist but with null bodies (misses), so notes come from the
+    // file. The first version learns ChangelogFile; later versions take the
+    // changelog-first path — their matched tags must still be read from the
+    // cached list, not dropped.
+    let forge = MockForge::new()
+        .with_releases(vec![rel("v1.0.0", None), rel("v2.0.0", None)])
+        .with_file(
+            "CHANGELOG.md",
+            Some("## 1.0.0\n\n### Fixed\n\n- one\n\n## 2.0.0\n\n### Fixed\n\n- two\n"),
+        );
+    let resolver = Resolver::new(Arc::new(forge), Options::default());
+
+    let requests = vec![
+        release_notes::Request {
+            package: pkg("knip"),
+            version: "1.0.0".to_string(),
+        },
+        release_notes::Request {
+            package: pkg("knip"),
+            version: "2.0.0".to_string(),
+        },
+    ];
+    let results = resolver.resolve_batch(&requests).await;
+
+    let first = results[0].as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(first.source.tag(), Some(&Tag::new("v1.0.0")));
+    let second = results[1].as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(second.source.tag(), Some(&Tag::new("v2.0.0")));
 }
 
 #[tokio::test]
@@ -229,7 +251,7 @@ async fn probe_fallback_for_versions_older_than_pages() {
     assert!(notes.markdown.contains("old body"));
     // 1 list fetch + probes for each candidate until the hit.
     assert_eq!(forge.release_pages_calls(), 1);
-    assert!(forge.by_tag_calls() >= 1);
+    assert!(forge.probed_tags().contains(&"v0.1.0".to_string()));
 }
 
 #[tokio::test]
@@ -387,9 +409,10 @@ async fn probe_misses_still_try_every_candidate() {
 
 #[tokio::test]
 async fn strategy_memory_changelog_first() {
-    let forge = MockForge::new()
-        .with_releases(vec![])
-        .with_file("CHANGELOG.md", Some("## 1.0.0\n\n### Fixed\n\n- file\n"));
+    let forge = MockForge::new().with_releases(vec![]).with_file(
+        "CHANGELOG.md",
+        Some("## 1.0.0\n\n### Fixed\n\n- one\n\n## 2.0.0\n\n### Fixed\n\n- two\n"),
+    );
     let resolver = Resolver::new(Arc::new(forge.clone()), Options::default());
 
     resolver
@@ -401,13 +424,21 @@ async fn strategy_memory_changelog_first() {
         resolver.learned_strategy().await,
         Some(Strategy::ChangelogFile)
     );
-    // The first resolve legitimately fetched the list (A runs before B on a
-    // fresh resolver); the second resolve must NOT add a second fetch
-    // because B is tried first and hits — and the list fetch is cached
-    // anyway if A were reached.
+    // The first resolve legitimately fetched the list and probed every
+    // candidate (A ran before B on a fresh resolver).
     assert_eq!(forge.release_pages_calls(), 1);
-    resolver.resolve(&pkg("knip"), "2.0.0").await.unwrap();
+    let probes_after_first = forge.by_tag_calls();
+    assert!(probes_after_first > 0);
+
+    // Second lookup: B is tried first and hits — no additional probes.
+    let notes = resolver
+        .resolve(&pkg("knip"), "2.0.0")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(notes.markdown.contains("two"));
     assert_eq!(forge.release_pages_calls(), 1);
+    assert_eq!(forge.by_tag_calls(), probes_after_first);
 }
 
 #[tokio::test]
@@ -425,13 +456,13 @@ async fn remembered_release_shape_wins_on_list_miss_probe() {
         Some(Strategy::Release(TagShape::NameAt))
     );
 
-    // Second version misses the list; the probe order must start with
-    // `knip@2.0.0` (NameAt), which 404s, then the rest.
+    // Second version misses the list; the remembered NameAt shape must be
+    // probed FIRST.
     resolver.resolve(&pkg("knip"), "2.0.0").await.unwrap();
-    let first_probed = Tag::new("knip@2.0.0");
-    // The probe cache: first probe was for the remembered shape.
-    assert!(forge.by_tag_calls() >= 1);
-    let _ = first_probed;
+    assert_eq!(
+        forge.probed_tags().first().map(String::as_str),
+        Some("knip@2.0.0")
+    );
 }
 
 #[tokio::test]

@@ -17,28 +17,32 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 /// Case-insensitive header lookup over a snapshot of response headers.
+/// Repeated header lines keep every value (grouped per name).
 #[derive(Clone, Debug, Default)]
-pub struct Headers(HashMap<String, String>);
+pub struct Headers(HashMap<String, Vec<String>>);
 
 impl Headers {
     pub fn new(map: impl IntoIterator<Item = (String, String)>) -> Self {
-        Self(
-            map.into_iter()
-                .map(|(k, v)| (k.to_lowercase(), v))
-                .collect(),
-        )
+        let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, value) in map {
+            grouped.entry(name.to_lowercase()).or_default().push(value);
+        }
+        Self(grouped)
     }
 
     /// Lookup is case-insensitive; returns the first value for the name.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.0.get(&name.to_lowercase()).map(String::as_str)
+        self.0
+            .get(&name.to_lowercase())
+            .and_then(|values| values.first())
+            .map(String::as_str)
     }
 
     /// All values for a name (some forges emit repeated headers, e.g. `Link`).
     pub fn get_all(&self, name: &str) -> Vec<&str> {
         self.0
             .get(&name.to_lowercase())
-            .map(|v| vec![v.as_str()])
+            .map(|values| values.iter().map(String::as_str).collect())
             .unwrap_or_default()
     }
 }

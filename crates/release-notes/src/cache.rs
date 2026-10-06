@@ -39,36 +39,39 @@ impl From<CacheErr> for Error {
 
 type Slot<T> = Mutex<Option<std::result::Result<T, CacheErr>>>;
 
+async fn slot_get_or_fetch<T: Clone>(
+    slot: &Slot<T>,
+    fetch: impl AsyncFnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut slot = slot.lock().await;
+    match &*slot {
+        Some(Ok(v)) => return Ok(v.clone()),
+        Some(Err(e)) => return Err(e.clone().into()),
+        None => {}
+    }
+    let fetched = fetch().await;
+    *slot = Some(match &fetched {
+        Ok(v) => Ok(v.clone()),
+        Err(e) => Err(CacheErr::from(e)),
+    });
+    fetched
+}
+
 /// Shared cache state; a `Resolver` and its clones share one instance.
 #[derive(Default)]
 pub(crate) struct Cache {
     releases: Slot<Vec<ReleaseInfo>>,
     probes: Mutex<HashMap<Tag, std::result::Result<Option<ReleaseInfo>, CacheErr>>>,
-    files: Slot<HashMap<String, Option<String>>>,
+    files: Mutex<HashMap<String, std::result::Result<Option<String>, CacheErr>>>,
 }
 
 impl Cache {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Cached releases list, fetched via `fetch` on first access.
     pub(crate) async fn releases(
         &self,
         fetch: impl AsyncFnOnce() -> Result<Vec<ReleaseInfo>>,
     ) -> Result<Vec<ReleaseInfo>> {
-        let mut slot = self.releases.lock().await;
-        match &*slot {
-            Some(Ok(v)) => return Ok(v.clone()),
-            Some(Err(e)) => return Err(e.clone().into()),
-            None => {}
-        }
-        let fetched = fetch().await;
-        *slot = Some(match &fetched {
-            Ok(v) => Ok(v.clone()),
-            Err(e) => Err(CacheErr::from(e)),
-        });
-        fetched
+        slot_get_or_fetch(&self.releases, fetch).await
     }
 
     /// Cached per-tag probe, fetched via `fetch` on first access.
@@ -92,33 +95,26 @@ impl Cache {
         fetched
     }
 
-    /// Cached changelog-file contents, fetched via `fetch` on first access.
-    /// Returns the map keyed by path for all requested candidates.
-    pub(crate) async fn files(
+    /// Cached changelog-file content for one path, fetched via `fetch` on
+    /// first access. Keyed per path: sibling packages of one repository rank
+    /// their own candidate paths, so entries must accumulate independently.
+    pub(crate) async fn file(
         &self,
-        _paths: &[String],
-        fetch: impl AsyncFnOnce() -> Result<HashMap<String, Option<String>>>,
-    ) -> Result<HashMap<String, Option<String>>> {
-        let mut slot = self.files.lock().await;
-        match &*slot {
-            Some(Ok(map)) => return Ok(map.clone()),
-            Some(Err(e)) => return Err(e.clone().into()),
-            None => {}
+        path: &str,
+        fetch: impl AsyncFnOnce() -> Result<Option<String>>,
+    ) -> Result<Option<String>> {
+        let mut files = self.files.lock().await;
+        if let Some(cached) = files.get(path) {
+            return cached.clone().map_err(Into::into);
         }
         let fetched = fetch().await;
-        *slot = Some(match &fetched {
-            Ok(v) => Ok(v.clone()),
-            Err(e) => Err(CacheErr::from(e)),
-        });
+        files.insert(
+            path.to_string(),
+            match &fetched {
+                Ok(v) => Ok(v.clone()),
+                Err(e) => Err(CacheErr::from(e)),
+            },
+        );
         fetched
-    }
-
-    /// The releases list only if already fetched successfully — never
-    /// triggers a fetch.
-    pub(crate) fn releases_if_cached(&self) -> Option<Vec<ReleaseInfo>> {
-        match &*self.releases.try_lock().ok()? {
-            Some(Ok(v)) => Some(v.clone()),
-            _ => None,
-        }
     }
 }

@@ -20,10 +20,9 @@ name = "syzctl"
 path = "src/bin/syzctl.rs"
 
 [features]
-# Gates tests that require live network access and GITHUB_APP_ID /
-# GITHUB_APP_PRIVATE_KEY secrets (see src/core/clients/github_release_notes.rs).
+# Gates tests that require live network access (crates/release-notes/tests).
 # Not run in CI. Run locally with:
-#   GITHUB_APP_ID=... GITHUB_APP_PRIVATE_KEY=... cargo test --features integration-tests
+#   cargo test -p release-notes --features integration-tests
 integration-tests = []
 
 [dependencies]
@@ -34,6 +33,7 @@ tracing-journald = "0.3.2"
 anyhow.workspace = true
 turso.workspace = true
 tdsm = { path = "crates/tdsm" }
+release-notes = { path = "crates/release-notes" }
 rand = "0.10.1"
 bs58 = "0.5.1"
 serde = { version = "1.0.228", features = ["derive"] }

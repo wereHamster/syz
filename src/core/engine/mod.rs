@@ -2,7 +2,7 @@ pub mod advisories;
 pub mod ecosystems;
 pub mod groups;
 pub mod pull_request_generator;
-pub mod releases;
+
 pub mod repository;
 
 pub use crate::core::types::{DiscoveredDependency, PURL};

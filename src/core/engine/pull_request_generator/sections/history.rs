@@ -1,32 +1,37 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::sync::Arc;
+
+use release_notes::{Options, PackageName, Request as NotesRequest, Resolver};
 
 use crate::core::clients::github::GitHub;
+use crate::core::clients::github_http::GitHubHttp;
 use crate::core::engine::pull_request_generator::context::PullRequestGenerationContext;
 use crate::core::engine::pull_request_generator::formatting::{format_duration, format_time_ago};
 use crate::core::engine::pull_request_generator::sections::PullRequestSectionGenerator;
-use crate::core::engine::releases::ReleaseNotesResolver;
 
 pub struct HistorySection;
 
 impl HistorySection {
-    fn release_notes_resolver(
-        &self,
-        package_name: &str,
-        repo_url: &str,
-        github: GitHub,
-    ) -> Option<Box<dyn ReleaseNotesResolver>> {
-        if repo_url.contains("github.com") {
-            Some(Box::new(
-                crate::core::clients::github_release_notes::GithubReleaseNotesResolver::new(
-                    github,
-                    package_name.to_string(),
-                    repo_url.to_string(),
-                ),
-            ))
-        } else {
-            None
+    /// Builds a release-notes resolver for GitHub-hosted repositories.
+    /// The host must be exactly `github.com` (across all supported clone/web
+    /// forms): a substring check would also admit foreign hosts like
+    /// `notgithub.com`, and `Repository::parse` would then reinterpret their
+    /// paths as a GitHub owner/repo — querying api.github.com for an
+    /// unrelated repository.
+    fn release_notes_resolver(&self, repo_url: &str, github: GitHub) -> Option<Resolver> {
+        if !release_notes::Repository::is_github_url(repo_url) {
+            return None;
         }
+        let repo = release_notes::Repository::parse(repo_url).ok()?;
+        Some(Resolver::new(
+            Arc::new(release_notes::github::GitHubForge::new(
+                Arc::new(GitHubHttp::new(github, repo.owner.as_str())),
+                repo.owner,
+                repo.name,
+            )),
+            Options::default(),
+        ))
     }
 }
 
@@ -162,11 +167,7 @@ impl PullRequestSectionGenerator for HistorySection {
                     }
                 }
 
-                let resolver = if !repo_url.is_empty() {
-                    self.release_notes_resolver(&target.name, &repo_url, ctx.github.clone())
-                } else {
-                    None
-                };
+                let resolver = self.release_notes_resolver(&repo_url, ctx.github.clone());
 
                 let history_to_process: Vec<_> = history
                     .into_iter()
@@ -175,22 +176,22 @@ impl PullRequestSectionGenerator for HistorySection {
                     })
                     .collect();
 
-                let notes_futures: Vec<_> = history_to_process
+                // Batch resolution: one call per repository group. The
+                // resolver caches the releases list, changelog tree and file
+                // contents, and remembers which strategy first succeeded so
+                // later versions resolve against it.
+                let requests: Vec<NotesRequest> = history_to_process
                     .iter()
-                    .map(|release| {
-                        let resolver = &resolver;
-                        let version = release.version.clone();
-                        async move {
-                            if let Some(res) = resolver {
-                                res.resolve_release_notes(&version).await
-                            } else {
-                                Ok(None)
-                            }
-                        }
+                    .map(|release| NotesRequest {
+                        package: PackageName::new(&target.name),
+                        version: release.version.clone(),
                     })
                     .collect();
 
-                let notes_results = futures::future::join_all(notes_futures).await;
+                let notes_results = match &resolver {
+                    Some(resolver) => resolver.resolve_batch(&requests).await,
+                    None => requests.iter().map(|_| Ok(None)).collect(),
+                };
 
                 for (release, notes_res) in history_to_process.into_iter().zip(notes_results) {
                     let mut time_str = "Published ".to_string();
@@ -203,37 +204,40 @@ impl PullRequestSectionGenerator for HistorySection {
                         time_str.push_str("today");
                     }
 
-                    // Attempt to resolve release notes (and the resolved tag)
+                    // Notes resolution: the tag comes from the actually
+                    // matched release when one exists; absence (or failure)
+                    // falls back to the heuristic display tag, preserving
+                    // today's link rendering.
                     let mut fetched_md = None;
                     let mut display_tag = None;
 
-                    if let Ok(Some((tag, md))) = notes_res {
-                        display_tag = Some(tag);
-                        fetched_md = Some(md);
+                    match notes_res {
+                        Ok(Some(notes)) => {
+                            display_tag = notes.source.tag().cloned();
+                            fetched_md = Some(notes.markdown);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                package = %target.name,
+                                version = %release.version,
+                                error = %e,
+                                "Release notes resolution failed"
+                            );
+                        }
                     }
 
                     let tag_for_url = display_tag.unwrap_or_else(|| {
-                        if target.name.contains('/') {
-                            format!("{}@{}", target.name, release.version)
-                        } else {
-                            format!("v{}", release.version)
-                        }
+                        release_notes::fallback_tag(
+                            &PackageName::new(&target.name),
+                            &release.version,
+                        )
                     });
 
                     // Percent-encode the tag for the GitHub URL
-                    let mut encoded_tag = String::with_capacity(tag_for_url.len() * 3);
-                    for byte in tag_for_url.bytes() {
-                        match byte {
-                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                                encoded_tag.push(byte as char);
-                            }
-                            _ => {
-                                encoded_tag.push_str(&format!("%{:02X}", byte));
-                            }
-                        }
-                    }
+                    let encoded_tag = tag_for_url.url_path();
 
-                    let github_url = if !repo_url.is_empty() && repo_url.contains("github.com") {
+                    let github_url = if release_notes::Repository::is_github_url(&repo_url) {
                         Some(format!("{}/releases/tag/{}", repo_url, encoded_tag))
                     } else {
                         None
