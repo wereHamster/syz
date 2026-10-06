@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tdsm", "crates/release-notes"]
+members = ["crates/tdsm", "crates/release-notes", "crates/packageurl"]
 
 [workspace.dependencies]
 anyhow = "1.0.102"
@@ -32,6 +32,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tracing-journald = "0.3.2"
 anyhow.workspace = true
+packageurl = { path = "crates/packageurl" }
 turso.workspace = true
 tdsm = { path = "crates/tdsm" }
 release-notes = { path = "crates/release-notes" }
