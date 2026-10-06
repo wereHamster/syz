@@ -99,6 +99,38 @@ async fn changelog_file_tag_when_list_already_cached() {
 }
 
 #[tokio::test]
+async fn changelog_first_keeps_matched_tag_for_later_versions() {
+    // Releases exist but with null bodies (misses), so notes come from the
+    // file. The first version learns ChangelogFile; later versions take the
+    // changelog-first path — their matched tags must still be read from the
+    // cached list, not dropped.
+    let forge = MockForge::new()
+        .with_releases(vec![rel("v1.0.0", None), rel("v2.0.0", None)])
+        .with_file(
+            "CHANGELOG.md",
+            Some("## 1.0.0\n\n### Fixed\n\n- one\n\n## 2.0.0\n\n### Fixed\n\n- two\n"),
+        );
+    let resolver = Resolver::new(Arc::new(forge), Options::default());
+
+    let requests = vec![
+        release_notes::Request {
+            package: pkg("knip"),
+            version: "1.0.0".to_string(),
+        },
+        release_notes::Request {
+            package: pkg("knip"),
+            version: "2.0.0".to_string(),
+        },
+    ];
+    let results = resolver.resolve_batch(&requests).await;
+
+    let first = results[0].as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(first.source.tag(), Some(&Tag::new("v1.0.0")));
+    let second = results[1].as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(second.source.tag(), Some(&Tag::new("v2.0.0")));
+}
+
+#[tokio::test]
 async fn candidate_order_respected() {
     // A scoped package with both a full-name release and a plain release:
     // `NameAt` (first candidate) must win.

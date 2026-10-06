@@ -115,25 +115,7 @@ impl Repository {
     /// Parse failures are input errors, not forge errors, so this returns
     /// [`anyhow::Result`] rather than the crate [`Result`].
     pub fn parse(url: &str) -> anyhow::Result<Self> {
-        let url = url.trim();
-
-        // Scheme-agnostic split; scp-like `git@host:owner/repo` and the
-        // dropped userinfo of ssh URLs are normalized to host/owner/repo.
-        let path_part: String = if let Some((_, rest)) = url.split_once("://") {
-            rest.to_string()
-        } else if let Some(rest) = url.strip_prefix("git@") {
-            rest.replace(':', "/")
-        } else {
-            url.to_string()
-        };
-        let path_part = path_part
-            .rsplit_once('@')
-            .map(|(_, after)| after.to_string())
-            .unwrap_or(path_part);
-        let path_part = match path_part.split_once(':') {
-            Some((host, rest)) if !path_part.contains('/') => format!("{host}/{rest}"),
-            _ => path_part,
-        };
+        let path_part = normalize(url);
 
         let mut segments: Vec<&str> = path_part
             .trim_matches('/')
@@ -160,6 +142,20 @@ impl Repository {
         })
     }
 
+    /// True when the URL's host segment is exactly `github.com`
+    /// (case-insensitive), across all supported clone/web forms. A substring
+    /// check also matches foreign hosts (`notgithub.com`,
+    /// `github.com.example.org`) whose paths [`Repository::parse`] would
+    /// silently reinterpret as a GitHub owner/repo.
+    pub fn is_github_url(url: &str) -> bool {
+        let path_part = normalize(url);
+        path_part
+            .trim_matches('/')
+            .split('/')
+            .find(|s| !s.is_empty())
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+    }
+
     /// `https://github.com/{owner}/{name}` — web base URL for the default
     /// forge (GitHub). Other forges format their own URLs.
     pub fn web_url(&self) -> String {
@@ -170,6 +166,29 @@ impl Repository {
 impl std::fmt::Display for Repository {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
+/// Scheme-agnostic URL normalization to `host/owner/repo…`: the scheme
+/// (incl. `git+https://`) and userinfo are dropped, scp-like
+/// `git@host:owner/repo` is converted to `host/owner/repo`.
+fn normalize(url: &str) -> String {
+    let url = url.trim();
+
+    let path_part: String = if let Some((_, rest)) = url.split_once("://") {
+        rest.to_string()
+    } else if let Some(rest) = url.strip_prefix("git@") {
+        rest.replace(':', "/")
+    } else {
+        url.to_string()
+    };
+    let path_part = path_part
+        .rsplit_once('@')
+        .map(|(_, after)| after.to_string())
+        .unwrap_or(path_part);
+    match path_part.split_once(':') {
+        Some((host, rest)) if !path_part.contains('/') => format!("{host}/{rest}"),
+        _ => path_part,
     }
 }
 
@@ -489,6 +508,33 @@ mod tests {
     #[test]
     fn repository_parse_rejects_single_segment() {
         assert!(Repository::parse("https://github.com/webpro-nl").is_err());
+    }
+
+    #[test]
+    fn is_github_url_requires_exact_host() {
+        for url in [
+            "https://github.com/webpro-nl/knip",
+            "http://github.com/webpro-nl/knip",
+            "git://github.com/webpro-nl/knip",
+            "git+https://github.com/webpro-nl/knip",
+            "ssh://git@github.com/webpro-nl/knip",
+            "git@github.com:webpro-nl/knip",
+            "https://GitHub.com/webpro-nl/knip",
+            "https://github.com/webpro-nl/knip.git",
+        ] {
+            assert!(Repository::is_github_url(url), "url: {url}");
+        }
+        for url in [
+            "https://notgithub.com/webpro-nl/knip",
+            "https://github.com.example.com/webpro-nl/knip",
+            "https://example.com/github.com/webpro-nl/knip",
+            "https://api.github.com/repos/webpro-nl/knip",
+            "https://gitlab.com/webpro-nl/knip",
+            "webpro-nl/knip",
+            "",
+        ] {
+            assert!(!Repository::is_github_url(url), "url: {url}");
+        }
     }
 
     #[test]

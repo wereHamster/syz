@@ -124,8 +124,17 @@ impl Resolver {
         // skip A's probe phase entirely (order only, nothing is skipped).
         let changelog_first = remembered == Some(Strategy::ChangelogFile);
         if changelog_first && try_changelog {
+            // ChangelogFile can only be learned after A ran `cached_releases`
+            // (with `prefer_release_bodies`), so reading the list here is a
+            // cache hit. It keeps the matched tag attached for versions whose
+            // release body is absent — the list is how `matched_tag` is found.
+            let list = if try_releases {
+                Some(self.cached_releases().await?)
+            } else {
+                None
+            };
             if let Some(notes) = self
-                .resolve_via_changelog_file(pkg, version, &cands, &needles, None)
+                .resolve_via_changelog_file(pkg, version, &cands, &needles, list.as_deref())
                 .await?
             {
                 return Ok(Some(notes));

@@ -2,9 +2,10 @@
 //! `release-notes` crate's [`HttpClient`].
 //!
 //! The release-notes crate produces absolute `https://api.github.com/…`
-//! URLs; the adapter maps them back onto octocrab routes so that the
-//! per-owner App-installation token selection inside `GitHub::get_response`
-//! is preserved.
+//! URLs; the adapter maps them back onto octocrab routes and carries the
+//! resolver's owner explicitly, so the per-owner App-installation token
+//! applies to every request — including `Link`-header pagination pages,
+//! which GitHub canonicalizes to ownerless `/repositories/{id}/…` routes.
 
 use async_trait::async_trait;
 
@@ -15,11 +16,15 @@ use crate::core::clients::github::GitHub;
 #[derive(Clone)]
 pub struct GitHubHttp {
     github: GitHub,
+    owner: String,
 }
 
 impl GitHubHttp {
-    pub fn new(github: GitHub) -> Self {
-        Self { github }
+    pub fn new(github: GitHub, owner: impl Into<String>) -> Self {
+        Self {
+            github,
+            owner: owner.into(),
+        }
     }
 }
 
@@ -35,7 +40,7 @@ impl HttpClient for GitHubHttp {
 
         let response = self
             .github
-            .get_response(&route)
+            .get_response(&self.owner, &route)
             .await
             .map_err(TransportError::new)?;
 

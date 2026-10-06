@@ -234,11 +234,13 @@ impl GitHub {
     /// headers and the body. Unlike [`Self::get_json`] it does not coerce
     /// error statuses — classification is left to the caller (the
     /// release-notes crate maps 404 → miss, 403/429 → rate limit).
-    pub async fn get_response(&self, route: &str) -> Result<GitHubHttpResponse> {
-        let client = match Self::parse_owner_from_route(route) {
-            Some(owner) => self.client_for_owner(&owner).await,
-            None => self.public_client.clone(),
-        };
+    ///
+    /// `owner` selects the installation-aware client explicitly instead of
+    /// being derived from the route: GitHub canonicalizes `Link` pagination
+    /// targets to ownerless `/repositories/{id}/…` routes, which route
+    /// parsing cannot map back to an owner.
+    pub async fn get_response(&self, owner: &str, route: &str) -> Result<GitHubHttpResponse> {
+        let client = self.client_for_owner(owner).await;
 
         let response = client._get(route).await.context("GitHub request failed")?;
 

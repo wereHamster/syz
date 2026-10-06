@@ -14,17 +14,19 @@ pub struct HistorySection;
 
 impl HistorySection {
     /// Builds a release-notes resolver for GitHub-hosted repositories.
-    /// `Repository::parse` gates on shape; the `github.com` check keeps the
-    /// legacy behavior of skipping notes for other forges (the GitHubForge
-    /// would otherwise query api.github.com with a foreign owner/repo).
+    /// The host must be exactly `github.com` (across all supported clone/web
+    /// forms): a substring check would also admit foreign hosts like
+    /// `notgithub.com`, and `Repository::parse` would then reinterpret their
+    /// paths as a GitHub owner/repo — querying api.github.com for an
+    /// unrelated repository.
     fn release_notes_resolver(&self, repo_url: &str, github: GitHub) -> Option<Resolver> {
-        if !repo_url.contains("github.com") {
+        if !release_notes::Repository::is_github_url(repo_url) {
             return None;
         }
         let repo = release_notes::Repository::parse(repo_url).ok()?;
         Some(Resolver::new(
             Arc::new(release_notes::github::GitHubForge::new(
-                Arc::new(GitHubHttp::new(github)),
+                Arc::new(GitHubHttp::new(github, repo.owner.as_str())),
                 repo.owner,
                 repo.name,
             )),
@@ -235,7 +237,7 @@ impl PullRequestSectionGenerator for HistorySection {
                     // Percent-encode the tag for the GitHub URL
                     let encoded_tag = tag_for_url.url_path();
 
-                    let github_url = if !repo_url.is_empty() && repo_url.contains("github.com") {
+                    let github_url = if release_notes::Repository::is_github_url(&repo_url) {
                         Some(format!("{}/releases/tag/{}", repo_url, encoded_tag))
                     } else {
                         None
