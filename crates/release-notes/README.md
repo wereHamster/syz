@@ -34,9 +34,12 @@ version headings stripped, and the markdown sanitized for embedding.
 - **`Ok(None)` is a normal outcome.** No notes found is not an error. `Err` is
   reserved for real failures: rate limiting (with `retry_after`) and transport
   errors.
-- **Single-flight caching.** Concurrent lookups share one fetch per resource;
-  errors are cached briefly for burst protection. Resolver clones share the
-  cache.
+- **Instance-scoped memoization.** The resolver owns its memoization state:
+  consecutive lookups share one fetch per resource (releases list,
+  changelog tree, file contents, per-tag probes), memoized errors for burst
+  protection, and a sticky first-success strategy. Callers never touch
+  shared state — the instance is the shared state, calls serialize on its
+  lock, and its lifetime bounds the caching.
 - **Sticky strategy memory.** Once a source/tag shape succeeds for a
   repository, later lookups try it first, skipping pointless probes.
 
