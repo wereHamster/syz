@@ -48,6 +48,21 @@
           ];
         };
 
+        agent = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [
+            rustc
+            cargo
+            rustfmt
+            clippy
+            rust-analyzer
+
+            turso
+            nodejs
+            pnpm
+            biome
+          ];
+        };
+
         workflow = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
             rustc
