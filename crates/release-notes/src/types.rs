@@ -80,39 +80,12 @@ impl Tag {
 
     /// Percent-encoded for use in a release URL path segment.
     pub fn url_path(&self) -> String {
-        const UNRESERVED: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
-            .add(b' ')
-            .add(b'"')
-            .add(b'#')
-            .add(b'<')
-            .add(b'>')
-            .add(b'`')
-            .add(b'{')
-            .add(b'}')
-            .add(b'|')
-            .add(b'\\')
-            .add(b'^')
-            .add(b'%');
-        // Legacy percent-encoding encoded everything except
-        // A-Z a-z 0-9 - _ . ~
-        const SET: &percent_encoding::AsciiSet = &UNRESERVED
-            .add(b'!')
-            .add(b'$')
-            .add(b'&')
-            .add(b'\'')
-            .add(b'(')
-            .add(b')')
-            .add(b'*')
-            .add(b'+')
-            .add(b',')
-            .add(b'/')
-            .add(b':')
-            .add(b';')
-            .add(b'=')
-            .add(b'?')
-            .add(b'@')
-            .add(b'[')
-            .add(b']');
+        // Encode everything except `A-Za-z0-9-._~` (legacy behavior).
+        const SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+            .remove(b'-')
+            .remove(b'_')
+            .remove(b'.')
+            .remove(b'~');
         percent_encoding::utf8_percent_encode(&self.0, SET).to_string()
     }
 }
@@ -125,8 +98,13 @@ impl std::fmt::Display for Tag {
 
 /// A repository identity on a forge, parsed from a clone/web URL.
 /// Accepts: `https://github.com/o/r`, `http://github.com/o/r`,
-/// `git://github.com/o/r`, `git+https://…`, `ssh://git@github.com/o/r`,
-/// `git@github.com:o/r`; trailing `.git` and `/` are stripped.
+/// `git://github.com/o/r`, `git+https://…`, `git+ssh://…`,
+/// `ssh://git@github.com/o/r`, `git@github.com:o/r`; trailing `.git` and `/`
+/// are stripped.
+///
+/// GitHub-only for now: the host segment is dropped (forge owners cannot
+/// contain dots, hostnames can) and [`Repository::web_url`] formats a
+/// github.com URL. Revisit when a second forge implementation arrives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repository {
     pub owner: String,
@@ -139,27 +117,22 @@ impl Repository {
     pub fn parse(url: &str) -> anyhow::Result<Self> {
         let url = url.trim();
 
-        // Strip scheme prefixes and the scp-like `git@host:` form.
-        let path_part: String = if let Some(rest) = url
-            .strip_prefix("git+https://")
-            .or_else(|| url.strip_prefix("git+http://"))
-            .or_else(|| url.strip_prefix("https://"))
-            .or_else(|| url.strip_prefix("http://"))
-            .or_else(|| url.strip_prefix("git://"))
-            .or_else(|| url.strip_prefix("ssh://"))
-        {
+        // Scheme-agnostic split; scp-like `git@host:owner/repo` and the
+        // dropped userinfo of ssh URLs are normalized to host/owner/repo.
+        let path_part: String = if let Some((_, rest)) = url.split_once("://") {
             rest.to_string()
         } else if let Some(rest) = url.strip_prefix("git@") {
-            // git@github.com:owner/repo.git → github.com/owner/repo.git
             rest.replace(':', "/")
         } else {
             url.to_string()
         };
-
-        // Drop any userinfo from ssh URLs (git@github.com/...).
-        let path_part = match path_part.split_once('@') {
-            Some((_, after)) => after.to_string(),
-            None => path_part,
+        let path_part = path_part
+            .rsplit_once('@')
+            .map(|(_, after)| after.to_string())
+            .unwrap_or(path_part);
+        let path_part = match path_part.split_once(':') {
+            Some((host, rest)) if !path_part.contains('/') => format!("{host}/{rest}"),
+            _ => path_part,
         };
 
         let mut segments: Vec<&str> = path_part
@@ -277,7 +250,7 @@ pub fn fallback_tag(pkg: &PackageName, version: &str) -> Tag {
 
 /// Version with build metadata stripped: "1.2.3" / "1.2.3+abc" → "1.2.3".
 pub fn base_version(version: &str) -> &str {
-    version.split('+').next().unwrap_or(version)
+    version.split_once('+').map_or(version, |(base, _)| base)
 }
 
 /// The *shape* of a candidate tag, abstracted over the concrete package
@@ -378,200 +351,6 @@ pub fn candidate_tags(pkg: &PackageName, version: &str) -> Vec<Candidate> {
 
     out
 }
-
-// ---------------------------------------------------------------------------
-// MockForge (test-util)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "test-util")]
-pub mod mock {
-    use super::*;
-    use crate::forge::Forge;
-    use async_trait::async_trait;
-    use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    /// Scriptable [`Forge`] for tests: canned releases, files, and per-tag
-    /// misses; counts calls (fetch-count assertions); can be told to emit
-    /// rate-limit errors or to report a truncated tree.
-    #[derive(Clone, Default)]
-    pub struct MockForge {
-        inner: Arc<std::sync::Mutex<MockState>>,
-    }
-
-    #[derive(Default)]
-    struct MockState {
-        releases: Vec<ReleaseInfo>,
-        /// Overrides the by-tag view when set (simulating releases older
-        /// than the fetched list pages).
-        by_tag_releases: Option<Vec<ReleaseInfo>>,
-        files: HashMap<String, Option<String>>,
-        by_tag_misses: Vec<Tag>,
-        release_pages_calls: AtomicUsize,
-        by_tag_calls: AtomicUsize,
-        probed_tags: std::sync::Mutex<Vec<String>>,
-        tree_calls: AtomicUsize,
-        file_calls: AtomicUsize,
-        rate_limit_on: bool,
-        truncated_tree: bool,
-    }
-
-    impl MockForge {
-        pub fn new() -> Self {
-            Self::default()
-        }
-
-        pub fn with_releases(self, releases: Vec<ReleaseInfo>) -> Self {
-            self.inner.lock().unwrap().releases = releases;
-            self
-        }
-
-        pub fn with_file(self, path: &str, content: Option<&str>) -> Self {
-            self.inner
-                .lock()
-                .unwrap()
-                .files
-                .insert(path.to_string(), content.map(String::from));
-            self
-        }
-
-        /// Tags that report 404 from `release_by_tag` even if present in
-        /// the canned list (simulating releases older than fetched pages).
-        pub fn with_by_tag_misses(self, tags: Vec<Tag>) -> Self {
-            self.inner.lock().unwrap().by_tag_misses = tags;
-            self
-        }
-
-        /// Separate by-tag view; defaults to the releases list.
-        pub fn with_by_tag_releases(self, releases: Vec<ReleaseInfo>) -> Self {
-            self.inner.lock().unwrap().by_tag_releases = Some(releases);
-            self
-        }
-
-        pub fn rate_limited(self) -> Self {
-            self.inner.lock().unwrap().rate_limit_on = true;
-            self
-        }
-
-        pub fn truncated_tree(self) -> Self {
-            self.inner.lock().unwrap().truncated_tree = true;
-            self
-        }
-
-        pub fn release_pages_calls(&self) -> usize {
-            self.inner
-                .lock()
-                .unwrap()
-                .release_pages_calls
-                .load(Ordering::SeqCst)
-        }
-
-        pub fn by_tag_calls(&self) -> usize {
-            self.inner
-                .lock()
-                .unwrap()
-                .by_tag_calls
-                .load(Ordering::SeqCst)
-        }
-
-        /// Tags passed to `release_by_tag`, in call order.
-        pub fn probed_tags(&self) -> Vec<String> {
-            self.inner
-                .lock()
-                .unwrap()
-                .probed_tags
-                .lock()
-                .unwrap()
-                .clone()
-        }
-
-        pub fn tree_calls(&self) -> usize {
-            self.inner.lock().unwrap().tree_calls.load(Ordering::SeqCst)
-        }
-
-        pub fn file_calls(&self) -> usize {
-            self.inner.lock().unwrap().file_calls.load(Ordering::SeqCst)
-        }
-    }
-
-    fn rate_limited() -> Error {
-        Error::RateLimited { retry_after: None }
-    }
-
-    #[async_trait]
-    impl Forge for MockForge {
-        async fn releases(&self, pages: usize) -> Result<Vec<ReleaseInfo>> {
-            let st = self.inner.lock().unwrap();
-            st.release_pages_calls.fetch_add(1, Ordering::SeqCst);
-            if st.rate_limit_on {
-                return Err(rate_limited());
-            }
-            // Simulate pagination: `pages` of up to 2 releases each.
-            Ok(st.releases.iter().take(pages * 2).cloned().collect())
-        }
-
-        async fn changelog_candidates(&self, _pkg: &PackageName) -> Result<Vec<String>> {
-            let st = self.inner.lock().unwrap();
-            st.tree_calls.fetch_add(1, Ordering::SeqCst);
-            if st.rate_limit_on {
-                return Err(rate_limited());
-            }
-            let mut paths: Vec<String> = st
-                .files
-                .keys()
-                .filter(|p| {
-                    let lower = p.to_lowercase();
-                    lower.ends_with("changelog.md") || lower.ends_with("changelog")
-                })
-                .cloned()
-                .collect();
-            paths.sort();
-            Ok(paths)
-        }
-
-        async fn read_file(&self, path: &str) -> Result<Option<String>> {
-            let st = self.inner.lock().unwrap();
-            st.file_calls.fetch_add(1, Ordering::SeqCst);
-            if st.rate_limit_on {
-                return Err(rate_limited());
-            }
-            Ok(st.files.get(path).cloned().flatten())
-        }
-
-        async fn release_by_tag(&self, tag: &Tag) -> Result<Option<ReleaseInfo>> {
-            let st = self.inner.lock().unwrap();
-            st.by_tag_calls.fetch_add(1, Ordering::SeqCst);
-            st.probed_tags
-                .lock()
-                .unwrap()
-                .push(tag.as_str().to_string());
-            if st.rate_limit_on {
-                return Err(rate_limited());
-            }
-            if st.by_tag_misses.contains(tag) {
-                return Ok(None);
-            }
-            let view = st.by_tag_releases.as_ref().unwrap_or(&st.releases);
-            Ok(view.iter().find(|r| &r.tag == tag).cloned())
-        }
-
-        fn release_url(&self, tag: &Tag) -> String {
-            format!("https://example.org/releases/tag/{}", tag.url_path())
-        }
-    }
-
-    /// Reports a truncated tree through a marker file note; the GitHub forge
-    /// path is the one with real truncation semantics.
-    impl MockForge {
-        pub fn is_truncated(&self) -> bool {
-            self.inner.lock().unwrap().truncated_tree
-        }
-    }
-}
-
-#[cfg(feature = "test-util")]
-pub use mock::MockForge;
 
 #[cfg(test)]
 mod tests {

@@ -1,15 +1,18 @@
 //! GitHub implementation of [`Forge`] — the first forge, extracted from the
 //! legacy `GithubReleaseNotesResolver`.
 
-pub mod repository;
-
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::forge::Forge;
+use crate::forge::{is_changelog_path, rank_changelog_paths, Forge};
 use crate::http::HttpClient;
 use crate::types::{PackageName, ReleaseInfo, Result, Tag};
+
+/// Base URL the forge emits absolute URLs against. The transport adapter
+/// derives its prefix from this constant — the two must agree by
+/// construction, not by string coincidence.
+pub const API_BASE: &str = "https://api.github.com";
 
 /// GitHub forge over an injected transport. `owner`/`repo` identify the
 /// upstream repository; all API routes are relative to it.
@@ -32,12 +35,8 @@ impl GitHubForge {
         }
     }
 
-    fn api_base() -> &'static str {
-        "https://api.github.com"
-    }
-
     fn repo_api(&self) -> String {
-        format!("{}/repos/{}/{}", Self::api_base(), self.owner, self.repo)
+        format!("{API_BASE}/repos/{}/{}", self.owner, self.repo)
     }
 
     fn retry_after(resp: &crate::http::HttpResponse) -> Option<std::time::Duration> {
@@ -47,31 +46,8 @@ impl GitHubForge {
             .map(std::time::Duration::from_secs)
     }
 
-    async fn get_json(&self, url: &str) -> Result<Option<serde_json::Value>> {
-        let resp = self
-            .http
-            .get(url)
-            .await
-            .map_err(|e| crate::types::Error::Transport(e.into_inner()))?;
-
-        match resp.status() {
-            404 => Ok(None),
-            403 | 429 => Err(crate::types::Error::RateLimited {
-                retry_after: Self::retry_after(&resp),
-            }),
-            _ if resp.status() / 100 != 2 => Err(crate::types::Error::Transport(anyhow::anyhow!(
-                "GitHub API returned {} for {}",
-                resp.status(),
-                url
-            ))),
-            _ => Ok(Some(serde_json::from_slice(&resp.body).map_err(|e| {
-                crate::types::Error::Transport(anyhow::anyhow!(e))
-            })?)),
-        }
-    }
-
-    /// Raw GET returning the full response (status preserved) — used for
-    /// pagination over the releases list.
+    /// Raw GET with the shared status classification: 404 → miss, 403/429 →
+    /// rate limit, other non-2xx → transport error.
     async fn get_raw(&self, url: &str) -> Result<Option<crate::http::HttpResponse>> {
         let resp = self
             .http
@@ -91,14 +67,20 @@ impl GitHubForge {
             _ => Ok(Some(resp)),
         }
     }
+
+    async fn get_json(&self, url: &str) -> Result<Option<serde_json::Value>> {
+        let Some(resp) = self.get_raw(url).await? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&resp.body)
+            .map(Some)
+            .map_err(|e| crate::types::Error::Transport(anyhow::anyhow!(e)))
+    }
 }
 
 #[derive(Deserialize)]
 struct GhRelease {
     tag_name: String,
-    #[allow(dead_code)]
-    #[serde(rename = "draft", default)]
-    draft: bool,
     published_at: Option<chrono::DateTime<chrono::Utc>>,
     body: Option<serde_json::Value>,
 }
@@ -170,37 +152,17 @@ impl Forge for GitHubForge {
             );
         }
 
-        let mut changelog_paths: Vec<String> = json
+        let paths: Vec<String> = json
             .get("tree")
             .and_then(|t| t.as_array())
-            .map(|tree| {
-                tree.iter()
-                    .filter_map(|item| item.get("path").and_then(|p| p.as_str()))
-                    .filter(|p| {
-                        let lower = p.to_lowercase();
-                        lower.ends_with("changelog.md") || lower.ends_with("changelog")
-                    })
-                    .map(|p| p.to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("path").and_then(|p| p.as_str()))
+            .filter(|p| is_changelog_path(p))
+            .map(str::to_string)
+            .collect();
 
-        if changelog_paths.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let short_name = pkg.short().to_lowercase();
-        changelog_paths.sort_by(|a, b| {
-            let a_contains = a.to_lowercase().contains(&short_name);
-            let b_contains = b.to_lowercase().contains(&short_name);
-            if a_contains == b_contains {
-                a.len().cmp(&b.len())
-            } else {
-                b_contains.cmp(&a_contains)
-            }
-        });
-
-        Ok(changelog_paths)
+        Ok(rank_changelog_paths(paths, pkg))
     }
 
     async fn read_file(&self, path: &str) -> Result<Option<String>> {
@@ -232,15 +194,6 @@ impl Forge for GitHubForge {
         String::from_utf8(decoded)
             .map(Some)
             .map_err(|e| crate::types::Error::Transport(anyhow::anyhow!(e)))
-    }
-
-    fn release_url(&self, tag: &Tag) -> String {
-        format!(
-            "https://github.com/{}/{}/releases/tag/{}",
-            self.owner,
-            self.repo,
-            tag.url_path()
-        )
     }
 }
 

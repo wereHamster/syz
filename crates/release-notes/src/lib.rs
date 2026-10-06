@@ -17,6 +17,8 @@ pub mod forge;
 pub mod github;
 pub mod http;
 pub mod markdown;
+#[cfg(feature = "test-util")]
+pub mod mock;
 mod resolver;
 mod types;
 
@@ -29,4 +31,4 @@ pub use types::{
 };
 
 #[cfg(feature = "test-util")]
-pub use types::MockForge;
+pub use mock::MockForge;

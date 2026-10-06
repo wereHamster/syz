@@ -4939,6 +4939,7 @@ dependencies = [
  "rand 0.10.3",
  "ratatui",
  "regex",
+ "release-notes",
  "reqwest 0.13.5",
  "reqwest-middleware",
  "reqwest-retry",

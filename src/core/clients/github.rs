@@ -23,6 +23,14 @@ pub struct GitHub {
     installation_clients: Arc<Mutex<HashMap<String, Octocrab>>>,
 }
 
+/// A raw GitHub API response: status preserved for classification, headers
+/// for pagination (`Link`) and rate-limit hints, body as UTF-8 text.
+pub struct GitHubHttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
 impl GitHub {
     pub async fn new() -> Result<GitHub> {
         let app_id_str = std::env::var("GITHUB_APP_ID").context("GITHUB_APP_ID must be set")?;
@@ -220,6 +228,39 @@ impl GitHub {
             }
             Err(e) => anyhow::bail!("Request error: {}", e),
         }
+    }
+
+    /// Raw GET with installation-resolved auth, preserving the status, the
+    /// headers and the body. Unlike [`Self::get_json`] it does not coerce
+    /// error statuses — classification is left to the caller (the
+    /// release-notes crate maps 404 → miss, 403/429 → rate limit).
+    pub async fn get_response(&self, route: &str) -> Result<GitHubHttpResponse> {
+        let client = match Self::parse_owner_from_route(route) {
+            Some(owner) => self.client_for_owner(&owner).await,
+            None => self.public_client.clone(),
+        };
+
+        let response = client._get(route).await.context("GitHub request failed")?;
+
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                let value = value.to_str().ok()?;
+                Some((name.as_str().to_string(), value.to_string()))
+            })
+            .collect::<Vec<_>>();
+        let body = client
+            .body_to_string(response)
+            .await
+            .context("GitHub response body read failed")?;
+
+        Ok(GitHubHttpResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     /// Extracts the owner from a `/repos/{owner}/{repo}/...` route.
