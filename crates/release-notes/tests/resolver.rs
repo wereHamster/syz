@@ -243,6 +243,32 @@ async fn fresh_resolver_starts_empty() {
     assert_eq!(forge.release_pages_calls(), 2);
 }
 
+#[tokio::test]
+async fn concurrent_resolve_serializes_on_the_instance_state() {
+    // `resolve` holds the state lock across the fetch, so concurrent
+    // callers of one resolver serialize and share one fetch per resource.
+    let forge = MockForge::new().with_releases(vec![rel("v1.0.0", Some("b"))]);
+    let resolver = Arc::new(Resolver::new(Arc::new(forge.clone()), Options::default()));
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let resolver = resolver.clone();
+        let forge = forge.clone();
+        handles.push(tokio::spawn(async move {
+            let r = resolver.resolve(&pkg("knip"), "1.0.0").await;
+            (r.is_ok(), forge.release_pages_calls())
+        }));
+    }
+    let mut max_calls = 0;
+    for handle in handles {
+        let (ok, calls) = handle.await.unwrap();
+        assert!(ok);
+        max_calls = max_calls.max(calls);
+    }
+    // Every caller completed and observed the shared memoized fetch.
+    assert_eq!(max_calls, 1);
+}
+
 // ---------------------------------------------------------------------------
 // Probe fallback (deep history)
 // ---------------------------------------------------------------------------

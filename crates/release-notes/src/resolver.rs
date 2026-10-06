@@ -104,6 +104,12 @@ impl Resolver {
         self.resolve_locked(pkg, version, &mut state).await
     }
 
+    /// The sticky first-success strategy learned so far, if any. Reads the
+    /// state lock; empty until a lookup in the instance's scope succeeded.
+    pub async fn learned_strategy(&self) -> Option<Strategy> {
+        self.state.lock().await.strategy
+    }
+
     /// Multi-package entry point (group PRs): several packages of the same
     /// repository, resolved **sequentially in request order** so that
     /// strategy learning is deterministic. Returns one result per request,
