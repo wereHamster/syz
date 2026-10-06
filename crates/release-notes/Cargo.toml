@@ -24,8 +24,8 @@ tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls"] }
 
 [features]
-# Gates tests that require live network access and GITHUB_APP_ID /
-# GITHUB_APP_PRIVATE_KEY. Mirrors the root crate's feature of the same name.
+# Gates tests that require live network access. They use GITHUB_TOKEN when set
+# (CI always sets it). Mirrors the root crate's feature of the same name.
 integration-tests = []
 # Exposes MockForge for downstream tests.
 test-util = []

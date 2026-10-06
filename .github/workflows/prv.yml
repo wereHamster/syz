@@ -34,4 +34,8 @@ jobs:
           shared-key: ci
           save-if: false
       - run: cargo build --locked --all-features --all-targets
-      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --workspace --all-targets --all-features
+        env:
+          # Authenticated requests avoid the GitHub API's anonymous rate limit
+          # in the live integration tests (crates/release-notes/tests).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
