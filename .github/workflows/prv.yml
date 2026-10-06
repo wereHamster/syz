@@ -34,4 +34,6 @@ jobs:
           shared-key: ci
           save-if: false
       - run: cargo build --locked --all-features --all-targets
-      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --workspace --all-targets --all-features
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

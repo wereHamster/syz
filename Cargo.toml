@@ -21,8 +21,9 @@ path = "src/bin/syzctl.rs"
 
 [features]
 # Gates tests that require live network access (crates/release-notes/tests).
-# Not run in CI. Run locally with:
-#   cargo test -p release-notes --features integration-tests
+# CI runs them with `--all-features` and the workflow's GITHUB_TOKEN. Run
+# locally with:
+#   GITHUB_TOKEN=... cargo test -p release-notes --features integration-tests
 integration-tests = []
 
 [dependencies]

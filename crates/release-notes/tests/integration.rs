@@ -1,12 +1,13 @@
-//! Live integration tests against github.com. Opt-in: they need network
-//! access and are not run in CI.
+//! Live integration tests against github.com. They need network access and
+//! the `integration-tests` feature; CI enables it via `--all-features`.
 //!
 //! ```sh
 //! cargo test -p release-notes --features integration-tests
 //! ```
 //!
-//! Auth: `GITHUB_TOKEN` (PAT) is used when set; otherwise the tests run
-//! unauthenticated (fine for public repos, subject to rate limits).
+//! Auth: `GITHUB_TOKEN` is used when set (CI passes the workflow's token);
+//! otherwise the tests run unauthenticated, which is subject to the much
+//! lower anonymous rate limit.
 #![cfg(feature = "integration-tests")]
 
 use std::sync::Arc;
