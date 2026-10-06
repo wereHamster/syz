@@ -1,0 +1,8 @@
+[package]
+name = "packageurl"
+version = "0.1.0"
+edition = "2021"
+description = "Package identity types: Package-URL (PURL) and package names."
+
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
