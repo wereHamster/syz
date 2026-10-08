@@ -80,13 +80,31 @@ pub fn resolve_updates(
     }
 }
 
+/// The release line a version belongs to: `(major, 0)` for `>=1.0.0`, `(0, minor)` for `0.x`.
+fn release_line(version: &Version) -> (u64, u64) {
+    if version.major == 0 {
+        (0, version.minor)
+    } else {
+        (version.major, 0)
+    }
+}
+
+/// Finds, per release line, the newest non-vulnerable release that satisfies the age policy
+/// (`resolved`) and the newest one that does not (`blocked`).
+///
+/// Only lines that contain at least one of the `installed` versions are considered: a fix on
+/// any other line would be a downgrade or an unrequested major bump.
 pub fn resolve_mature_versions(
     vulnerable_constraints: &[VersionReq],
+    installed: &[Version],
     releases: &[AvailableRelease],
     minimum_release_age: Option<Duration>,
 ) -> MatureResolution {
     let now = Utc::now();
     let min_age = minimum_release_age.unwrap_or(Duration::zero());
+
+    let installed_lines: std::collections::HashSet<(u64, u64)> =
+        installed.iter().map(release_line).collect();
 
     let mut best_matches: std::collections::HashMap<(u64, u64), Version> =
         std::collections::HashMap::new();
@@ -101,13 +119,12 @@ pub fn resolve_mature_versions(
             continue;
         }
 
-        let is_mature = min_age.is_zero() || (now - release.published_at) >= min_age;
+        let key = release_line(&release.version);
+        if !installed_lines.contains(&key) {
+            continue;
+        }
 
-        let key = if release.version.major == 0 {
-            (0, release.version.minor)
-        } else {
-            (release.version.major, 0)
-        };
+        let is_mature = min_age.is_zero() || (now - release.published_at) >= min_age;
 
         if is_mature {
             if best_matches
@@ -194,8 +211,16 @@ mod tests {
             make_release("2.0.0", 10), // Safe & Mature (different major)
         ];
 
-        let result =
-            resolve_mature_versions(&reqs, &releases, Some(Duration::try_days(7).unwrap()));
+        let installed = vec![
+            Version::parse("1.2.0").unwrap(),
+            Version::parse("2.0.0").unwrap(),
+        ];
+        let result = resolve_mature_versions(
+            &reqs,
+            &installed,
+            &releases,
+            Some(Duration::try_days(7).unwrap()),
+        );
 
         assert_eq!(result.resolved.len(), 2);
         assert_eq!(result.resolved[0].to_string(), "1.2.2");
@@ -203,6 +228,35 @@ mod tests {
 
         assert_eq!(result.blocked.len(), 1);
         assert_eq!(result.blocked[0].0.to_string(), "1.3.0");
+    }
+
+    #[test]
+    fn test_resolve_mature_versions_ignores_lines_not_installed() {
+        // Mirrors next@16.3.6: the only fix on the 16 line is immature. The immature fix on the
+        // 15 line would be a downgrade and must not be reported.
+        let reqs = vec![
+            VersionReq::parse(">=15.0.0, <15.5.27").unwrap(),
+            VersionReq::parse(">=16.0.0, <16.4.0").unwrap(),
+        ];
+
+        let releases = vec![
+            make_release("15.5.26", 30), // Vulnerable
+            make_release("15.5.27", 2),  // Safe & Immature, but on a line that isn't installed
+            make_release("16.3.6", 30),  // Vulnerable
+            make_release("16.4.0", 2),   // Safe & Immature
+        ];
+
+        let installed = vec![Version::parse("16.3.6").unwrap()];
+        let result = resolve_mature_versions(
+            &reqs,
+            &installed,
+            &releases,
+            Some(Duration::try_days(7).unwrap()),
+        );
+
+        assert!(result.resolved.is_empty());
+        assert_eq!(result.blocked.len(), 1);
+        assert_eq!(result.blocked[0].0.to_string(), "16.4.0");
     }
 
     #[test]
@@ -217,8 +271,16 @@ mod tests {
             make_release("0.3.0", 10), // Safe & Mature (different minor for 0.x)
         ];
 
-        let result =
-            resolve_mature_versions(&reqs, &releases, Some(Duration::try_days(7).unwrap()));
+        let installed = vec![
+            Version::parse("0.2.1").unwrap(),
+            Version::parse("0.3.0").unwrap(),
+        ];
+        let result = resolve_mature_versions(
+            &reqs,
+            &installed,
+            &releases,
+            Some(Duration::try_days(7).unwrap()),
+        );
 
         // For 0.x, minor versions are treated like major versions.
         assert_eq!(result.resolved.len(), 2);

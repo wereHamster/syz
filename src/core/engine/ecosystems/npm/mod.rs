@@ -546,6 +546,8 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             baseline_advisories.len()
         );
 
+        let before_versions = extract_versions_from_lock(lockfile.as_deref().unwrap_or_default());
+
         let mut overrides = std::collections::HashMap::new();
         let mut module_to_vulnerable_versions = std::collections::HashMap::new();
         let mut blocked_by_age: std::collections::HashMap<
@@ -566,9 +568,16 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         for (module, vulnerable_list) in module_to_vulnerable_versions {
+            let installed: Vec<semver::Version> = before_versions
+                .get(&module)
+                .into_iter()
+                .flatten()
+                .filter_map(|v| semver::Version::parse(v).ok())
+                .collect();
+
             match self
                 .npm_client
-                .resolve_mature_version(&module, &vulnerable_list, minimum_release_age)
+                .resolve_mature_version(&module, &vulnerable_list, &installed, minimum_release_age)
                 .await
             {
                 Ok(resolution) => {
@@ -675,7 +684,6 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         let clean_pkg_jsons: std::collections::HashMap<String, serde_json::Value> =
             mutable_pkg_jsons.clone();
 
-        let before_versions = extract_versions_from_lock(lockfile.as_deref().unwrap_or_default());
         let mut injected_transitive = false;
 
         // pnpm v11 no longer reads the `pnpm` field from package.json; overrides must go in

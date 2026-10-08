@@ -34,6 +34,7 @@ impl Npm {
         &self,
         package: &str,
         vulnerable_constraints: &[String],
+        installed: &[Version],
         minimum_release_age: Option<chrono::Duration>,
     ) -> Result<crate::core::version_resolver::MatureResolution> {
         let response = self.get_registry_response(package).await?;
@@ -75,6 +76,7 @@ impl Npm {
 
         let resolution = crate::core::version_resolver::resolve_mature_versions(
             &parsed_reqs,
+            installed,
             &available_releases,
             minimum_release_age,
         );
