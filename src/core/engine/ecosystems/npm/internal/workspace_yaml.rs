@@ -503,5 +503,9 @@ mod tests {
         assert!(glob_matches("*-plugin-*", "eslint-plugin-react"));
         assert!(!glob_matches("@next/*", "next"));
         assert!(!glob_matches("next", "next-auth"));
+        // The prefix and suffix must not overlap.
+        assert!(!glob_matches("a*a", "a"));
+        assert!(!glob_matches("ab*ba", "aba"));
+        assert!(glob_matches("a*a", "aa"));
     }
 }
