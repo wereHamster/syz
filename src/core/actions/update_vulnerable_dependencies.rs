@@ -62,11 +62,14 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                 }
                 Ok(None) => {}
                 Err(e) => {
+                    // Without a trustworthy result for this ecosystem, neither opening nor
+                    // closing the audit pull request would be correct.
                     tracing::error!(
-                        "Failed to update vulnerable dependencies for {}: {}",
+                        "Failed to update vulnerable dependencies for {}, aborting the audit: {}",
                         ecosystem_name,
                         e
                     );
+                    return;
                 }
             }
         }

@@ -547,7 +547,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
 
         tracing::info!("Running pnpm install --lockfile-only to set baseline...");
         if !run_pnpm_install(temp_dir.to_path_buf(), is_workspace, true, false).await? {
-            tracing::warn!("pnpm install failed, continuing anyway...");
+            anyhow::bail!("pnpm install failed while setting the audit baseline");
         }
 
         tracing::info!("Running pnpm audit --json for baseline...");
@@ -689,11 +689,11 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             let attempt = self
                 .apply_security_fixes(&ctx, &all_fixes, &seeds, &mut publish_times)
                 .await?;
-            if attempt.verified {
+            if attempt.installed && attempt.verified {
                 applied = Some(attempt);
             } else {
                 tracing::warn!(
-                    "Lockfile with fixes that haven't met minimumReleaseAge failed verification; falling back to mature fixes only"
+                    "Applying fixes that haven't met minimumReleaseAge failed; falling back to mature fixes only"
                 );
                 blocked_by_age = immature_fixes;
                 seeds.clear();
@@ -710,6 +710,9 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
                 let attempt = self
                     .apply_security_fixes(&ctx, &mature_fixes, &seeds, &mut publish_times)
                     .await?;
+                if !attempt.installed {
+                    anyhow::bail!("pnpm install failed while applying security fixes");
+                }
                 if !attempt.verified {
                     tracing::warn!("Lockfile failed pnpm's supply-chain verification");
                 }
@@ -887,6 +890,8 @@ struct AppliedFixes {
     workspace: Option<String>,
     /// Exact versions that bypass the minimum release age.
     exclusions: PinnedVersions,
+    /// Whether every `pnpm install` succeeded. If not, the lockfile can't be trusted.
+    installed: bool,
     /// Whether the lockfile passes `pnpm install --frozen-lockfile`.
     verified: bool,
 }
@@ -1034,16 +1039,16 @@ impl NpmPatcher {
         tracing::info!(
             "Running pnpm install in temp directory to update lockfile with forced fixes..."
         );
-        if !run_with_release_age_exceptions(
+        let mut installed = run_with_release_age_exceptions(
             ctx,
             &renderer,
             &mut exclusions,
             publish_times,
             &install_args(ctx.is_workspace, &[]),
         )
-        .await?
-        {
-            tracing::warn!("pnpm install failed, continuing anyway...");
+        .await?;
+        if !installed {
+            tracing::error!("pnpm install failed");
         }
 
         tracing::info!("Running pnpm dedupe...");
@@ -1078,7 +1083,8 @@ impl NpmPatcher {
             )
             .await?
             {
-                tracing::warn!("Final pnpm install failed, continuing anyway...");
+                tracing::error!("pnpm install failed while removing temporary overrides");
+                installed = false;
             }
         }
 
@@ -1115,6 +1121,7 @@ impl NpmPatcher {
             modifications,
             workspace: renderer.render(&exclusions)?,
             exclusions,
+            installed,
             verified,
         })
     }
