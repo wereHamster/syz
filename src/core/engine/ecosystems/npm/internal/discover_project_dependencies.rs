@@ -10,6 +10,19 @@ pub(crate) struct WorkspaceConfig {
     pub(crate) minimum_release_age: Option<i64>,
 }
 
+/// pnpm's default `minimumReleaseAge` (in minutes) since v11.
+const PNPM_DEFAULT_MINIMUM_RELEASE_AGE_MINUTES: i64 = 1440;
+
+/// The `minimumReleaseAge` pnpm enforces for a `pnpm-workspace.yaml`, falling back to pnpm's
+/// default when the setting (or the file) is missing.
+pub(crate) fn effective_minimum_release_age(workspace: Option<&str>) -> chrono::Duration {
+    let minutes = workspace
+        .and_then(|w| serde_yml::from_str::<WorkspaceConfig>(w).ok())
+        .and_then(|config| config.minimum_release_age)
+        .unwrap_or(PNPM_DEFAULT_MINIMUM_RELEASE_AGE_MINUTES);
+    chrono::Duration::minutes(minutes)
+}
+
 pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredDependency>> {
     let all_files = repo.list_files().await?;
     let mut pkg_json_paths = Vec::new();
@@ -25,14 +38,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
 
     let workspace_yaml = repo.read_file("pnpm-workspace.yaml").await.ok();
 
-    let mut minimum_release_age = None;
-    if let Some(workspace_yaml) = workspace_yaml {
-        if let Ok(config) = serde_yml::from_str::<WorkspaceConfig>(&workspace_yaml) {
-            if let Some(age) = config.minimum_release_age {
-                minimum_release_age = Some(chrono::Duration::minutes(age));
-            }
-        }
-    }
+    let minimum_release_age = Some(effective_minimum_release_age(workspace_yaml.as_deref()));
 
     let mut all_deps = Vec::new();
 

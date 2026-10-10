@@ -84,6 +84,22 @@ impl Npm {
         Ok(resolution)
     }
 
+    /// Publish time of every version of `package`, keyed by version.
+    pub async fn get_publish_times(&self, package: &str) -> Result<HashMap<String, DateTime<Utc>>> {
+        let response = self.get_registry_response(package).await?;
+
+        Ok(response
+            .time
+            .iter()
+            .filter(|(version, _)| Version::parse(version).is_ok())
+            .filter_map(|(version, time)| {
+                DateTime::parse_from_rfc3339(time)
+                    .ok()
+                    .map(|t| (version.clone(), t.with_timezone(&Utc)))
+            })
+            .collect())
+    }
+
     async fn get_registry_response(&self, package: &str) -> Result<RegistryResponse> {
         let url = format!("https://registry.npmjs.org/{}", package);
         let response: RegistryResponse = self.agent.json(&url).await?;
