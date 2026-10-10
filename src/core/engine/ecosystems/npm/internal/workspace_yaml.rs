@@ -72,6 +72,8 @@ struct Item {
     line: usize,
     indent: String,
     exclusion: Exclusion,
+    /// Trailing comment, including its leading whitespace, re-attached when the item is rewritten.
+    comment: String,
 }
 
 enum Block {
@@ -87,16 +89,40 @@ enum Block {
     },
 }
 
-fn strip_comment(value: &str) -> &str {
+/// Splits a YAML scalar from its trailing comment. The comment keeps its leading whitespace, and
+/// is empty if there is none.
+fn split_comment(value: &str) -> (&str, &str) {
     let value = value.trim();
-    if value.starts_with('\'') || value.starts_with('"') {
-        return value;
+    let end = match value.chars().next() {
+        Some(quote @ ('\'' | '"')) => {
+            closing_quote(value, quote).map_or(value.len(), |idx| idx + 1)
+        }
+        Some('#') => 0,
+        _ => value.find(" #").unwrap_or(value.len()),
+    };
+    let (scalar, rest) = value.split_at(end);
+    if rest.trim_start().starts_with('#') {
+        (scalar.trim_end(), rest)
+    } else {
+        (value, "")
     }
-    match value.find(" #") {
-        Some(idx) => value[..idx].trim_end(),
-        None if value.starts_with('#') => "",
-        None => value,
+}
+
+/// Byte index of the quote that closes the quoted scalar at the start of `value`.
+fn closing_quote(value: &str, quote: char) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let quote = quote as u8;
+    let mut idx = 1;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            // `''` escapes a single quote; a backslash escapes the next character in double quotes.
+            b'\'' if quote == b'\'' && bytes.get(idx + 1) == Some(&b'\'') => idx += 2,
+            b'\\' if quote == b'"' => idx += 2,
+            b if b == quote => return Some(idx),
+            _ => idx += 1,
+        }
     }
+    None
 }
 
 fn unquote(value: &str) -> String {
@@ -123,7 +149,7 @@ fn find_block(lines: &[String]) -> Block {
     };
 
     let after_colon = &lines[line][lines[line].find(':').unwrap() + 1..];
-    let inline = strip_comment(after_colon);
+    let (inline, _) = split_comment(after_colon);
     if !inline.is_empty() {
         let entries = serde_yml::from_str::<Vec<String>>(inline).unwrap_or_default();
         return Block::Inline { line, entries };
@@ -142,10 +168,12 @@ fn find_block(lines: &[String]) -> Block {
         if !(value.is_empty() || value.starts_with(' ')) {
             break;
         }
+        let (scalar, comment) = split_comment(value);
         items.push(Item {
             line: idx,
             indent: text[..text.len() - trimmed.len()].to_string(),
-            exclusion: Exclusion::parse(&unquote(strip_comment(value))),
+            exclusion: Exclusion::parse(&unquote(scalar)),
+            comment: comment.to_string(),
         });
     }
 
@@ -225,10 +253,12 @@ pub(crate) fn add_release_age_exclusions(content: &str, additions: &PinnedVersio
                             Exclusion::Versions {
                                 versions: current, ..
                             },
+                        comment,
                     }) => {
                         let mut merged = current.clone();
                         merged.extend(versions.iter().cloned());
-                        lines[*line] = format!("{}- {}", indent, render_versions(name, &merged));
+                        lines[*line] =
+                            format!("{}- {}{}", indent, render_versions(name, &merged), comment);
                     }
                     _ => new_entries.push(render_versions(
                         name,
@@ -314,7 +344,12 @@ pub(crate) fn remove_release_age_exclusions(content: &str, removals: &PinnedVers
         if kept.is_empty() {
             removed_lines.insert(item.line);
         } else {
-            lines[item.line] = format!("{}- {}", item.indent, render_versions(name, &kept));
+            lines[item.line] = format!(
+                "{}- {}{}",
+                item.indent,
+                render_versions(name, &kept),
+                item.comment
+            );
         }
     }
 
@@ -395,7 +430,7 @@ mod tests {
         );
         assert_eq!(
             result,
-            "minimumReleaseAgeExclude:\n    - left-pad\n    - 'next@15.5.26 || 15.5.27'\n    - 'react@19.3.1'\npackages:\n  - apps/*\n"
+            "minimumReleaseAgeExclude:\n    - left-pad\n    - 'next@15.5.26 || 15.5.27' # pinned by hand\n    - 'react@19.3.1'\npackages:\n  - apps/*\n"
         );
     }
 
@@ -428,14 +463,14 @@ mod tests {
 
     #[test]
     fn removes_versions_and_drops_empty_entries() {
-        let content = "minimumReleaseAgeExclude:\n  - left-pad\n  - 'next@15.5.26 || 15.5.27'\n  - '@next/env@15.5.27'\npackages:\n  - apps/*\n";
+        let content = "minimumReleaseAgeExclude:\n  - left-pad\n  - 'next@15.5.26 || 15.5.27'  # security fix\n  - '@next/env@15.5.27'\npackages:\n  - apps/*\n";
         let result = remove_release_age_exclusions(
             content,
             &pins(&[("next", &["15.5.26"]), ("@next/env", &["15.5.27"])]),
         );
         assert_eq!(
             result,
-            "minimumReleaseAgeExclude:\n  - left-pad\n  - 'next@15.5.27'\npackages:\n  - apps/*\n"
+            "minimumReleaseAgeExclude:\n  - left-pad\n  - 'next@15.5.27'  # security fix\npackages:\n  - apps/*\n"
         );
     }
 
@@ -444,6 +479,22 @@ mod tests {
         let content = "minimumReleaseAge: 1440\nminimumReleaseAgeExclude:\n  - 'next@15.5.27'\npackages:\n  - apps/*\n";
         let result = remove_release_age_exclusions(content, &pins(&[("next", &["15.5.27"])]));
         assert_eq!(result, "minimumReleaseAge: 1440\npackages:\n  - apps/*\n");
+    }
+
+    #[test]
+    fn splits_comments() {
+        assert_eq!(split_comment("next # why"), ("next", " # why"));
+        assert_eq!(
+            split_comment("'a#b@1.0.0'  # why"),
+            ("'a#b@1.0.0'", "  # why")
+        );
+        assert_eq!(
+            split_comment("'it''s@1.0.0' # why"),
+            ("'it''s@1.0.0'", " # why")
+        );
+        assert_eq!(split_comment("\"a\\\"b\" # why"), ("\"a\\\"b\"", " # why"));
+        assert_eq!(split_comment("next"), ("next", ""));
+        assert_eq!(split_comment("# only a comment"), ("", "# only a comment"));
     }
 
     #[test]

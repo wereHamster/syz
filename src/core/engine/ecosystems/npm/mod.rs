@@ -999,7 +999,18 @@ impl NpmPatcher {
                 };
 
                 if is_used {
-                    let req_prefix = if fix_version.major == 0 { "~" } else { "^" };
+                    // A range would let pnpm pick (and exclude) an even newer immature version
+                    // than the one chosen, so those are pinned exactly.
+                    let is_immature = seeds
+                        .get(module)
+                        .is_some_and(|s| s.contains(&fix_version.to_string()));
+                    let req_prefix = if is_immature {
+                        ""
+                    } else if fix_version.major == 0 {
+                        "~"
+                    } else {
+                        "^"
+                    };
                     new_overrides.insert(
                         serde_yml::Value::String(format!("{}@{}", module, fix_version.major)),
                         serde_yml::Value::String(format!("{}{}", req_prefix, fix_version)),
@@ -1110,8 +1121,10 @@ impl NpmPatcher {
 /// pnpm's default `minimumReleaseAge` (in minutes) since v11.
 const PNPM_DEFAULT_MINIMUM_RELEASE_AGE_MINUTES: i64 = 1440;
 
-/// How many times pnpm is re-run with additional release age exclusions before giving up.
-const MAX_RELEASE_AGE_ROUNDS: usize = 4;
+/// Upper bound on pnpm runs while collecting release age exclusions. A round only follows one
+/// that added new exclusions, so the loop ends on its own; this only guards against pnpm
+/// misbehaving, and is high enough for dependency chains that surface one version per round.
+const MAX_RELEASE_AGE_ROUNDS: usize = 25;
 
 /// pnpm reports immature picks during resolution as `ERR_PNPM_NO_MATURE_MATCHING_VERSION` and
 /// immature lockfile entries as `ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION`.
