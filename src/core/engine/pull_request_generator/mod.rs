@@ -2,7 +2,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::core::engine::{
-    advisories::SecurityUpdateSummary, repository::ProjectRepositorySnapshot,
+    advisories::{ReleaseAgeExceptionKind, SecurityUpdateSummary},
+    repository::ProjectRepositorySnapshot,
     TransitiveUpdateSummary, UpdateTarget,
 };
 
@@ -156,13 +157,60 @@ impl AuditPullRequestGenerator for DefaultAuditPullRequestGenerator {
     async fn generate_pull_request_body(&self, summary: &SecurityUpdateSummary) -> Result<String> {
         let mut pr_body = "This pull request automatically updates dependencies to resolve known security vulnerabilities.\n\n".to_string();
 
+        let now = chrono::Utc::now();
+
+        if !summary.release_age_exceptions.is_empty() {
+            let min_age = summary
+                .minimum_release_age
+                .unwrap_or(chrono::Duration::zero());
+            let location = summary
+                .release_age_exceptions_location
+                .as_deref()
+                .unwrap_or("the package manager configuration");
+
+            pr_body.push_str(&format!(
+                "> [!IMPORTANT]\n> The following versions have not met the `minimumReleaseAge` requirement ({}) yet, but are needed to fix the vulnerabilities below. They were added to {} and should be reviewed before merging. The exceptions are removed automatically once the versions have matured.\n\n",
+                format_duration(min_age),
+                location
+            ));
+            pr_body.push_str("| Package | Version | Published | Matures | Reason |\n");
+            pr_body.push_str("| --- | --- | --- | --- | --- |\n");
+
+            let mut exceptions = summary.release_age_exceptions.clone();
+            exceptions.sort_by(|a, b| {
+                (a.kind != ReleaseAgeExceptionKind::Fix, &a.name, &a.version).cmp(&(
+                    b.kind != ReleaseAgeExceptionKind::Fix,
+                    &b.name,
+                    &b.version,
+                ))
+            });
+
+            for exception in exceptions {
+                let (published, matures) = match exception.published_at {
+                    Some(published_at) => (
+                        format!("{} UTC", published_at.format("%Y-%m-%d %H:%M")),
+                        format_availability(published_at + min_age, now),
+                    ),
+                    None => ("unknown".to_string(), "unknown".to_string()),
+                };
+                let reason = match exception.kind {
+                    ReleaseAgeExceptionKind::Fix => "security fix",
+                    ReleaseAgeExceptionKind::Dependency => "required by a fix",
+                };
+                pr_body.push_str(&format!(
+                    "| `{}` | `{}` | {} | {} | {} |\n",
+                    exception.name, exception.version, published, matures, reason
+                ));
+            }
+            pr_body.push_str("\n---\n\n");
+        }
+
         if !summary.blocked_by_age.is_empty() {
             pr_body.push_str("> [!WARNING]\n> The following vulnerable packages have fixes available, but they have not met the `minimumReleaseAge` requirement yet and were skipped:\n>\n");
 
             let mut sorted_blocked: Vec<String> = summary.blocked_by_age.keys().cloned().collect();
             sorted_blocked.sort();
 
-            let now = chrono::Utc::now();
             let min_age = summary
                 .minimum_release_age
                 .unwrap_or(chrono::Duration::zero());
@@ -170,19 +218,11 @@ impl AuditPullRequestGenerator for DefaultAuditPullRequestGenerator {
             for module in sorted_blocked {
                 let blocked_versions = summary.blocked_by_age.get(&module).unwrap();
                 for (ver, publish_time) in blocked_versions {
-                    let available_time = *publish_time + min_age;
-                    let remaining = available_time.signed_duration_since(now).num_seconds();
-                    let days = (remaining as f64 / 86400.0).ceil() as i64;
-
-                    let availability = if days > 1 {
-                        format!("in {} days", days)
-                    } else {
-                        format!("{} UTC", available_time.format("%A at %H:%M"))
-                    };
-
                     pr_body.push_str(&format!(
                         "> - `{}` (`{}`): available {}\n",
-                        module, ver, availability
+                        module,
+                        ver,
+                        format_availability(*publish_time + min_age, now)
                     ));
                 }
             }
@@ -267,6 +307,33 @@ impl AuditPullRequestGenerator for DefaultAuditPullRequestGenerator {
 
         Ok(pr_body)
     }
+}
+
+/// When something that becomes available at `available_time` can be used, relative to `now`.
+fn format_availability(
+    available_time: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let remaining = available_time.signed_duration_since(now).num_seconds();
+    let days = (remaining as f64 / 86400.0).ceil() as i64;
+
+    if days > 1 {
+        format!("in {} days", days)
+    } else {
+        format!("{} UTC", available_time.format("%A at %H:%M"))
+    }
+}
+
+fn format_duration(duration: chrono::Duration) -> String {
+    let minutes = duration.num_minutes();
+    let (value, unit) = if minutes % 1440 == 0 {
+        (minutes / 1440, "day")
+    } else if minutes % 60 == 0 {
+        (minutes / 60, "hour")
+    } else {
+        (minutes, "minute")
+    };
+    format!("{} {}{}", value, unit, if value == 1 { "" } else { "s" })
 }
 
 pub struct DefaultPullRequestGenerator {
@@ -371,5 +438,65 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
         }
 
         Ok(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::engine::advisories::ReleaseAgeException;
+
+    #[tokio::test]
+    async fn audit_body_lists_release_age_exceptions() {
+        let published_at = chrono::Utc::now() - chrono::Duration::hours(2);
+        let summary = SecurityUpdateSummary {
+            resolved_advisories: std::collections::HashMap::new(),
+            blocked_by_age: std::collections::HashMap::new(),
+            unfixable_vulnerabilities: std::collections::HashMap::new(),
+            minimum_release_age: Some(chrono::Duration::days(3)),
+            release_age_exceptions: vec![
+                ReleaseAgeException {
+                    name: "@next/env".to_string(),
+                    version: "15.5.27".to_string(),
+                    published_at: Some(published_at),
+                    kind: ReleaseAgeExceptionKind::Dependency,
+                },
+                ReleaseAgeException {
+                    name: "next".to_string(),
+                    version: "15.5.27".to_string(),
+                    published_at: None,
+                    kind: ReleaseAgeExceptionKind::Fix,
+                },
+            ],
+            release_age_exceptions_location: Some(
+                "`minimumReleaseAgeExclude` in `pnpm-workspace.yaml`".to_string(),
+            ),
+        };
+
+        let body = DefaultAuditPullRequestGenerator
+            .generate_pull_request_body(&summary)
+            .await
+            .unwrap();
+
+        assert!(body.contains("> [!IMPORTANT]"));
+        assert!(body.contains("requirement (3 days)"));
+        assert!(body.contains("`minimumReleaseAgeExclude` in `pnpm-workspace.yaml`"));
+
+        let next = body.find("| `next` | `15.5.27` | unknown | unknown | security fix |");
+        let env = body.find(&format!(
+            "| `@next/env` | `15.5.27` | {} UTC | in 3 days | required by a fix |",
+            published_at.format("%Y-%m-%d %H:%M")
+        ));
+        assert!(next.is_some() && env.is_some(), "{}", body);
+        // Fixes come before the versions they pull in.
+        assert!(next < env);
+    }
+
+    #[test]
+    fn formats_durations() {
+        assert_eq!(format_duration(chrono::Duration::minutes(1440)), "1 day");
+        assert_eq!(format_duration(chrono::Duration::minutes(4320)), "3 days");
+        assert_eq!(format_duration(chrono::Duration::minutes(120)), "2 hours");
+        assert_eq!(format_duration(chrono::Duration::minutes(90)), "90 minutes");
     }
 }

@@ -90,10 +90,13 @@ fn release_line(version: &Version) -> (u64, u64) {
 }
 
 /// Finds, per release line, the newest non-vulnerable release that satisfies the age policy
-/// (`resolved`) and the newest one that does not (`blocked`).
+/// (`resolved`). For lines without such a release, it reports the oldest non-vulnerable one that
+/// does not (`blocked`): it is the smallest step away from the installed version and the first to
+/// mature.
 ///
 /// Only lines that contain at least one of the `installed` versions are considered: a fix on
-/// any other line would be a downgrade or an unrequested major bump.
+/// any other line would be a downgrade or an unrequested major bump. Within a line, releases
+/// older than the newest installed version are ignored for the same reason.
 pub fn resolve_mature_versions(
     vulnerable_constraints: &[VersionReq],
     installed: &[Version],
@@ -103,12 +106,20 @@ pub fn resolve_mature_versions(
     let now = Utc::now();
     let min_age = minimum_release_age.unwrap_or(Duration::zero());
 
-    let installed_lines: std::collections::HashSet<(u64, u64)> =
-        installed.iter().map(release_line).collect();
+    let mut newest_installed: std::collections::HashMap<(u64, u64), &Version> =
+        std::collections::HashMap::new();
+    for version in installed {
+        let newest = newest_installed
+            .entry(release_line(version))
+            .or_insert(version);
+        if version > *newest {
+            *newest = version;
+        }
+    }
 
     let mut best_matches: std::collections::HashMap<(u64, u64), Version> =
         std::collections::HashMap::new();
-    let mut newest_blocked: std::collections::HashMap<(u64, u64), (Version, DateTime<Utc>)> =
+    let mut oldest_blocked: std::collections::HashMap<(u64, u64), (Version, DateTime<Utc>)> =
         std::collections::HashMap::new();
 
     for release in releases {
@@ -120,8 +131,9 @@ pub fn resolve_mature_versions(
         }
 
         let key = release_line(&release.version);
-        if !installed_lines.contains(&key) {
-            continue;
+        match newest_installed.get(&key) {
+            Some(newest) if release.version >= **newest => {}
+            _ => continue,
         }
 
         let is_mature = min_age.is_zero() || (now - release.published_at) >= min_age;
@@ -133,19 +145,23 @@ pub fn resolve_mature_versions(
             {
                 best_matches.insert(key, release.version.clone());
             }
-        } else if newest_blocked
+        } else if oldest_blocked
             .get(&key)
-            .is_none_or(|(blocked, _)| release.version > *blocked)
+            .is_none_or(|(blocked, _)| release.version < *blocked)
         {
-            newest_blocked.insert(key, (release.version.clone(), release.published_at));
+            oldest_blocked.insert(key, (release.version.clone(), release.published_at));
         }
     }
 
+    let mut blocked: Vec<(Version, DateTime<Utc>)> = oldest_blocked
+        .into_iter()
+        .filter(|(key, _)| !best_matches.contains_key(key))
+        .map(|(_, blocked)| blocked)
+        .collect();
+    blocked.sort_by(|a, b| a.0.cmp(&b.0));
+
     let mut resolved: Vec<Version> = best_matches.into_values().collect();
     resolved.sort();
-
-    let mut blocked: Vec<(Version, DateTime<Utc>)> = newest_blocked.into_values().collect();
-    blocked.sort_by(|a, b| a.0.cmp(&b.0));
 
     MatureResolution { resolved, blocked }
 }
@@ -226,8 +242,8 @@ mod tests {
         assert_eq!(result.resolved[0].to_string(), "1.2.2");
         assert_eq!(result.resolved[1].to_string(), "2.0.0");
 
-        assert_eq!(result.blocked.len(), 1);
-        assert_eq!(result.blocked[0].0.to_string(), "1.3.0");
+        // 1.3.0 is immature, but the 1.x line already has a mature fix.
+        assert!(result.blocked.is_empty());
     }
 
     #[test]
@@ -287,7 +303,52 @@ mod tests {
         assert_eq!(result.resolved[0].to_string(), "0.2.2");
         assert_eq!(result.resolved[1].to_string(), "0.3.0");
 
+        assert!(result.blocked.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_mature_versions_blocked_picks_oldest_immature() {
+        let reqs = vec![VersionReq::parse("< 1.2.2").unwrap()];
+
+        let releases = vec![
+            make_release("1.2.1", 30), // Vulnerable
+            make_release("1.2.2", 3),  // Safe & Immature
+            make_release("1.2.3", 1),  // Safe & Immature, newer
+        ];
+
+        let installed = vec![Version::parse("1.2.1").unwrap()];
+        let result = resolve_mature_versions(
+            &reqs,
+            &installed,
+            &releases,
+            Some(Duration::try_days(7).unwrap()),
+        );
+
+        assert!(result.resolved.is_empty());
         assert_eq!(result.blocked.len(), 1);
-        assert_eq!(result.blocked[0].0.to_string(), "0.2.3");
+        assert_eq!(result.blocked[0].0.to_string(), "1.2.2");
+    }
+
+    #[test]
+    fn test_resolve_mature_versions_never_downgrades() {
+        let reqs = vec![VersionReq::parse(">=1.5.0, <1.5.1").unwrap()];
+
+        let releases = vec![
+            make_release("1.4.0", 60), // Safe & Mature, but older than the installed version
+            make_release("1.5.0", 30), // Vulnerable
+            make_release("1.5.1", 2),  // Safe & Immature
+        ];
+
+        let installed = vec![Version::parse("1.5.0").unwrap()];
+        let result = resolve_mature_versions(
+            &reqs,
+            &installed,
+            &releases,
+            Some(Duration::try_days(7).unwrap()),
+        );
+
+        assert!(result.resolved.is_empty());
+        assert_eq!(result.blocked.len(), 1);
+        assert_eq!(result.blocked[0].0.to_string(), "1.5.1");
     }
 }

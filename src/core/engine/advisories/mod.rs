@@ -31,12 +31,34 @@ pub struct ResolvedAdvisoryBump {
     pub advisories: Vec<serde_json::Value>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseAgeExceptionKind {
+    /// The version that fixes a vulnerability.
+    Fix,
+    /// A version pulled in by a fix, e.g. a sibling package released in lockstep.
+    Dependency,
+}
+
+/// A package version installed before it satisfied the minimum release age, because a security
+/// fix required it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReleaseAgeException {
+    pub name: String,
+    pub version: String,
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub kind: ReleaseAgeExceptionKind,
+}
+
 pub struct SecurityUpdateSummary {
     pub resolved_advisories: std::collections::HashMap<String, ResolvedAdvisoryBump>,
     pub blocked_by_age:
         std::collections::HashMap<String, Vec<(semver::Version, chrono::DateTime<chrono::Utc>)>>,
     pub unfixable_vulnerabilities: std::collections::HashMap<String, Vec<serde_json::Value>>,
     pub minimum_release_age: Option<chrono::Duration>,
+    /// Versions that bypass `minimum_release_age`, and where the exception is recorded (e.g.
+    /// `minimumReleaseAgeExclude` in `pnpm-workspace.yaml`).
+    pub release_age_exceptions: Vec<ReleaseAgeException>,
+    pub release_age_exceptions_location: Option<String>,
 }
 
 pub struct SecurityUpdateResult {
