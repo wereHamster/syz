@@ -999,8 +999,10 @@ impl NpmPatcher {
                 };
 
                 if is_used {
-                    // A range would let pnpm pick (and exclude) an even newer immature version
-                    // than the one chosen, so those are pinned exactly.
+                    // Fixes that haven't met minimumReleaseAge are pinned exactly. With the policy
+                    // active a range is harmless (pnpm only picks the excluded version), but the
+                    // fallback in `run_with_release_age_exceptions` resolves without the policy,
+                    // where a range would pick (and then exclude) the newest version instead.
                     let is_immature = seeds
                         .get(module)
                         .is_some_and(|s| s.contains(&fix_version.to_string()));
