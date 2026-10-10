@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::core::clients;
 use crate::core::engine::advisories::{ReleaseAgeException, ReleaseAgeExceptionKind};
-use crate::core::engine::ecosystems::npm::internal::discover_project_dependencies::WorkspaceConfig;
+use crate::core::engine::ecosystems::npm::internal::discover_project_dependencies::effective_minimum_release_age;
 use crate::core::engine::ecosystems::npm::internal::workspace_yaml::{self, PinnedVersions};
 use crate::core::engine::ecosystems::{Registry, Scanner};
 use crate::core::engine::repository::ProjectRepositorySnapshot;
@@ -1120,9 +1120,6 @@ impl NpmPatcher {
     }
 }
 
-/// pnpm's default `minimumReleaseAge` (in minutes) since v11.
-const PNPM_DEFAULT_MINIMUM_RELEASE_AGE_MINUTES: i64 = 1440;
-
 /// Upper bound on pnpm runs while collecting release age exclusions. A round only follows one
 /// that added new exclusions, so the loop ends on its own; this only guards against pnpm
 /// misbehaving, and is high enough for dependency chains that surface one version per round.
@@ -1134,14 +1131,6 @@ const RELEASE_AGE_ERRORS: [&str; 2] = [
     "ERR_PNPM_NO_MATURE_MATCHING_VERSION",
     "ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION",
 ];
-
-fn effective_minimum_release_age(workspace: Option<&str>) -> chrono::Duration {
-    let minutes = workspace
-        .and_then(|w| serde_yml::from_str::<WorkspaceConfig>(w).ok())
-        .and_then(|config| config.minimum_release_age)
-        .unwrap_or(PNPM_DEFAULT_MINIMUM_RELEASE_AGE_MINUTES);
-    chrono::Duration::minutes(minutes)
-}
 
 /// Memoized npm registry publish times.
 struct PublishTimes {
