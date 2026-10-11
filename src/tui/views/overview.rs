@@ -1,4 +1,4 @@
-use crate::core::database::{Bump, BumpDep, Project};
+use crate::core::database::{Bump, BumpDep, Project, Sweep, SweepKind};
 use crate::core::message::Payload;
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crossterm::event::KeyCode;
@@ -7,7 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Cell, Row, Table, TableState},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct OverviewView {
     pub selected_index: usize,
@@ -157,6 +157,14 @@ impl View for OverviewView {
             }
         }
 
+        let sweeps: HashSet<(String, SweepKind)> = backend
+            .db
+            .iter()
+            .filter(|(path, _)| path.starts_with("sweep/"))
+            .filter_map(|(_, value)| serde_json::from_value::<Sweep>(value.clone()).ok())
+            .map(|sweep| (sweep.project_id, sweep.kind))
+            .collect();
+
         let max_platform_len = projects
             .iter()
             .map(|p| p.platform.as_str().len())
@@ -220,9 +228,28 @@ impl View for OverviewView {
 
                 let bumps_line = Line::from(bumps_spans);
 
+                let sweep_span = |letter: &'static str, kind: SweepKind| {
+                    if sweeps.contains(&(p.id.clone(), kind)) {
+                        Span::styled(
+                            letter,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::styled("-", Style::default().fg(Color::DarkGray))
+                    }
+                };
+                let sweeps_line = Line::from(vec![
+                    sweep_span("A", SweepKind::Audit),
+                    Span::styled(" / ", Style::default().fg(Color::DarkGray)),
+                    sweep_span("T", SweepKind::Transitive),
+                ]);
+
                 Row::new(vec![
                     Cell::from(p.platform.as_str()),
                     Cell::from(p.repository.clone()),
+                    Cell::from(sweeps_line),
                     Cell::from(bumps_line),
                 ])
                 .style(style)
@@ -234,11 +261,12 @@ impl View for OverviewView {
             [
                 Constraint::Length(platform_width as u16),
                 Constraint::Min(0),
+                Constraint::Length(9),
                 Constraint::Length(25),
             ],
         )
         .header(
-            Row::new(vec!["Platform", "Repository", "Bumps"])
+            Row::new(vec!["Platform", "Repository", "Sweeps", "Bumps"])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         );
 
