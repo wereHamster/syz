@@ -312,15 +312,7 @@ impl Payload {
 
             Payload::UpdateSweeps { project_id } => {
                 let sweeps = app.store().list_sweeps().await?;
-                for sweep in sweeps.into_iter().filter(|s| s.project_id == project_id) {
-                    let payload = match sweep.kind {
-                        SweepKind::Audit => Payload::UpdateVulnerableDependencies {
-                            project_id: project_id.clone(),
-                        },
-                        SweepKind::Transitive => Payload::UpdateTransitiveDependencies {
-                            project_id: project_id.clone(),
-                        },
-                    };
+                for payload in sweep_updates(sweeps, &project_id) {
                     app.handle()
                         .send(crate::core::database::pk(), payload)
                         .await
@@ -444,5 +436,74 @@ impl Payload {
                 Ok(())
             }
         }
+    }
+}
+
+/// The messages that re-run the given project's sweeps which have an open pull request.
+fn sweep_updates(sweeps: Vec<Sweep>, project_id: &str) -> Vec<Payload> {
+    sweeps
+        .into_iter()
+        .filter(|sweep| sweep.project_id == project_id)
+        .map(|sweep| match sweep.kind {
+            SweepKind::Audit => Payload::UpdateVulnerableDependencies {
+                project_id: project_id.to_string(),
+            },
+            SweepKind::Transitive => Payload::UpdateTransitiveDependencies {
+                project_id: project_id.to_string(),
+            },
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sweep(project_id: &str, kind: SweepKind) -> Sweep {
+        Sweep {
+            project_id: project_id.to_string(),
+            kind,
+            url: format!("https://github.com/owner/{}/pull/1", project_id),
+        }
+    }
+
+    #[test]
+    fn updates_only_the_kinds_with_an_open_pull_request() {
+        let sweeps = vec![sweep("a", SweepKind::Audit)];
+        let updates = sweep_updates(sweeps, "a");
+        assert!(matches!(
+            updates.as_slice(),
+            [Payload::UpdateVulnerableDependencies { project_id }] if project_id == "a"
+        ));
+
+        let sweeps = vec![sweep("a", SweepKind::Transitive)];
+        let updates = sweep_updates(sweeps, "a");
+        assert!(matches!(
+            updates.as_slice(),
+            [Payload::UpdateTransitiveDependencies { project_id }] if project_id == "a"
+        ));
+    }
+
+    #[test]
+    fn updates_both_kinds_when_both_are_open() {
+        let sweeps = vec![
+            sweep("a", SweepKind::Audit),
+            sweep("a", SweepKind::Transitive),
+        ];
+        assert_eq!(sweep_updates(sweeps, "a").len(), 2);
+    }
+
+    #[test]
+    fn ignores_the_sweeps_of_other_projects() {
+        let sweeps = vec![
+            sweep("b", SweepKind::Audit),
+            sweep("b", SweepKind::Transitive),
+        ];
+        assert!(sweep_updates(sweeps, "a").is_empty());
+    }
+
+    #[test]
+    fn updates_nothing_without_open_sweeps() {
+        assert!(sweep_updates(Vec::new(), "a").is_empty());
     }
 }
