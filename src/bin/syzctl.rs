@@ -10,7 +10,7 @@ struct Args {
     #[arg(short, long, env = "SYZD_URL", default_value = "http://127.0.0.1:7790")]
     url: String,
 
-    /// Auth token [default: contents of /var/lib/syz/data/auth-token]
+    /// Auth token [default: contents of /var/lib/syz/auth-token]
     #[arg(short, long, env = "SYZD_AUTH_TOKEN")]
     token: Option<String>,
 

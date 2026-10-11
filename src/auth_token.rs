@@ -3,17 +3,20 @@
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use tempfile::NamedTempFile;
 
-/// Where `syzd` keeps the token, relative to its working directory.
-pub const SERVER_PATH: &str = "data/auth-token";
+/// Where `syzd` keeps the token, given its data directory.
+pub fn server_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("auth-token")
+}
 
 /// Where `syzctl` looks for the token if none was given explicitly. This is
-/// `SERVER_PATH` for a `syzd` running with `/var/lib/syz` as working directory.
-pub const CLIENT_PATH: &str = "/var/lib/syz/data/auth-token";
+/// `server_path` for a `syzd` whose data directory is the systemd state
+/// directory `/var/lib/syz`.
+pub const CLIENT_PATH: &str = "/var/lib/syz/auth-token";
 
 /// Read the token from `path`.
 pub fn read(path: &Path) -> Result<String> {

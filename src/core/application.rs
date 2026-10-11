@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tracing::Instrument;
@@ -46,11 +47,11 @@ pub struct Application {
 const CONCURRENT_AUDITS: usize = 4;
 
 impl Application {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(data_dir: &Path) -> Result<Self> {
         let (mailbox_tx, mailbox_rx) = mpsc::channel(100);
         let (events, _) = broadcast::channel(1000);
 
-        let database = Database::open().await?;
+        let database = Database::open(data_dir).await?;
         let store = Store::new(database);
 
         let http_agent = HttpAgent::new();

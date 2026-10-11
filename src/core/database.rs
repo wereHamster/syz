@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -13,10 +15,12 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn open() -> Result<Self> {
-        std::fs::create_dir_all("data").context("Failed to create data directory")?;
+    /// Open the database in `data_dir`, creating the directory if necessary.
+    pub async fn open(data_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(data_dir)
+            .with_context(|| format!("Failed to create data directory {}", data_dir.display()))?;
 
-        let db = Builder::new_local("data/turso.db")
+        let db = Builder::new_local(&data_dir.join("turso.db").to_string_lossy())
             .build()
             .await
             .context("Failed to build turso database")?;
