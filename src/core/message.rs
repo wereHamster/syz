@@ -82,6 +82,13 @@ pub enum Payload {
         pull_request_url: Option<String>,
     },
 
+    /// A sweep's pull request was closed or merged. Forget it, unless the sweep has
+    /// meanwhile moved on to a different pull request.
+    #[serde(skip)]
+    SweepPullRequestClosed {
+        pull_request_url: String,
+    },
+
     #[serde(skip)]
     PersistBumpResult {
         bump_id: String,
@@ -131,6 +138,7 @@ impl std::fmt::Display for Payload {
                 write!(f, "UpdateVulnerableDependencies")
             }
             Payload::PersistSweep { .. } => write!(f, "PersistSweep"),
+            Payload::SweepPullRequestClosed { .. } => write!(f, "SweepPullRequestClosed"),
             Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
             Payload::ClearBumpUrl { .. } => write!(f, "ClearBumpUrl"),
             Payload::RemoveBump { .. } => write!(f, "RemoveBump"),
@@ -310,6 +318,22 @@ impl Payload {
 
                 app.handle()
                     .broadcast(crate::core::event::Event::Commit { ops: vec![op] })?;
+
+                Ok(())
+            }
+
+            Payload::SweepPullRequestClosed { pull_request_url } => {
+                // Looked up here rather than by the sender, so that it is ordered after any
+                // PersistSweep that is already queued.
+                if let Some(sweep) = app.store().sweep_by_url(&pull_request_url).await? {
+                    let op = app
+                        .store()
+                        .clear_sweep(&sweep.project_id, sweep.kind)
+                        .await?;
+
+                    app.handle()
+                        .broadcast(crate::core::event::Event::Commit { ops: vec![op] })?;
+                }
 
                 Ok(())
             }

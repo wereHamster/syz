@@ -417,17 +417,34 @@ impl Store {
     ) -> Result<Op> {
         let conn = self.database.conn()?;
 
-        conn.execute(
-            "DELETE FROM sweep WHERE project_id = ?1 AND kind = ?2",
-            params![project_id, kind.as_str()],
-        )
-        .await?;
-        conn.execute(
-            "INSERT INTO sweep (project_id, kind, url) VALUES (?, ?, ?)",
-            params![project_id, kind.as_str(), url.as_str()],
-        )
-        .await
-        .context("Failed to insert sweep")?;
+        // Replace the row atomically, so that a failing insert doesn't lose the previous one.
+        conn.execute("BEGIN TRANSACTION", params![]).await?;
+
+        let result: Result<()> = async {
+            conn.execute(
+                "DELETE FROM sweep WHERE project_id = ?1 AND kind = ?2",
+                params![project_id, kind.as_str()],
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO sweep (project_id, kind, url) VALUES (?, ?, ?)",
+                params![project_id, kind.as_str(), url.as_str()],
+            )
+            .await
+            .context("Failed to insert sweep")?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", params![]).await?;
+            }
+            Err(e) => {
+                conn.execute("ROLLBACK", params![]).await?;
+                return Err(e);
+            }
+        }
 
         Ok(Op::Upsert {
             path: Sweep::path(project_id, kind),

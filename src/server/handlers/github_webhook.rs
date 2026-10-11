@@ -8,7 +8,11 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use super::AppState;
-use crate::core::{database::pk, message::Payload, platform::Platform};
+use crate::core::{
+    database::{pk, SweepKind},
+    message::Payload,
+    platform::Platform,
+};
 
 pub async fn post(
     State(state): State<AppState>,
@@ -205,23 +209,18 @@ async fn handle_pull_request(
         .unwrap_or(false);
 
     // Audit and transitive pull requests are dropped whether they were merged or just
-    // closed; the next run opens a new one if there is still something to do.
-    let sweep = state
-        .handle
-        .store()
-        .sweep_by_url(pr_url)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to look up sweep by url: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to look up sweep".to_string(),
-            )
-        })?;
+    // closed; the next run opens a new one if there is still something to do. Whether the
+    // closed pull request is the one the sweep currently tracks is decided by the
+    // application, so that it is ordered with the sweep updates that are already queued.
+    let is_sweep = payload
+        .pointer("/pull_request/head/ref")
+        .and_then(|v| v.as_str())
+        .and_then(SweepKind::from_branch_name)
+        .is_some();
 
-    if let Some(sweep) = sweep {
+    if is_sweep {
         tracing::info!(
-            "Pull request {} closed (merged: {}), scheduling PersistSweep",
+            "Pull request {} closed (merged: {}), scheduling SweepPullRequestClosed",
             pr_url,
             merged
         );
@@ -229,18 +228,16 @@ async fn handle_pull_request(
             .handle
             .send(
                 pk(),
-                Payload::PersistSweep {
-                    project_id: sweep.project_id,
-                    kind: sweep.kind,
-                    pull_request_url: None,
+                Payload::SweepPullRequestClosed {
+                    pull_request_url: pr_url.to_string(),
                 },
             )
             .await
             .map_err(|e| {
-                tracing::error!("Failed to send PersistSweep message: {}", e);
+                tracing::error!("Failed to send SweepPullRequestClosed message: {}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to schedule PersistSweep".to_string(),
+                    "Failed to schedule SweepPullRequestClosed".to_string(),
                 )
             })?;
 

@@ -120,6 +120,13 @@ impl SweepKind {
         }
     }
 
+    /// The kind of sweep whose pull request is opened from the given branch, if any.
+    pub fn from_branch_name(branch_name: &str) -> Option<Self> {
+        [SweepKind::Audit, SweepKind::Transitive]
+            .into_iter()
+            .find(|kind| kind.branch_name() == branch_name)
+    }
+
     /// The branch that the pull request of this kind is opened from.
     pub fn branch_name(&self) -> &'static str {
         match self {
@@ -158,5 +165,23 @@ impl Sweep {
     /// The path under which clients mirror this record.
     pub fn path(project_id: &str, kind: SweepKind) -> String {
         format!("sweep/{}/{}", project_id, kind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_kind_round_trips_through_its_branch_name() {
+        for kind in [SweepKind::Audit, SweepKind::Transitive] {
+            assert_eq!(SweepKind::from_branch_name(kind.branch_name()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn bump_branches_are_not_sweeps() {
+        assert_eq!(SweepKind::from_branch_name("syz/update-actix-web"), None);
+        assert_eq!(SweepKind::from_branch_name("main"), None);
     }
 }
