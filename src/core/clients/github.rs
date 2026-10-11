@@ -40,11 +40,14 @@ impl InstallationLookup {
     }
 }
 
+/// The lookup result of one owner. Its lock is held while the lookup is in flight.
+type InstallationSlot = Arc<Mutex<Option<InstallationLookup>>>;
+
 #[derive(Clone)]
 pub struct GitHub {
     octocrab: Octocrab,
     public_client: Octocrab,
-    installations: Arc<Mutex<HashMap<String, InstallationLookup>>>,
+    installations: Arc<std::sync::Mutex<HashMap<String, InstallationSlot>>>,
 }
 
 /// A raw GitHub API response: status preserved for classification, headers
@@ -88,36 +91,38 @@ impl GitHub {
         Ok(GitHub {
             octocrab,
             public_client,
-            installations: Arc::new(Mutex::new(HashMap::new())),
+            installations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
     /// Returns the ID of the GitHub App installation for the `owner` account, or `None` when
     /// the app isn't installed for them.
     ///
-    /// Lookups are cached per owner and serialized, so concurrent callers share a request.
-    /// A known installation is trusted for [`INSTALLATION_TTL`], so a removed or replaced one
-    /// is dropped after at most that long. A missing one is looked up again after
-    /// [`INSTALLATION_MISS_RETRY`], so a new installation is found quickly but misses don't
-    /// cost a request each. Failed lookups are not cached.
+    /// Lookups are cached per owner. Concurrent callers for the same owner share one request,
+    /// while different owners are looked up concurrently. A known installation is trusted for
+    /// [`INSTALLATION_TTL`], so a removed or replaced one is dropped after at most that long.
+    /// A missing one is looked up again after [`INSTALLATION_MISS_RETRY`], so a new
+    /// installation is found quickly but misses don't cost a request each. Failed lookups are
+    /// not cached.
     async fn installation_id(&self, owner: &str) -> Result<Option<InstallationId>> {
         let owner = owner.to_lowercase();
-        let mut cache = self.installations.lock().await;
 
-        if let Some(lookup) = cache.get(&owner) {
-            if lookup.is_fresh() {
-                return Ok(lookup.id);
-            }
+        // The map lock is only held to find the owner's slot, never across a request.
+        let slot = {
+            let mut slots = self.installations.lock().unwrap();
+            slots.entry(owner.clone()).or_default().clone()
+        };
+        let mut lookup = slot.lock().await;
+
+        if let Some(lookup) = lookup.as_ref().filter(|lookup| lookup.is_fresh()) {
+            return Ok(lookup.id);
         }
 
         let id = self.fetch_installation_id(&owner).await?;
-        cache.insert(
-            owner,
-            InstallationLookup {
-                id,
-                fetched_at: Instant::now(),
-            },
-        );
+        *lookup = Some(InstallationLookup {
+            id,
+            fetched_at: Instant::now(),
+        });
 
         Ok(id)
     }
