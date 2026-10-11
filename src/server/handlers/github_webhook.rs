@@ -184,6 +184,24 @@ async fn handle_push(
             )
         })?;
 
+    // 2. Sweeps don't depend on the analysis, so update the open ones right away.
+    state
+        .handle
+        .send(
+            pk(),
+            Payload::UpdateSweeps {
+                project_id: project.id.clone(),
+            },
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to send UpdateSweeps message: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to schedule sweep updates".to_string(),
+            )
+        })?;
+
     Ok(StatusCode::OK)
 }
 
