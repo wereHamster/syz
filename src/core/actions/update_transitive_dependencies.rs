@@ -1,4 +1,4 @@
-use super::report_sweep;
+use super::{report_sweep, DefaultBranch};
 use crate::core::application::Application;
 use crate::core::database::SweepKind;
 use anyhow::Result;
@@ -7,14 +7,8 @@ use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 
 pub async fn run(app: &Application, project_id: String) -> Result<()> {
-    let project = app.store().project(&project_id).await?;
+    let repository = app.project_platform_repository(&project_id).await?;
     let patchers = app.patchers();
-
-    let view = app.project_repository_view(&project.id).await?;
-    let default_branch = view.get_default_branch().await?;
-    let base_revision = view.get_revision(&default_branch).await?;
-    let mutator = app.project_repository_mutator(&project.id).await?;
-    let snapshot = view.snapshot(&base_revision);
 
     let pr_generator = app.transitive_pull_request_generator();
     let advisory_resolver = app.advisory_resolver();
@@ -23,6 +17,19 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let span = tracing::Span::current();
 
     tokio::spawn(async move {
+        let DefaultBranch {
+            name: default_branch,
+            revision: base_revision,
+            snapshot,
+            mutator,
+        } = match DefaultBranch::resolve(repository.as_ref()).await {
+            Ok(branch) => branch,
+            Err(e) => {
+                tracing::error!("Failed to resolve the default branch of {}: {:#}", project_id, e);
+                return;
+            }
+        };
+
         let mut all_modifications = Vec::new();
         let mut all_summaries = Vec::new();
 
