@@ -27,8 +27,7 @@ pub enum Payload {
 
     /// Scan the project source code, identify which dependencies it has, check which
     /// dependencies are outdated, and update the local database with the information.
-    /// With `trigger_bumps`, the approved bumps and open sweeps of the project are
-    /// refreshed afterwards.
+    /// With `trigger_bumps`, the approved bumps of the project are processed afterwards.
     AnalyzeProjectDependencies {
         project_id: String,
         trigger_bumps: bool,
@@ -72,6 +71,13 @@ pub enum Payload {
     },
 
     UpdateVulnerableDependencies {
+        project_id: String,
+    },
+
+    /// Re-run every sweep of the project that has an open pull request, so that it follows
+    /// the default branch. Sweeps without one are only run on demand.
+    #[serde(skip)]
+    UpdateSweeps {
         project_id: String,
     },
 
@@ -139,6 +145,7 @@ impl std::fmt::Display for Payload {
             Payload::UpdateVulnerableDependencies { .. } => {
                 write!(f, "UpdateVulnerableDependencies")
             }
+            Payload::UpdateSweeps { .. } => write!(f, "UpdateSweeps"),
             Payload::PersistSweep { .. } => write!(f, "PersistSweep"),
             Payload::SweepPullRequestClosed { .. } => write!(f, "SweepPullRequestClosed"),
             Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
@@ -303,6 +310,26 @@ impl Payload {
                 super::actions::update_vulnerable_dependencies::run(app, project_id).await
             }
 
+            Payload::UpdateSweeps { project_id } => {
+                let sweeps = app.store().list_sweeps().await?;
+                for sweep in sweeps.into_iter().filter(|s| s.project_id == project_id) {
+                    let payload = match sweep.kind {
+                        SweepKind::Audit => Payload::UpdateVulnerableDependencies {
+                            project_id: project_id.clone(),
+                        },
+                        SweepKind::Transitive => Payload::UpdateTransitiveDependencies {
+                            project_id: project_id.clone(),
+                        },
+                    };
+                    app.handle()
+                        .send(crate::core::database::pk(), payload)
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                }
+
+                Ok(())
+            }
+
             Payload::Vacuum => {
                 app.store().vacuum().await?;
                 Ok(())
@@ -405,24 +432,6 @@ impl Payload {
                                 crate::core::database::pk(),
                                 Payload::ProcessBump { bump_id: bump.id },
                             )
-                            .await
-                            .map_err(|e| anyhow::anyhow!(e))?;
-                    }
-
-                    // A sweep with an open pull request has to follow the default branch
-                    // too. Sweeps without one are only run on demand.
-                    let sweeps = app.store().list_sweeps().await?;
-                    for sweep in sweeps.into_iter().filter(|s| s.project_id == project_id) {
-                        let payload = match sweep.kind {
-                            SweepKind::Audit => Payload::UpdateVulnerableDependencies {
-                                project_id: project_id.clone(),
-                            },
-                            SweepKind::Transitive => Payload::UpdateTransitiveDependencies {
-                                project_id: project_id.clone(),
-                            },
-                        };
-                        app.handle()
-                            .send(crate::core::database::pk(), payload)
                             .await
                             .map_err(|e| anyhow::anyhow!(e))?;
                     }
