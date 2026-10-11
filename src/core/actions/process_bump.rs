@@ -1,3 +1,4 @@
+use super::DefaultBranch;
 use crate::core::application::Application;
 use crate::core::engine::ecosystems::Patcher;
 use crate::core::engine::{PackageInfo, RequirementVersion, UpdateTarget};
@@ -42,17 +43,26 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
 
     let handle = app.handle();
     let pr_generator = app.pull_request_generator();
-    let view = app.project_repository_view(&project.id).await?;
-    let default_branch = view.get_default_branch().await?;
-    let base_revision = view.get_revision(&default_branch).await?;
-    let mutator = app.project_repository_mutator(&project.id).await?;
-    let snapshot = view.snapshot(&base_revision);
+    let repository = app.project_platform_repository(&project.id).await?;
     let is_major = bump.major;
     let bump_name = bump.name.clone();
 
     let span = tracing::Span::current();
 
     tokio::spawn(async move {
+        let DefaultBranch {
+            name: default_branch,
+            revision: base_revision,
+            snapshot,
+            mutator,
+        } = match DefaultBranch::resolve(repository.as_ref()).await {
+            Ok(branch) => branch,
+            Err(e) => {
+                tracing::error!("Failed to resolve the default branch for bump {}: {:#}", bump_id, e);
+                return;
+            }
+        };
+
         // 1. Prepare temporary directory
         let temp_dir_result = TempDir::new();
         if let Err(e) = temp_dir_result {
