@@ -29,6 +29,8 @@ in
     };
     users.groups.syz = { };
 
+    systemd.tmpfiles.rules = [ "D! /var/cache/syz 0750 syz syz -" ];
+
     systemd.services.syzd = rec {
       description = "syz dependency tracking server";
 
@@ -37,7 +39,7 @@ in
 
       wantedBy = [ "multi-user.target" ];
 
-      environment.HOME = "/var/lib/syz";
+      environment.HOME = "/var/cache/syz";
 
       serviceConfig = {
         ExecStart = lib.getExe' package "syzd";
@@ -48,7 +50,9 @@ in
         Group = "syz";
         StateDirectory = "syz";
         StateDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/syz";
+        CacheDirectory = "syz";
+        CacheDirectoryMode = "0750";
+        WorkingDirectory = "/var/cache/syz";
       };
     };
   };
