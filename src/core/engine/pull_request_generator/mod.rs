@@ -159,6 +159,31 @@ impl AuditPullRequestGenerator for DefaultAuditPullRequestGenerator {
 
         let now = chrono::Utc::now();
 
+        if !summary.unfixable_vulnerabilities.is_empty() {
+            pr_body.push_str("> [!CAUTION]\n> The following packages are still vulnerable because no safe update could be applied (either no patch exists, or it was blocked by policy, or `pnpm dedupe` couldn't resolve the constraint tree):\n>\n");
+
+            let mut sorted_unresolved: Vec<String> =
+                summary.unfixable_vulnerabilities.keys().cloned().collect();
+            sorted_unresolved.sort();
+
+            for module in sorted_unresolved {
+                let advs = summary.unfixable_vulnerabilities.get(&module).unwrap();
+                let mut unique_titles = std::collections::HashSet::new();
+                for adv in advs {
+                    if let Some(title) = adv.get("title").and_then(|t| t.as_str()) {
+                        unique_titles.insert(title.to_string());
+                    }
+                }
+
+                let mut titles: Vec<String> = unique_titles.into_iter().collect();
+                titles.sort();
+                let titles_str = titles.join(", ");
+
+                pr_body.push_str(&format!("> - `{}`: {}\n", module, titles_str));
+            }
+            pr_body.push_str("\n---\n\n");
+        }
+
         if !summary.release_age_exceptions.is_empty() {
             let min_age = summary
                 .minimum_release_age
@@ -225,31 +250,6 @@ impl AuditPullRequestGenerator for DefaultAuditPullRequestGenerator {
                         format_availability(*publish_time + min_age, now)
                     ));
                 }
-            }
-            pr_body.push_str("\n---\n\n");
-        }
-
-        if !summary.unfixable_vulnerabilities.is_empty() {
-            pr_body.push_str("> [!CAUTION]\n> The following packages are still vulnerable because no safe update could be applied (either no patch exists, or it was blocked by policy, or `pnpm dedupe` couldn't resolve the constraint tree):\n>\n");
-
-            let mut sorted_unresolved: Vec<String> =
-                summary.unfixable_vulnerabilities.keys().cloned().collect();
-            sorted_unresolved.sort();
-
-            for module in sorted_unresolved {
-                let advs = summary.unfixable_vulnerabilities.get(&module).unwrap();
-                let mut unique_titles = std::collections::HashSet::new();
-                for adv in advs {
-                    if let Some(title) = adv.get("title").and_then(|t| t.as_str()) {
-                        unique_titles.insert(title.to_string());
-                    }
-                }
-
-                let mut titles: Vec<String> = unique_titles.into_iter().collect();
-                titles.sort();
-                let titles_str = titles.join(", ");
-
-                pr_body.push_str(&format!("> - `{}`: {}\n", module, titles_str));
             }
             pr_body.push_str("\n---\n\n");
         }
