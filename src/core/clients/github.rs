@@ -9,6 +9,7 @@ use octocrab::{
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::core::engine::repository::{
@@ -16,11 +17,24 @@ use crate::core::engine::repository::{
     ProjectRepositoryView,
 };
 
+/// How long a known installation is trusted before the installation list is refetched.
+const INSTALLATION_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// How old the installation list must be before an owner missing from it triggers a refetch.
+const INSTALLATION_MISS_RETRY: Duration = Duration::from_secs(10);
+
+/// The GitHub App installations by lowercased account login, and when they were fetched.
+#[derive(Default)]
+struct InstallationCache {
+    fetched_at: Option<Instant>,
+    ids: HashMap<String, InstallationId>,
+}
+
 #[derive(Clone)]
 pub struct GitHub {
     octocrab: Octocrab,
     public_client: Octocrab,
-    installation_clients: Arc<Mutex<HashMap<String, Octocrab>>>,
+    installations: Arc<Mutex<InstallationCache>>,
 }
 
 /// A raw GitHub API response: status preserved for classification, headers
@@ -64,48 +78,71 @@ impl GitHub {
         Ok(GitHub {
             octocrab,
             public_client,
-            installation_clients: Arc::new(Mutex::new(HashMap::new())),
+            installations: Arc::new(Mutex::new(InstallationCache::default())),
         })
     }
 
-    /// Finds the GitHub App installation whose account matches `owner` (case-insensitively).
-    async fn find_installation(&self, owner: &str) -> Option<InstallationId> {
-        let installations = self.octocrab.apps().installations().send().await.ok()?;
-        installations
-            .items
-            .into_iter()
-            .find(|inst| inst.account.login.eq_ignore_ascii_case(owner))
-            .map(|inst| inst.id)
-    }
+    /// Returns the ID of the GitHub App installation whose account matches `owner`
+    /// (case-insensitively), or `None` when the app isn't installed for them.
+    ///
+    /// All installations are fetched with a single request and shared by every owner, and
+    /// concurrent callers wait for that one request. A known installation is trusted for
+    /// [`INSTALLATION_TTL`], so a removed or replaced one is dropped after at most that long.
+    /// An unknown owner is looked up again once the list is [`INSTALLATION_MISS_RETRY`] old,
+    /// so a newly added installation is found quickly but misses don't cost a request each.
+    async fn installation_id(&self, owner: &str) -> Result<Option<InstallationId>> {
+        let owner = owner.to_lowercase();
+        let mut cache = self.installations.lock().await;
 
-    /// Returns an installation-scoped client for `owner`, or `None` when the GitHub App
-    /// isn't installed for them. Clients are cached per owner; a miss is not cached, so an
-    /// installation that is added later is picked up without a restart.
-    async fn installation_client(&self, owner: &str) -> Option<Octocrab> {
-        let cache_key = owner.to_lowercase();
-
-        {
-            let cache = self.installation_clients.lock().await;
-            if let Some(client) = cache.get(&cache_key) {
-                return Some(client.clone());
+        if let Some(age) = cache.fetched_at.map(|at| at.elapsed()) {
+            if age < INSTALLATION_TTL {
+                if let Some(id) = cache.ids.get(&owner) {
+                    return Ok(Some(*id));
+                }
+                if age < INSTALLATION_MISS_RETRY {
+                    return Ok(None);
+                }
             }
         }
 
-        let inst_id = self.find_installation(owner).await?;
-        let client = self.octocrab.installation(inst_id).ok()?;
+        let installations = self
+            .octocrab
+            .apps()
+            .installations()
+            .send()
+            .await
+            .context("Failed to fetch GitHub App installations")?;
 
-        let mut cache = self.installation_clients.lock().await;
-        cache.insert(cache_key, client.clone());
-        Some(client)
+        cache.ids = installations
+            .items
+            .into_iter()
+            .map(|inst| (inst.account.login.to_lowercase(), inst.id))
+            .collect();
+        cache.fetched_at = Some(Instant::now());
+
+        Ok(cache.ids.get(&owner).copied())
+    }
+
+    /// Returns an installation-scoped client for `owner`, or `None` when the GitHub App
+    /// isn't installed for them.
+    async fn installation_client(&self, owner: &str) -> Result<Option<Octocrab>> {
+        match self.installation_id(owner).await? {
+            Some(id) => Ok(Some(
+                self.octocrab
+                    .installation(id)
+                    .context("Failed to create installation client")?,
+            )),
+            None => Ok(None),
+        }
     }
 
     /// Returns a client authorized for `owner`, falling back to `public_client` when no
     /// installation covers that owner (e.g. a public repo with no app installation at all).
-    async fn client_for_owner(&self, owner: &str) -> Octocrab {
-        match self.installation_client(owner).await {
-            Some(client) => client,
-            None => self.public_client.clone(),
-        }
+    async fn client_for_owner(&self, owner: &str) -> Result<Octocrab> {
+        Ok(self
+            .installation_client(owner)
+            .await?
+            .unwrap_or_else(|| self.public_client.clone()))
     }
 
     pub async fn get_release_history(
@@ -183,7 +220,7 @@ impl GitHub {
     ) -> Result<GitHubProjectRepositoryView> {
         let octocrab = self
             .installation_client(&owner)
-            .await
+            .await?
             .with_context(|| format!("GitHub App is not installed for owner '{}'", owner))?;
 
         Ok(GitHubProjectRepositoryView {
@@ -208,7 +245,7 @@ impl GitHub {
 
     pub async fn get_json(&self, route: &str) -> Result<serde_json::Value> {
         let client = match Self::parse_owner_from_route(route) {
-            Some(owner) => self.client_for_owner(&owner).await,
+            Some(owner) => self.client_for_owner(&owner).await?,
             None => self.public_client.clone(),
         };
 
@@ -239,7 +276,7 @@ impl GitHub {
     /// targets to ownerless `/repositories/{id}/…` routes, which route
     /// parsing cannot map back to an owner.
     pub async fn get_response(&self, owner: &str, route: &str) -> Result<GitHubHttpResponse> {
-        let client = self.client_for_owner(owner).await;
+        let client = self.client_for_owner(owner).await?;
 
         let response = client._get(route).await.context("GitHub request failed")?;
 
