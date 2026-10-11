@@ -21,6 +21,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    environment.systemPackages = [ package ];
+
+    users.users.syz = {
+      isSystemUser = true;
+      group = "syz";
+    };
+    users.groups.syz = { };
+
     systemd.services.syzd = rec {
       description = "syz dependency tracking server";
 
@@ -36,8 +44,10 @@ in
         EnvironmentFile = cfg.environmentFile;
         Restart = "on-failure";
 
-        DynamicUser = true;
+        User = "syz";
+        Group = "syz";
         StateDirectory = "syz";
+        StateDirectoryMode = "0750";
         WorkingDirectory = "/var/lib/syz";
       };
     };

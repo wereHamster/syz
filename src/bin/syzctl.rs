@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use syz::core::platform::Platform;
 use syz::tui::{run, Options};
@@ -9,9 +10,9 @@ struct Args {
     #[arg(short, long, env = "SYZD_URL", default_value = "http://127.0.0.1:7790")]
     url: String,
 
-    /// Auth token
+    /// Auth token [default: contents of /var/lib/syz/data/auth-token]
     #[arg(short, long, env = "SYZD_AUTH_TOKEN")]
-    token: String,
+    token: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -35,6 +36,12 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
+    let token = match args.token {
+        Some(token) => token,
+        None => syz::auth_token::read(std::path::Path::new(syz::auth_token::CLIENT_PATH))
+            .context("No auth token given, set SYZD_AUTH_TOKEN or use --token")?,
+    };
+
     match args.command {
         Some(Commands::Add { argument }) => {
             let parts: Vec<&str> = argument.split(':').collect();
@@ -54,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
             client
                 .post(format!("{}/messages", args.url))
-                .header("Authorization", format!("Bearer {}", args.token))
+                .header("Authorization", format!("Bearer {}", token))
                 .json(&payload)
                 .send()
                 .await?;
@@ -79,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
 
             client
                 .post(format!("{}/messages", args.url))
-                .header("Authorization", format!("Bearer {}", args.token))
+                .header("Authorization", format!("Bearer {}", token))
                 .json(&payload)
                 .send()
                 .await?;
@@ -89,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
         None => {
             run(Options {
                 url: args.url,
-                token: args.token,
+                token,
             })
             .await?;
         }
