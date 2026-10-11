@@ -7,6 +7,10 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{OnceCell, RwLock, Semaphore};
 
+/// A cache entry. It holds the outcome of the fetch, errors included, so every caller waiting on
+/// the fetch sees the same result.
+type Entry = OnceCell<Result<Bytes, Arc<anyhow::Error>>>;
+
 #[derive(Clone)]
 pub struct HttpAgent {
     client: ClientWithMiddleware,
@@ -17,7 +21,7 @@ pub struct HttpAgent {
 
     /// A simple response cache, key is the URL and value is the raw response body. Each entry
     /// is a cell so concurrent requests for the same key share a single fetch.
-    cache: Arc<RwLock<HashMap<String, Arc<OnceCell<Bytes>>>>>,
+    cache: Arc<RwLock<HashMap<String, Arc<Entry>>>>,
 }
 
 impl HttpAgent {
@@ -47,8 +51,9 @@ impl HttpAgent {
     }
 
     /// Returns the cached body for `key`, or runs `fetch` to produce it. Callers asking for the
-    /// same key while a fetch is running wait for that fetch instead of starting their own, and
-    /// failed fetches are not cached.
+    /// same key while a fetch is running wait for that fetch and share its outcome, success or
+    /// failure, instead of starting their own. A failed fetch is evicted afterwards so only later
+    /// calls retry it.
     async fn cached<F, Fut>(&self, key: &str, fetch: F) -> anyhow::Result<Bytes>
     where
         F: FnOnce() -> Fut,
@@ -66,7 +71,24 @@ impl HttpAgent {
                 .clone(),
         };
 
-        Ok(cell.get_or_try_init(fetch).await?.clone())
+        let outcome = cell
+            .get_or_init(|| async { fetch().await.map_err(Arc::new) })
+            .await;
+
+        match outcome {
+            Ok(bytes) => Ok(bytes.clone()),
+            Err(error) => {
+                let mut cache = self.cache.write().await;
+                if cache
+                    .get(key)
+                    .is_some_and(|entry| Arc::ptr_eq(entry, &cell))
+                {
+                    cache.remove(key);
+                }
+
+                Err(anyhow::anyhow!("{:#}", error))
+            }
+        }
     }
 
     async fn fetch(&self, request: reqwest_middleware::RequestBuilder) -> anyhow::Result<Bytes> {
@@ -142,10 +164,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    /// Serves a slow `GET /ok`, counting its requests, and a `GET /fail` that returns a 400.
-    async fn serve() -> (String, Arc<AtomicUsize>) {
+    /// Serves a slow `GET /ok` and a slow `GET /fail` that returns a 400, counting the requests
+    /// each of them receives.
+    async fn serve() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let hits = Arc::new(AtomicUsize::new(0));
         let counter = hits.clone();
+        let fail_hits = Arc::new(AtomicUsize::new(0));
+        let fail_counter = fail_hits.clone();
         let app = axum::Router::new()
             .route(
                 "/ok",
@@ -160,17 +185,24 @@ mod tests {
             )
             .route(
                 "/fail",
-                axum::routing::get(|| async { (axum::http::StatusCode::BAD_REQUEST, "nope") }),
+                axum::routing::get(move || {
+                    let counter = fail_counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        (axum::http::StatusCode::BAD_REQUEST, "nope")
+                    }
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{}", addr), hits)
+        (format!("http://{}", addr), hits, fail_hits)
     }
 
     #[tokio::test]
     async fn concurrent_requests_for_one_url_share_a_fetch() {
-        let (base, hits) = serve().await;
+        let (base, hits, _) = serve().await;
         let agent = HttpAgent::new();
         let url = format!("{}/ok", base);
 
@@ -190,13 +222,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_responses_are_not_cached() {
-        let (base, _) = serve().await;
+    async fn concurrent_requests_share_a_failure_and_later_calls_retry() {
+        let (base, _, fail_hits) = serve().await;
         let agent = HttpAgent::new();
         let url = format!("{}/fail", base);
 
-        let error = agent.json::<serde_json::Value>(&url).await.unwrap_err();
-        assert!(error.to_string().contains("400"));
-        assert!(agent.cache.read().await.get(&url).unwrap().get().is_none());
+        let tasks: Vec<_> = (0..30)
+            .map(|_| {
+                let (agent, url) = (agent.clone(), url.clone());
+                tokio::spawn(async move { agent.json::<serde_json::Value>(&url).await })
+            })
+            .collect();
+        for task in tasks {
+            let error = task.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("400"));
+        }
+
+        // The callers that were waiting shared one failed attempt, and it was not cached.
+        assert_eq!(fail_hits.load(Ordering::SeqCst), 1);
+        assert!(agent.cache.read().await.get(&url).is_none());
+
+        agent.json::<serde_json::Value>(&url).await.unwrap_err();
+        assert_eq!(fail_hits.load(Ordering::SeqCst), 2);
     }
 }
