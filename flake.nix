@@ -5,6 +5,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       ...
     }:
@@ -14,6 +15,11 @@
 
     in
     {
+      nixosModules = rec {
+        default = syzd;
+        syzd = import ./nix/module.nix self;
+      };
+
       packages = forAllSystems (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "syz";
@@ -25,9 +31,31 @@
           nativeBuildInputs = with pkgs; [
             perl
             gnumake
+            makeWrapper
           ];
 
           doCheck = false;
+
+          # The ecosystem scanners shell out to these tools when applying
+          # dependency updates.
+          postFixup = ''
+            wrapProgram $out/bin/syzd \
+              --prefix PATH : ${
+                pkgs.lib.makeBinPath (
+                  with pkgs;
+                  [
+                    nix
+                    cargo
+                    git
+                    pnpm
+                  ]
+                )
+              }
+          '';
+
+          meta = {
+            mainProgram = "syzd";
+          };
         };
       });
 
