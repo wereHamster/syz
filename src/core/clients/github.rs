@@ -105,16 +105,21 @@ impl GitHub {
             }
         }
 
-        let installations = self
+        let first_page = self
             .octocrab
             .apps()
             .installations()
+            .per_page(100)
             .send()
+            .await
+            .context("Failed to fetch GitHub App installations")?;
+        let installations = self
+            .octocrab
+            .all_pages(first_page)
             .await
             .context("Failed to fetch GitHub App installations")?;
 
         cache.ids = installations
-            .items
             .into_iter()
             .map(|inst| (inst.account.login.to_lowercase(), inst.id))
             .collect();
