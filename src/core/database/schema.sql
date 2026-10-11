@@ -76,3 +76,17 @@ CREATE TABLE bumpdep (
     -- Minimum release age in seconds
     minimum_release_age integer
 );
+
+-- A sweep is a project-wide update (as opposed to a bump of specific
+-- dependencies) that lands in a single pull request. This table holds the open
+-- pull request of each sweep: at most one row per project and kind, deleted once
+-- the pull request is closed, merged, or no longer needed.
+CREATE TABLE sweep (
+    project_id text REFERENCES project(id),
+
+    -- Which kind of sweep this is: 'audit' or 'transitive'.
+    kind text NOT NULL,
+
+    -- URL to the GitHub Pull Request.
+    url text NOT NULL
+);

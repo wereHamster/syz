@@ -204,6 +204,49 @@ async fn handle_pull_request(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // Audit and transitive pull requests are dropped whether they were merged or just
+    // closed; the next run opens a new one if there is still something to do.
+    let sweep = state
+        .handle
+        .store()
+        .sweep_by_url(pr_url)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to look up sweep by url: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to look up sweep".to_string(),
+            )
+        })?;
+
+    if let Some(sweep) = sweep {
+        tracing::info!(
+            "Pull request {} closed (merged: {}), scheduling PersistSweep",
+            pr_url,
+            merged
+        );
+        state
+            .handle
+            .send(
+                pk(),
+                Payload::PersistSweep {
+                    project_id: sweep.project_id,
+                    kind: sweep.kind,
+                    pull_request_url: None,
+                },
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to send PersistSweep message: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to schedule PersistSweep".to_string(),
+                )
+            })?;
+
+        return Ok(StatusCode::OK);
+    }
+
     let bump = state
         .handle
         .store()

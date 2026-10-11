@@ -99,3 +99,64 @@ pub struct BumpDep {
     pub head_version: String,
     pub minimum_release_age: Option<i64>,
 }
+
+/// The kinds of project-wide updates that land in a single pull request, as opposed
+/// to a [`Bump`] of specific dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SweepKind {
+    /// Update dependencies to fix security vulnerabilities.
+    Audit,
+
+    /// Update all transitive dependencies.
+    Transitive,
+}
+
+impl SweepKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SweepKind::Audit => "audit",
+            SweepKind::Transitive => "transitive",
+        }
+    }
+
+    /// The branch that the pull request of this kind is opened from.
+    pub fn branch_name(&self) -> &'static str {
+        match self {
+            SweepKind::Audit => "syz/audit",
+            SweepKind::Transitive => "syz/transitive",
+        }
+    }
+}
+
+impl std::str::FromStr for SweepKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "audit" => Ok(SweepKind::Audit),
+            "transitive" => Ok(SweepKind::Transitive),
+            other => anyhow::bail!("Unsupported pull request kind: {}", other),
+        }
+    }
+}
+
+impl std::fmt::Display for SweepKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sweep {
+    pub project_id: String,
+    pub kind: SweepKind,
+    pub url: String,
+}
+
+impl Sweep {
+    /// The path under which clients mirror this record.
+    pub fn path(project_id: &str, kind: SweepKind) -> String {
+        format!("sweep/{}/{}", project_id, kind)
+    }
+}

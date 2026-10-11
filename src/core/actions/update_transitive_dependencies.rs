@@ -1,4 +1,6 @@
+use super::report_sweep;
 use crate::core::application::Application;
+use crate::core::database::SweepKind;
 use anyhow::Result;
 use tempfile::TempDir;
 use tracing::instrument::WithSubscriber;
@@ -16,6 +18,7 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
 
     let pr_generator = app.transitive_pull_request_generator();
     let advisory_resolver = app.advisory_resolver();
+    let handle = app.handle();
 
     let span = tracing::Span::current();
 
@@ -72,12 +75,15 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
             }
         }
 
-        let branch_name = "syz/transitive".to_string();
+        let kind = SweepKind::Transitive;
+        let branch_name = kind.branch_name();
 
+        // Failing to close a pull request isn't tracked: the record is dropped regardless.
         if all_modifications.is_empty() {
             let _ = mutator
-                .close_pull_request(&branch_name, &default_branch)
+                .close_pull_request(branch_name, &default_branch)
                 .await;
+            report_sweep(&handle, &project_id, kind, None).await;
             return;
         }
 
@@ -85,24 +91,28 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
         let combined_summary = all_summaries.join("\n\n");
 
         let commit_res = mutator
-            .commit_changes(&base_revision, &branch_name, &title, all_modifications)
+            .commit_changes(&base_revision, branch_name, &title, all_modifications)
             .await;
 
         match commit_res {
             Ok(Some(_sha)) => {
                 match mutator
-                    .create_pull_request(&title, &branch_name, &default_branch, &combined_summary)
+                    .create_pull_request(&title, branch_name, &default_branch, &combined_summary)
                     .await
                 {
-                    Ok(url) => tracing::info!("Created transitive update PR: {}", url),
+                    Ok(url) => {
+                        tracing::info!("Created transitive update PR: {}", url);
+                        report_sweep(&handle, &project_id, kind, Some(url)).await;
+                    }
                     Err(e) => tracing::error!("Failed to create transitive PR: {}", e),
                 }
             }
             Ok(None) => {
                 tracing::info!("Modifications resulted in no changes relative to base branch. Cleaning up empty PRs.");
                 let _ = mutator
-                    .close_pull_request(&branch_name, &default_branch)
+                    .close_pull_request(branch_name, &default_branch)
                     .await;
+                report_sweep(&handle, &project_id, kind, None).await;
             }
             Err(e) => {
                 tracing::error!("Failed to commit changes for transitive updates: {}", e);

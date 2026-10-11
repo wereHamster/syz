@@ -1,4 +1,4 @@
-use crate::core::database::{Bump, BumpDep, Dependency, Package, Project};
+use crate::core::database::{Bump, BumpDep, Dependency, Package, Project, Sweep, SweepKind};
 use crate::core::message::Payload;
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crate::tui::views::bumps::{affected_projects_by_bump_group, ecosystem_label};
@@ -32,6 +32,33 @@ impl ProjectView {
             selected_bump_index: 0,
             bump_table_state,
         }
+    }
+
+    /// A line showing the open pull request of the given kind of sweep, if there is one.
+    fn sweep_line(backend: &Backend, project_id: &str, kind: SweepKind) -> Line<'static> {
+        let label = match kind {
+            SweepKind::Audit => "Audit",
+            SweepKind::Transitive => "Transitive",
+        };
+
+        let url = backend
+            .db
+            .get(&Sweep::path(project_id, kind))
+            .and_then(|v| serde_json::from_value::<Sweep>(v.clone()).ok())
+            .map(|pr| pr.url);
+
+        let value = match url {
+            Some(url) => Span::raw(url),
+            None => Span::styled("-", Style::default().fg(Color::DarkGray)),
+        };
+
+        Line::from(vec![
+            Span::styled(
+                format!("{:<12}", label),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            value,
+        ])
     }
 
     /// This project's bumps, grouped by ecosystem and sorted so that the ecosystem
@@ -267,6 +294,8 @@ impl View for ProjectView {
             .constraints([
                 Constraint::Length(1), // Header
                 Constraint::Length(1), // Blank
+                Constraint::Length(2), // Audit, transitive
+                Constraint::Length(1), // Blank
                 Constraint::Min(0),    // Table
             ])
             .split(area);
@@ -284,8 +313,14 @@ impl View for ProjectView {
                     project_chunks[0],
                 );
 
-                // Blank
-                frame.render_widget(Paragraph::new(""), project_chunks[1]);
+                // Open pull requests of the audit and transitive sweeps
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Self::sweep_line(backend, &self.project_id, SweepKind::Audit),
+                        Self::sweep_line(backend, &self.project_id, SweepKind::Transitive),
+                    ]),
+                    project_chunks[2],
+                );
 
                 // Table of bumps, grouped by ecosystem
                 let rows = Self::rows(backend, &self.project_id);
@@ -357,7 +392,7 @@ impl View for ProjectView {
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 );
 
-                frame.render_stateful_widget(table, project_chunks[2], &mut self.bump_table_state);
+                frame.render_stateful_widget(table, project_chunks[4], &mut self.bump_table_state);
             }
         }
     }
