@@ -12,10 +12,17 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
 
     let pr_generator = app.audit_pull_request_generator();
     let handle = app.handle();
+    let audit_permits = app.audit_permits();
 
     let span = tracing::Span::current();
 
     tokio::spawn(async move {
+        // Held until the audit is done. Waiting for it here, in the worker, keeps the
+        // application loop free to process messages in the meantime.
+        let Ok(_permit) = audit_permits.acquire().await else {
+            return;
+        };
+
         let DefaultBranch {
             name: default_branch,
             revision: base_revision,

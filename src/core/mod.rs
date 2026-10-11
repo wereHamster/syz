@@ -8,6 +8,7 @@ pub mod http_agent;
 pub mod logger;
 pub mod message;
 pub mod platform;
+pub mod schedule;
 pub mod store;
 pub mod types;
 pub mod version_resolver;

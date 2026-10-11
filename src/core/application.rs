@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Semaphore};
 use tracing::Instrument;
 
 use crate::core::clients;
@@ -33,7 +33,17 @@ pub struct Application {
     github: GitHub,
 
     platforms: PlatformRegistry,
+
+    /// Whether `start` also launches the daily audit of all projects.
+    audit_schedule: bool,
+
+    /// Limits how many audits run at once, so that auditing all projects doesn't hit the
+    /// hosting platform with a request per project at the same time.
+    audit_permits: Arc<Semaphore>,
 }
+
+/// How many projects are audited at the same time.
+const CONCURRENT_AUDITS: usize = 4;
 
 impl Application {
     pub async fn new() -> Result<Self> {
@@ -64,7 +74,20 @@ impl Application {
             http_agent,
             github,
             platforms,
+
+            audit_schedule: true,
+            audit_permits: Arc::new(Semaphore::new(CONCURRENT_AUDITS)),
         })
+    }
+
+    pub fn audit_permits(&self) -> Arc<Semaphore> {
+        self.audit_permits.clone()
+    }
+
+    /// Choose whether `start` launches the daily audit of all projects (on by default).
+    pub fn with_audit_schedule(mut self, enabled: bool) -> Self {
+        self.audit_schedule = enabled;
+        self
     }
 
     pub fn start(self) -> Handle {
@@ -83,6 +106,9 @@ impl Application {
         let dispatch = tracing::Dispatch::new(subscriber);
 
         use tracing::instrument::WithSubscriber;
+        if self.audit_schedule {
+            tokio::spawn(super::schedule::run(handle.clone()).with_subscriber(dispatch.clone()));
+        }
         tokio::spawn(
             async move {
                 tracing::info!("Event loop active");
