@@ -17,24 +17,34 @@ use crate::core::engine::repository::{
     ProjectRepositoryView,
 };
 
-/// How long a known installation is trusted before the installation list is refetched.
+/// How long a known installation is trusted before it is looked up again.
 const INSTALLATION_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// How old the installation list must be before an owner missing from it triggers a refetch.
+/// How long the absence of an installation is trusted before it is looked up again.
 const INSTALLATION_MISS_RETRY: Duration = Duration::from_secs(10);
 
-/// The GitHub App installations by lowercased account login, and when they were fetched.
-#[derive(Default)]
-struct InstallationCache {
-    fetched_at: Option<Instant>,
-    ids: HashMap<String, InstallationId>,
+/// The result of looking up the GitHub App installation of an account.
+struct InstallationLookup {
+    /// `None` if the app isn't installed for the account.
+    id: Option<InstallationId>,
+    fetched_at: Instant,
+}
+
+impl InstallationLookup {
+    fn is_fresh(&self) -> bool {
+        let max_age = match self.id {
+            Some(_) => INSTALLATION_TTL,
+            None => INSTALLATION_MISS_RETRY,
+        };
+        self.fetched_at.elapsed() < max_age
+    }
 }
 
 #[derive(Clone)]
 pub struct GitHub {
     octocrab: Octocrab,
     public_client: Octocrab,
-    installations: Arc<Mutex<InstallationCache>>,
+    installations: Arc<Mutex<HashMap<String, InstallationLookup>>>,
 }
 
 /// A raw GitHub API response: status preserved for classification, headers
@@ -78,54 +88,73 @@ impl GitHub {
         Ok(GitHub {
             octocrab,
             public_client,
-            installations: Arc::new(Mutex::new(InstallationCache::default())),
+            installations: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Returns the ID of the GitHub App installation whose account matches `owner`
-    /// (case-insensitively), or `None` when the app isn't installed for them.
+    /// Returns the ID of the GitHub App installation for the `owner` account, or `None` when
+    /// the app isn't installed for them.
     ///
-    /// All installations are fetched with a single request and shared by every owner, and
-    /// concurrent callers wait for that one request. A known installation is trusted for
-    /// [`INSTALLATION_TTL`], so a removed or replaced one is dropped after at most that long.
-    /// An unknown owner is looked up again once the list is [`INSTALLATION_MISS_RETRY`] old,
-    /// so a newly added installation is found quickly but misses don't cost a request each.
+    /// Lookups are cached per owner and serialized, so concurrent callers share a request.
+    /// A known installation is trusted for [`INSTALLATION_TTL`], so a removed or replaced one
+    /// is dropped after at most that long. A missing one is looked up again after
+    /// [`INSTALLATION_MISS_RETRY`], so a new installation is found quickly but misses don't
+    /// cost a request each. Failed lookups are not cached.
     async fn installation_id(&self, owner: &str) -> Result<Option<InstallationId>> {
         let owner = owner.to_lowercase();
         let mut cache = self.installations.lock().await;
 
-        if let Some(age) = cache.fetched_at.map(|at| at.elapsed()) {
-            if age < INSTALLATION_TTL {
-                if let Some(id) = cache.ids.get(&owner) {
-                    return Ok(Some(*id));
-                }
-                if age < INSTALLATION_MISS_RETRY {
-                    return Ok(None);
-                }
+        if let Some(lookup) = cache.get(&owner) {
+            if lookup.is_fresh() {
+                return Ok(lookup.id);
             }
         }
 
-        let first_page = self
-            .octocrab
-            .apps()
-            .installations()
-            .per_page(100)
-            .send()
-            .await
-            .context("Failed to fetch GitHub App installations")?;
-        let installations = self
-            .octocrab
-            .all_pages(first_page)
-            .await
-            .context("Failed to fetch GitHub App installations")?;
+        let id = self.fetch_installation_id(&owner).await?;
+        cache.insert(
+            owner,
+            InstallationLookup {
+                id,
+                fetched_at: Instant::now(),
+            },
+        );
 
-        cache.ids = installations
-            .into_iter()
-            .map(|inst| (inst.account.login.to_lowercase(), inst.id))
-            .collect();
-        cache.fetched_at = Some(Instant::now());
+        Ok(id)
+    }
 
-        Ok(cache.ids.get(&owner).copied())
+    /// Asks GitHub for the installation of the `owner` account. The account may be a user
+    /// or an organization, so the organization is tried if there is no user installation.
+    async fn fetch_installation_id(&self, owner: &str) -> Result<Option<InstallationId>> {
+        fn not_found(e: &octocrab::Error) -> bool {
+            matches!(e, octocrab::Error::GitHub { source, .. }
+                if source.status_code == reqwest::StatusCode::NOT_FOUND)
+        }
+
+        let apps = self.octocrab.apps();
+
+        match apps.get_user_installation(owner).await {
+            Ok(installation) => return Ok(Some(installation.id)),
+            Err(e) if not_found(&e) => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Failed to look up the GitHub App installation of '{}'",
+                        owner
+                    )
+                })
+            }
+        }
+
+        match apps.get_org_installation(owner).await {
+            Ok(installation) => Ok(Some(installation.id)),
+            Err(e) if not_found(&e) => Ok(None),
+            Err(e) => Err(e).with_context(|| {
+                format!(
+                    "Failed to look up the GitHub App installation of '{}'",
+                    owner
+                )
+            }),
+        }
     }
 
     /// Returns an installation-scoped client for `owner`, or `None` when the GitHub App
