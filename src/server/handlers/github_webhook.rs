@@ -161,7 +161,8 @@ async fn handle_push(
     tracing::info!("Found project {} for repository {}", project.id, repo_url);
 
     // 1. Run AnalyzeProjectDependencies to ensure the database is up to date.
-    // This will also trigger ProcessBump for any approved bumps after it completes.
+    // This will also trigger ProcessBump for any approved bumps, and an update of every
+    // sweep that has an open pull request, after it completes.
     tracing::info!(
         "Scheduling AnalyzeProjectDependencies for project {}",
         project.id

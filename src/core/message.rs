@@ -27,6 +27,8 @@ pub enum Payload {
 
     /// Scan the project source code, identify which dependencies it has, check which
     /// dependencies are outdated, and update the local database with the information.
+    /// With `trigger_bumps`, the approved bumps and open sweeps of the project are
+    /// refreshed afterwards.
     AnalyzeProjectDependencies {
         project_id: String,
         trigger_bumps: bool,
@@ -403,6 +405,24 @@ impl Payload {
                                 crate::core::database::pk(),
                                 Payload::ProcessBump { bump_id: bump.id },
                             )
+                            .await
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                    }
+
+                    // A sweep with an open pull request has to follow the default branch
+                    // too. Sweeps without one are only run on demand.
+                    let sweeps = app.store().list_sweeps().await?;
+                    for sweep in sweeps.into_iter().filter(|s| s.project_id == project_id) {
+                        let payload = match sweep.kind {
+                            SweepKind::Audit => Payload::UpdateVulnerableDependencies {
+                                project_id: project_id.clone(),
+                            },
+                            SweepKind::Transitive => Payload::UpdateTransitiveDependencies {
+                                project_id: project_id.clone(),
+                            },
+                        };
+                        app.handle()
+                            .send(crate::core::database::pk(), payload)
                             .await
                             .map_err(|e| anyhow::anyhow!(e))?;
                     }
