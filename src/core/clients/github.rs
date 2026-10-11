@@ -78,30 +78,34 @@ impl GitHub {
             .map(|inst| inst.id)
     }
 
-    /// Returns an installation-scoped client authorized for `owner`, falling back to
-    /// `public_client` when no installation covers that owner (e.g. a public repo with
-    /// no app installation at all). Resolved clients are cached per owner.
-    async fn client_for_owner(&self, owner: &str) -> Octocrab {
+    /// Returns an installation-scoped client for `owner`, or `None` when the GitHub App
+    /// isn't installed for them. Clients are cached per owner; a miss is not cached, so an
+    /// installation that is added later is picked up without a restart.
+    async fn installation_client(&self, owner: &str) -> Option<Octocrab> {
         let cache_key = owner.to_lowercase();
 
         {
             let cache = self.installation_clients.lock().await;
             if let Some(client) = cache.get(&cache_key) {
-                return client.clone();
+                return Some(client.clone());
             }
         }
 
-        let client = match self.find_installation(owner).await {
-            Some(inst_id) => self
-                .octocrab
-                .installation(inst_id)
-                .unwrap_or_else(|_| self.public_client.clone()),
-            None => self.public_client.clone(),
-        };
+        let inst_id = self.find_installation(owner).await?;
+        let client = self.octocrab.installation(inst_id).ok()?;
 
         let mut cache = self.installation_clients.lock().await;
         cache.insert(cache_key, client.clone());
-        client
+        Some(client)
+    }
+
+    /// Returns a client authorized for `owner`, falling back to `public_client` when no
+    /// installation covers that owner (e.g. a public repo with no app installation at all).
+    async fn client_for_owner(&self, owner: &str) -> Octocrab {
+        match self.installation_client(owner).await {
+            Some(client) => client,
+            None => self.public_client.clone(),
+        }
     }
 
     pub async fn get_release_history(
@@ -177,15 +181,10 @@ impl GitHub {
         owner: String,
         repo: String,
     ) -> Result<GitHubProjectRepositoryView> {
-        let inst_id = self
-            .find_installation(&owner)
+        let octocrab = self
+            .installation_client(&owner)
             .await
             .with_context(|| format!("GitHub App is not installed for owner '{}'", owner))?;
-
-        let octocrab = self
-            .octocrab
-            .installation(inst_id)
-            .context("Failed to create installation client")?;
 
         Ok(GitHubProjectRepositoryView {
             octocrab,
