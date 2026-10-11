@@ -33,6 +33,9 @@ pub struct Application {
     github: GitHub,
 
     platforms: PlatformRegistry,
+
+    /// Whether `start` also launches the daily audit of all projects.
+    audit_schedule: bool,
 }
 
 impl Application {
@@ -64,7 +67,15 @@ impl Application {
             http_agent,
             github,
             platforms,
+
+            audit_schedule: true,
         })
+    }
+
+    /// Choose whether `start` launches the daily audit of all projects (on by default).
+    pub fn with_audit_schedule(mut self, enabled: bool) -> Self {
+        self.audit_schedule = enabled;
+        self
     }
 
     pub fn start(self) -> Handle {
@@ -83,6 +94,9 @@ impl Application {
         let dispatch = tracing::Dispatch::new(subscriber);
 
         use tracing::instrument::WithSubscriber;
+        if self.audit_schedule {
+            tokio::spawn(super::schedule::run(handle.clone()).with_subscriber(dispatch.clone()));
+        }
         tokio::spawn(
             async move {
                 tracing::info!("Event loop active");
