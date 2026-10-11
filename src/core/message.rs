@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use super::actions::analyze_project_dependencies::AnalyzedProjectDependencies;
 use super::application::Application;
+use super::database::{Sweep, SweepKind};
 use super::platform::Platform;
 
 #[derive(Clone)]
@@ -72,6 +73,22 @@ pub enum Payload {
         project_id: String,
     },
 
+    /// Record the outcome of a sweep: the URL of its open pull
+    /// request, or `None` if it has none (anymore).
+    #[serde(skip)]
+    PersistSweep {
+        project_id: String,
+        kind: SweepKind,
+        pull_request_url: Option<String>,
+    },
+
+    /// A sweep's pull request was closed or merged. Forget it, unless the sweep has
+    /// meanwhile moved on to a different pull request.
+    #[serde(skip)]
+    SweepPullRequestClosed {
+        pull_request_url: String,
+    },
+
     #[serde(skip)]
     PersistBumpResult {
         bump_id: String,
@@ -120,6 +137,8 @@ impl std::fmt::Display for Payload {
             Payload::UpdateVulnerableDependencies { .. } => {
                 write!(f, "UpdateVulnerableDependencies")
             }
+            Payload::PersistSweep { .. } => write!(f, "PersistSweep"),
+            Payload::SweepPullRequestClosed { .. } => write!(f, "SweepPullRequestClosed"),
             Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
             Payload::ClearBumpUrl { .. } => write!(f, "ClearBumpUrl"),
             Payload::RemoveBump { .. } => write!(f, "RemoveBump"),
@@ -174,6 +193,14 @@ impl Payload {
                     ops.push(crate::core::event::Op::Upsert {
                         path: format!("bumpdep/{}/{}", bumpdep.bump_id, bumpdep.dependency_id),
                         data: serde_json::to_value(bumpdep).unwrap_or_default(),
+                    });
+                }
+
+                let sweeps = app.store().list_sweeps().await?;
+                for pull_request in sweeps {
+                    ops.push(crate::core::event::Op::Upsert {
+                        path: Sweep::path(&pull_request.project_id, pull_request.kind),
+                        data: serde_json::to_value(pull_request).unwrap_or_default(),
                     });
                 }
 
@@ -276,6 +303,38 @@ impl Payload {
 
             Payload::Vacuum => {
                 app.store().vacuum().await?;
+                Ok(())
+            }
+
+            Payload::PersistSweep {
+                project_id,
+                kind,
+                pull_request_url,
+            } => {
+                let op = match pull_request_url {
+                    Some(url) => app.store().set_sweep(&project_id, kind, url).await?,
+                    None => app.store().clear_sweep(&project_id, kind).await?,
+                };
+
+                app.handle()
+                    .broadcast(crate::core::event::Event::Commit { ops: vec![op] })?;
+
+                Ok(())
+            }
+
+            Payload::SweepPullRequestClosed { pull_request_url } => {
+                // Looked up here rather than by the sender, so that it is ordered after any
+                // PersistSweep that is already queued.
+                if let Some(sweep) = app.store().sweep_by_url(&pull_request_url).await? {
+                    let op = app
+                        .store()
+                        .clear_sweep(&sweep.project_id, sweep.kind)
+                        .await?;
+
+                    app.handle()
+                        .broadcast(crate::core::event::Event::Commit { ops: vec![op] })?;
+                }
+
                 Ok(())
             }
 

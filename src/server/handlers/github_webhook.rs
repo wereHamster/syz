@@ -8,7 +8,11 @@ use serde_json::Value;
 use sha2::Sha256;
 
 use super::AppState;
-use crate::core::{database::pk, message::Payload, platform::Platform};
+use crate::core::{
+    database::{pk, SweepKind},
+    message::Payload,
+    platform::Platform,
+};
 
 pub async fn post(
     State(state): State<AppState>,
@@ -203,6 +207,42 @@ async fn handle_pull_request(
         .pointer("/pull_request/merged")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+
+    // Audit and transitive pull requests are dropped whether they were merged or just
+    // closed; the next run opens a new one if there is still something to do. Whether the
+    // closed pull request is the one the sweep currently tracks is decided by the
+    // application, so that it is ordered with the sweep updates that are already queued.
+    let is_sweep = payload
+        .pointer("/pull_request/head/ref")
+        .and_then(|v| v.as_str())
+        .and_then(SweepKind::from_branch_name)
+        .is_some();
+
+    if is_sweep {
+        tracing::info!(
+            "Pull request {} closed (merged: {}), scheduling SweepPullRequestClosed",
+            pr_url,
+            merged
+        );
+        state
+            .handle
+            .send(
+                pk(),
+                Payload::SweepPullRequestClosed {
+                    pull_request_url: pr_url.to_string(),
+                },
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to send SweepPullRequestClosed message: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to schedule SweepPullRequestClosed".to_string(),
+                )
+            })?;
+
+        return Ok(StatusCode::OK);
+    }
 
     let bump = state
         .handle

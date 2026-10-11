@@ -1,4 +1,6 @@
+use super::report_sweep;
 use crate::core::application::Application;
+use crate::core::database::SweepKind;
 use anyhow::Result;
 use tempfile::TempDir;
 use tracing::instrument::WithSubscriber;
@@ -15,6 +17,7 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let snapshot = view.snapshot(&base_revision);
 
     let pr_generator = app.audit_pull_request_generator();
+    let handle = app.handle();
 
     let span = tracing::Span::current();
 
@@ -74,13 +77,16 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
             }
         }
 
-        let branch_name = "syz/audit";
+        let kind = SweepKind::Audit;
+        let branch_name = kind.branch_name();
 
+        // Failing to close a pull request isn't tracked: the record is dropped regardless.
         if !has_changes {
             tracing::info!("No fixable security vulnerabilities found.");
             let _ = mutator
                 .close_pull_request(branch_name, &default_branch)
                 .await;
+            report_sweep(&handle, &project_id, kind, None).await;
             return;
         }
 
@@ -96,7 +102,10 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                     .create_pull_request(title, branch_name, &default_branch, &combined_pr_body)
                     .await
                 {
-                    Ok(url) => tracing::info!("Created vulnerable update PR: {}", url),
+                    Ok(url) => {
+                        tracing::info!("Created vulnerable update PR: {}", url);
+                        report_sweep(&handle, &project_id, kind, Some(url)).await;
+                    }
                     Err(e) => tracing::error!("Failed to create PR: {}", e),
                 }
             }
@@ -105,6 +114,7 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
                 let _ = mutator
                     .close_pull_request(branch_name, &default_branch)
                     .await;
+                report_sweep(&handle, &project_id, kind, None).await;
             }
             Err(e) => {
                 tracing::error!("Failed to commit changes: {}", e);

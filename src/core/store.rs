@@ -5,7 +5,9 @@ use turso::params;
 use crate::core::actions::analyze_project_dependencies::{
     AnalyzedProjectDependencies, AnalyzedProjectDependency,
 };
-use crate::core::database::{pk, Bump, BumpDep, Database, Dependency, Package, Project};
+use crate::core::database::{
+    pk, Bump, BumpDep, Database, Dependency, Package, Project, Sweep, SweepKind,
+};
 use crate::core::event::Op;
 use crate::core::platform::Platform;
 
@@ -181,7 +183,27 @@ impl Store {
         )
         .await?;
 
-        // 3. Delete project
+        // 3. Delete sweeps
+        let mut pull_requests_stmt = conn
+            .prepare("SELECT kind FROM sweep WHERE project_id = ?1")
+            .await?;
+        let mut pull_requests_rows = pull_requests_stmt.query((project_id.as_str(),)).await?;
+        while let Some(row) = pull_requests_rows.next().await? {
+            let kind: String = row.get(0).context("Missing kind column")?;
+            ops.push(Op::Delete {
+                path: Sweep::path(
+                    &project_id,
+                    kind.parse().context("Invalid kind in database")?,
+                ),
+            });
+        }
+        conn.execute(
+            "DELETE FROM sweep WHERE project_id = ?1",
+            params![project_id.as_str()],
+        )
+        .await?;
+
+        // 4. Delete project
         ops.push(Op::Delete {
             path: format!("project/{}", project_id),
         });
@@ -337,6 +359,122 @@ impl Store {
             .await?;
 
         Ok(ops)
+    }
+
+    pub async fn list_sweeps(&self) -> Result<Vec<Sweep>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT project_id, kind, url FROM sweep")
+            .await?;
+
+        let mut rows = stmt.query(()).await?;
+
+        let mut pull_requests = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let kind: String = row.get(1).context("Missing kind column")?;
+            pull_requests.push(Sweep {
+                project_id: row.get(0).unwrap_or_default(),
+                kind: kind.parse().context("Invalid kind in database")?,
+                url: row.get(2).unwrap_or_default(),
+            });
+        }
+
+        Ok(pull_requests)
+    }
+
+    pub async fn sweep_by_url(
+        &self,
+        url: &str,
+    ) -> Result<Option<Sweep>> {
+        let conn = self.database.conn()?;
+
+        let mut stmt = conn
+            .prepare("SELECT project_id, kind, url FROM sweep WHERE url = ?1")
+            .await?;
+
+        let mut rows = stmt.query((url,)).await?;
+
+        if let Some(row) = rows.next().await? {
+            let kind: String = row.get(1).context("Missing kind column")?;
+            return Ok(Some(Sweep {
+                project_id: row.get(0).unwrap_or_default(),
+                kind: kind.parse().context("Invalid kind in database")?,
+                url: row.get(2).unwrap_or_default(),
+            }));
+        }
+
+        Ok(None)
+    }
+
+    /// Record the open pull request of the project's sweep of the given kind, replacing the
+    /// previous one (if any).
+    pub async fn set_sweep(
+        &self,
+        project_id: &str,
+        kind: SweepKind,
+        url: String,
+    ) -> Result<Op> {
+        let conn = self.database.conn()?;
+
+        // Replace the row atomically, so that a failing insert doesn't lose the previous one.
+        conn.execute("BEGIN TRANSACTION", params![]).await?;
+
+        let result: Result<()> = async {
+            conn.execute(
+                "DELETE FROM sweep WHERE project_id = ?1 AND kind = ?2",
+                params![project_id, kind.as_str()],
+            )
+            .await?;
+            conn.execute(
+                "INSERT INTO sweep (project_id, kind, url) VALUES (?, ?, ?)",
+                params![project_id, kind.as_str(), url.as_str()],
+            )
+            .await
+            .context("Failed to insert sweep")?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", params![]).await?;
+            }
+            Err(e) => {
+                conn.execute("ROLLBACK", params![]).await?;
+                return Err(e);
+            }
+        }
+
+        Ok(Op::Upsert {
+            path: Sweep::path(project_id, kind),
+            data: serde_json::to_value(Sweep {
+                project_id: project_id.to_string(),
+                kind,
+                url,
+            })
+            .unwrap_or_default(),
+        })
+    }
+
+    /// Forget the pull request of the project's sweep of the given kind. This is a no-op if
+    /// there is none.
+    pub async fn clear_sweep(
+        &self,
+        project_id: &str,
+        kind: SweepKind,
+    ) -> Result<Op> {
+        let conn = self.database.conn()?;
+
+        conn.execute(
+            "DELETE FROM sweep WHERE project_id = ?1 AND kind = ?2",
+            params![project_id, kind.as_str()],
+        )
+        .await?;
+
+        Ok(Op::Delete {
+            path: Sweep::path(project_id, kind),
+        })
     }
 
     pub async fn vacuum(&self) -> Result<Vec<Op>> {

@@ -99,3 +99,89 @@ pub struct BumpDep {
     pub head_version: String,
     pub minimum_release_age: Option<i64>,
 }
+
+/// The kinds of project-wide updates that land in a single pull request, as opposed
+/// to a [`Bump`] of specific dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SweepKind {
+    /// Update dependencies to fix security vulnerabilities.
+    Audit,
+
+    /// Update all transitive dependencies.
+    Transitive,
+}
+
+impl SweepKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SweepKind::Audit => "audit",
+            SweepKind::Transitive => "transitive",
+        }
+    }
+
+    /// The kind of sweep whose pull request is opened from the given branch, if any.
+    pub fn from_branch_name(branch_name: &str) -> Option<Self> {
+        [SweepKind::Audit, SweepKind::Transitive]
+            .into_iter()
+            .find(|kind| kind.branch_name() == branch_name)
+    }
+
+    /// The branch that the pull request of this kind is opened from.
+    pub fn branch_name(&self) -> &'static str {
+        match self {
+            SweepKind::Audit => "syz/audit",
+            SweepKind::Transitive => "syz/transitive",
+        }
+    }
+}
+
+impl std::str::FromStr for SweepKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "audit" => Ok(SweepKind::Audit),
+            "transitive" => Ok(SweepKind::Transitive),
+            other => anyhow::bail!("Unsupported pull request kind: {}", other),
+        }
+    }
+}
+
+impl std::fmt::Display for SweepKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sweep {
+    pub project_id: String,
+    pub kind: SweepKind,
+    pub url: String,
+}
+
+impl Sweep {
+    /// The path under which clients mirror this record.
+    pub fn path(project_id: &str, kind: SweepKind) -> String {
+        format!("sweep/{}/{}", project_id, kind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_kind_round_trips_through_its_branch_name() {
+        for kind in [SweepKind::Audit, SweepKind::Transitive] {
+            assert_eq!(SweepKind::from_branch_name(kind.branch_name()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn bump_branches_are_not_sweeps() {
+        assert_eq!(SweepKind::from_branch_name("syz/update-actix-web"), None);
+        assert_eq!(SweepKind::from_branch_name("main"), None);
+    }
+}
