@@ -41,8 +41,10 @@ pub async fn run(handle: Handle) {
             tracing::error!("Failed to schedule the audit of all projects: {}", e);
         }
 
-        // Continue from the run just done, so that waking up slightly early cannot repeat it.
-        after = next;
+        // Continue from the run just done, so that waking up slightly early cannot repeat it,
+        // and from now if the wake up was late, so that missed days are skipped, not run
+        // back to back.
+        after = next.max(Utc::now());
     }
 }
 

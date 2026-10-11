@@ -74,8 +74,9 @@ pub enum Payload {
         project_id: String,
     },
 
-    /// Purge the caches, so that the audits see current registry data, and send an
-    /// UpdateVulnerableDependencies message for every project. Sent by the daily schedule.
+    /// Purge the caches, so that the audits see current registry data, and start the
+    /// audit of every project, as UpdateVulnerableDependencies does. Sent by the daily
+    /// schedule.
     #[serde(skip)]
     UpdateAllProjectsVulnerableDependencies,
 
@@ -323,16 +324,16 @@ impl Payload {
                 // with the registry data of the first time they were fetched.
                 app.purge_cache().await;
 
+                // Not sent as messages: this runs on the mailbox's only receiver, so with
+                // more projects than the mailbox has room for, the sends would wait forever.
                 let projects = app.store().list_projects().await?;
                 for project in projects {
-                    app.handle()
-                        .send(
-                            super::database::pk(),
-                            Payload::UpdateVulnerableDependencies {
-                                project_id: project.id,
-                            },
-                        )
-                        .await?;
+                    if let Err(e) =
+                        super::actions::update_vulnerable_dependencies::run(app, project.id.clone())
+                            .await
+                    {
+                        tracing::warn!("Failed to audit project {}: {:#}", project.id, e);
+                    }
                 }
 
                 Ok(())
