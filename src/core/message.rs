@@ -74,12 +74,6 @@ pub enum Payload {
         project_id: String,
     },
 
-    /// Purge the caches, so that the audits see current registry data, and start the
-    /// audit of every project, as UpdateVulnerableDependencies does. Sent by the daily
-    /// schedule.
-    #[serde(skip)]
-    UpdateAllProjectsVulnerableDependencies,
-
     /// Re-run every sweep of the project that has an open pull request, so that it follows
     /// the default branch. Sweeps without one are only run on demand.
     #[serde(skip)]
@@ -150,9 +144,6 @@ impl std::fmt::Display for Payload {
             }
             Payload::UpdateVulnerableDependencies { .. } => {
                 write!(f, "UpdateVulnerableDependencies")
-            }
-            Payload::UpdateAllProjectsVulnerableDependencies => {
-                write!(f, "UpdateAllProjectsVulnerableDependencies")
             }
             Payload::UpdateSweeps { .. } => write!(f, "UpdateSweeps"),
             Payload::PersistSweep { .. } => write!(f, "PersistSweep"),
@@ -317,26 +308,6 @@ impl Payload {
 
             Payload::UpdateVulnerableDependencies { project_id } => {
                 super::actions::update_vulnerable_dependencies::run(app, project_id).await
-            }
-
-            Payload::UpdateAllProjectsVulnerableDependencies => {
-                // Responses are cached until purged, so without this the audits would work
-                // with the registry data of the first time they were fetched.
-                app.purge_cache().await;
-
-                // Not sent as messages: this runs on the mailbox's only receiver, so with
-                // more projects than the mailbox has room for, the sends would wait forever.
-                let projects = app.store().list_projects().await?;
-                for project in projects {
-                    if let Err(e) =
-                        super::actions::update_vulnerable_dependencies::run(app, project.id.clone())
-                            .await
-                    {
-                        tracing::warn!("Failed to audit project {}: {:#}", project.id, e);
-                    }
-                }
-
-                Ok(())
             }
 
             Payload::UpdateSweeps { project_id } => {

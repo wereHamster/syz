@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Semaphore};
 use tracing::Instrument;
 
 use crate::core::clients;
@@ -36,7 +36,14 @@ pub struct Application {
 
     /// Whether `start` also launches the daily audit of all projects.
     audit_schedule: bool,
+
+    /// Limits how many audits run at once, so that auditing all projects doesn't hit the
+    /// hosting platform with a request per project at the same time.
+    audit_permits: Arc<Semaphore>,
 }
+
+/// How many projects are audited at the same time.
+const CONCURRENT_AUDITS: usize = 4;
 
 impl Application {
     pub async fn new() -> Result<Self> {
@@ -69,7 +76,12 @@ impl Application {
             platforms,
 
             audit_schedule: true,
+            audit_permits: Arc::new(Semaphore::new(CONCURRENT_AUDITS)),
         })
+    }
+
+    pub fn audit_permits(&self) -> Arc<Semaphore> {
+        self.audit_permits.clone()
     }
 
     /// Choose whether `start` launches the daily audit of all projects (on by default).

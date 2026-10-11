@@ -23,6 +23,30 @@ fn next_audit(after: DateTime<Utc>) -> DateTime<Utc> {
     }
 }
 
+/// Sends the application the messages to audit every project.
+///
+/// This runs outside of the application loop on purpose: when the mailbox is full, the sends
+/// wait for the loop to make room, which it could not do if the loop were sending them itself.
+async fn audit_all_projects(handle: &Handle) -> anyhow::Result<()> {
+    // Responses are cached until purged, so without this the audits would work with the
+    // registry data of the first time they were fetched. The mailbox is processed in order,
+    // so this is done before the audits are started.
+    handle.send(pk(), Payload::Purge).await?;
+
+    for project in handle.store().list_projects().await? {
+        handle
+            .send(
+                pk(),
+                Payload::UpdateVulnerableDependencies {
+                    project_id: project.id,
+                },
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
 /// Asks the application to audit all projects once a day. Runs for the life of the process.
 pub async fn run(handle: Handle) {
     let mut after = Utc::now();
@@ -34,11 +58,8 @@ pub async fn run(handle: Handle) {
         let wait = (next - Utc::now()).to_std().unwrap_or_default();
         tokio::time::sleep(wait).await;
 
-        if let Err(e) = handle
-            .send(pk(), Payload::UpdateAllProjectsVulnerableDependencies)
-            .await
-        {
-            tracing::error!("Failed to schedule the audit of all projects: {}", e);
+        if let Err(e) = audit_all_projects(&handle).await {
+            tracing::error!("Failed to schedule the audit of all projects: {:#}", e);
         }
 
         // Continue from the run just done, so that waking up slightly early cannot repeat it,
