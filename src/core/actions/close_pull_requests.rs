@@ -1,13 +1,13 @@
-use super::process_bump::generate_branch_name;
 use super::DefaultBranch;
 use crate::core::application::Application;
-use crate::core::database::Bump;
 use anyhow::Result;
 use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 
-/// Close the pull requests of bumps that a rescan found to be obsolete and removed.
-pub async fn run(app: &Application, project_id: String, bumps: Vec<Bump>) -> Result<()> {
+/// Close the pull requests opened from the given branches of the project, and delete the
+/// branches. Used for bumps that no longer exist, so nothing is left to track the pull
+/// requests.
+pub async fn run(app: &Application, project_id: String, branch_names: Vec<String>) -> Result<()> {
     let repository = app.project_platform_repository(&project_id).await?;
 
     let span = tracing::Span::current();
@@ -30,20 +30,15 @@ pub async fn run(app: &Application, project_id: String, bumps: Vec<Bump>) -> Res
                 }
             };
 
-            for bump in bumps {
-                let branch_name = generate_branch_name(&bump.name, bump.major);
+            for branch_name in branch_names {
                 match mutator
                     .close_pull_request(&branch_name, &default_branch)
                     .await
                 {
-                    Ok(()) => tracing::info!(
-                        "Closed the pull request of obsolete bump {} ({})",
-                        bump.name,
-                        bump.url.as_deref().unwrap_or_default()
-                    ),
+                    Ok(()) => tracing::info!("Closed the pull request of {}", branch_name),
                     Err(e) => tracing::error!(
-                        "Failed to close the pull request of obsolete bump {}: {:#}",
-                        bump.name,
+                        "Failed to close the pull request of {}: {:#}",
+                        branch_name,
                         e
                     ),
                 }

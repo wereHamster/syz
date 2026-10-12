@@ -303,6 +303,12 @@ impl Store {
     }
 
     pub async fn bump(&self, bump_id: &str) -> Result<Bump> {
+        self.find_bump(bump_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Bump not found"))
+    }
+
+    pub async fn find_bump(&self, bump_id: &str) -> Result<Option<Bump>> {
         let conn = self.database.conn()?;
 
         let mut stmt = conn
@@ -312,17 +318,17 @@ impl Store {
         let mut rows = stmt.query((bump_id,)).await?;
 
         if let Some(row) = rows.next().await? {
-            return Ok(Bump {
+            return Ok(Some(Bump {
                 id: row.get(0).unwrap_or_default(),
                 project_id: row.get(1).unwrap_or_default(),
                 name: row.get(2).unwrap_or_default(),
                 major: row.get(3).unwrap_or_default(),
                 approved: row.get(4).unwrap_or_default(),
                 url: row.get(5).unwrap_or_default(),
-            });
+            }));
         }
 
-        Err(anyhow::anyhow!("Bump not found"))
+        Ok(None)
     }
 
     pub async fn bump_by_url(&self, url: &str) -> Result<Option<Bump>> {
@@ -668,7 +674,7 @@ impl Store {
         &self,
         bump_id: &str,
         pull_request_url: Option<String>,
-    ) -> Result<Bump> {
+    ) -> Result<Option<Bump>> {
         let conn = self.database.conn()?;
         if let Some(url) = pull_request_url {
             conn.execute(
@@ -678,7 +684,7 @@ impl Store {
             .await?;
         }
 
-        self.bump(bump_id).await
+        self.find_bump(bump_id).await
     }
 
     /// Forget the bump's pull request and retract its approval.
@@ -1026,6 +1032,22 @@ mod tests {
 
         assert!(!bump.approved);
         assert_eq!(bump.url, None);
+    }
+
+    #[tokio::test]
+    async fn persist_bump_result_reports_a_bump_that_no_longer_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+
+        let bump = store
+            .persist_bump_result(
+                "gone",
+                Some("https://github.com/owner/repo/pull/1".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(bump.is_none());
     }
 
     #[tokio::test]
