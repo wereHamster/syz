@@ -53,7 +53,19 @@ pub async fn run(
     let owners: Vec<String> = owners.into_iter().collect();
 
     let tokens = github_tokens(github, &owners).await;
-    let nix_config = access_tokens_config(&tokens);
+    let inherited_config = std::env::var("NIX_CONFIG").unwrap_or_default();
+    let nix_config = access_tokens_config(&tokens).map(|config| {
+        // Through the environment rather than `--option` or a config file, so the tokens are
+        // neither visible in the process list nor left on disk.
+        if inherited_config.is_empty() {
+            config
+        } else {
+            format!("{inherited_config}\n{config}")
+        }
+    });
+
+    let mut secrets = secrets_in_nix_config(&inherited_config);
+    secrets.extend(tokens.iter().map(|(_, token)| token.clone()));
 
     let temp_dir_owned = temp_dir.to_path_buf();
     let overrides_owned = overrides.clone();
@@ -68,12 +80,6 @@ pub async fn run(
             cmd.arg("--override-input").arg(alias).arg(override_ref);
         }
         if let Some(config) = nix_config {
-            // Through the environment rather than `--option` or a config file, so the tokens
-            // are neither visible in the process list nor left on disk.
-            let config = match std::env::var("NIX_CONFIG") {
-                Ok(existing) if !existing.is_empty() => format!("{existing}\n{config}"),
-                _ => config,
-            };
             cmd.env("NIX_CONFIG", config);
         }
         cmd.output()
@@ -82,7 +88,7 @@ pub async fn run(
     .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
 
     if !output.status.success() {
-        let stderr = redact(&String::from_utf8_lossy(&output.stderr), &tokens);
+        let stderr = redact(&String::from_utf8_lossy(&output.stderr), &secrets);
         anyhow::bail!(
             "nix flake lock failed in {:?} ({}): {}",
             temp_dir,
@@ -176,11 +182,43 @@ fn access_tokens_config(tokens: &[(String, String)]) -> Option<String> {
     Some(format!("extra-access-tokens = {}", entries.join(" ")))
 }
 
-/// Replaces the tokens in `text`, so that nix's output can be logged.
-fn redact(text: &str, tokens: &[(String, String)]) -> String {
-    tokens.iter().fold(text.to_string(), |text, (_, token)| {
-        text.replace(token.as_str(), "***")
-    })
+/// The credentials in the `access-tokens` settings of a nix config, e.g. an inherited
+/// `NIX_CONFIG`. Nix echoes a config line it can't parse, so these must not reach a log either.
+/// This is deliberately generous: of every `access-tokens` entry, the part after the `=` is
+/// taken (plus the part after a `type:` prefix such as `PAT:`), or the whole entry if it has
+/// no `=`, so that a malformed line is covered too.
+fn secrets_in_nix_config(config: &str) -> Vec<String> {
+    let mut secrets = Vec::new();
+
+    for line in config.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.strip_prefix("extra-").unwrap_or(key) != "access-tokens" {
+            continue;
+        }
+
+        for entry in value.split_whitespace() {
+            let secret = entry.split_once('=').map_or(entry, |(_, secret)| secret);
+            secrets.push(secret.to_string());
+            if let Some((_, bare)) = secret.rsplit_once(':') {
+                secrets.push(bare.to_string());
+            }
+        }
+    }
+
+    secrets
+}
+
+/// Replaces the `secrets` in `text`, so that nix's output can be logged.
+fn redact(text: &str, secrets: &[String]) -> String {
+    secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .fold(text.to_string(), |text, secret| {
+            text.replace(secret.as_str(), "***")
+        })
 }
 
 /// The root inputs whose `original` ref matches an approved target, paired with that target.
@@ -357,16 +395,45 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_hides_every_token() {
-        let tokens = vec![
-            ("acme".to_string(), "ghs_one".to_string()),
-            ("other".to_string(), "ghs_two".to_string()),
-        ];
+    fn test_redact_hides_every_secret() {
+        let secrets = vec!["ghs_one".to_string(), "ghs_two".to_string()];
 
         assert_eq!(
-            redact("fetch ghs_one failed, ghs_two too, ghs_one", &tokens),
+            redact("fetch ghs_one failed, ghs_two too, ghs_one", &secrets),
             "fetch *** failed, *** too, ***"
         );
+    }
+
+    #[test]
+    fn test_redact_ignores_empty_secrets() {
+        assert_eq!(redact("unchanged", &[String::new()]), "unchanged");
+    }
+
+    #[test]
+    fn test_secrets_in_nix_config_finds_access_tokens() {
+        let config = "max-jobs = 4\n\
+                      access-tokens = github.com=ghp_one gitlab.com=PAT:glpat_two\n\
+                      extra-access-tokens = github.com/acme=ghs_three\n\
+                      substituters = https://cache.nixos.org";
+
+        assert_eq!(
+            secrets_in_nix_config(config),
+            vec!["ghp_one", "PAT:glpat_two", "glpat_two", "ghs_three"]
+        );
+    }
+
+    #[test]
+    fn test_secrets_in_nix_config_covers_malformed_entries() {
+        // No `host=token` pairs, which is a syntax error that nix reports with the line.
+        assert_eq!(
+            secrets_in_nix_config("access-tokens = github.com ghp_one"),
+            vec!["github.com", "ghp_one"]
+        );
+    }
+
+    #[test]
+    fn test_secrets_in_nix_config_is_empty_without_access_tokens() {
+        assert!(secrets_in_nix_config("max-jobs = 4").is_empty());
     }
 
     #[test]
