@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
-use jsonwebtoken::EncodingKey;
 use octocrab::{
     models::{AppId, InstallationId},
-    Octocrab,
+    EncodingKey, Octocrab,
 };
 use serde_json::Value;
 use std::collections::HashMap;
