@@ -4715,7 +4715,6 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "ipld-core",
- "jsonwebtoken",
  "octocrab",
  "packageurl",
  "rand 0.10.3",
