@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tracing::Instrument;
@@ -41,13 +41,16 @@ pub struct Application {
     /// Limits how many audits run at once, so that auditing all projects doesn't hit the
     /// hosting platform with a request per project at the same time.
     audit_permits: Arc<Semaphore>,
+
+    /// Where workers create the scratch directories in which package managers run.
+    work_dir: PathBuf,
 }
 
 /// How many projects are audited at the same time.
 const CONCURRENT_AUDITS: usize = 4;
 
 impl Application {
-    pub async fn new(data_dir: &Path) -> Result<Self> {
+    pub async fn new(data_dir: &Path, work_dir: PathBuf) -> Result<Self> {
         let (mailbox_tx, mailbox_rx) = mpsc::channel(100);
         let (events, _) = broadcast::channel(1000);
 
@@ -56,7 +59,7 @@ impl Application {
 
         let http_agent = HttpAgent::new();
         let github = GitHub::new().await?;
-        let tangled = Tangled::new().await?;
+        let tangled = Tangled::new(work_dir.clone()).await?;
 
         let mut platforms = PlatformRegistry::new();
         platforms.register(Arc::new(GitHubPlatformAdapter::new(github.clone())));
@@ -78,7 +81,13 @@ impl Application {
 
             audit_schedule: true,
             audit_permits: Arc::new(Semaphore::new(CONCURRENT_AUDITS)),
+
+            work_dir,
         })
+    }
+
+    pub fn work_dir(&self) -> PathBuf {
+        self.work_dir.clone()
     }
 
     pub fn audit_permits(&self) -> Arc<Semaphore> {

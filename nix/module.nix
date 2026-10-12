@@ -9,6 +9,8 @@ self:
 let
   cfg = config.services.syzd;
   package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+
+  scratchDirectory = "/var/lib/syz/scratch";
 in
 {
   options.services.syzd = {
@@ -29,7 +31,11 @@ in
     };
     users.groups.syz = { };
 
-    systemd.tmpfiles.rules = [ "D! /var/cache/syz 0750 syz syz -" ];
+    systemd.tmpfiles.rules = [
+      "d ${scratchDirectory} 0750 syz syz -"
+      "D! ${scratchDirectory}/home 0750 syz syz -"
+      "D! ${scratchDirectory}/work 0750 syz syz -"
+    ];
 
     systemd.services.syzd = rec {
       description = "syz dependency tracking server";
@@ -39,7 +45,10 @@ in
 
       wantedBy = [ "multi-user.target" ];
 
-      environment.HOME = "/var/cache/syz";
+      environment = {
+        HOME = "${scratchDirectory}/home";
+        SYZD_WORK_DIR = "${scratchDirectory}/work";
+      };
 
       serviceConfig = {
         ExecStart = lib.getExe' package "syzd";
@@ -50,9 +59,7 @@ in
         Group = "syz";
         StateDirectory = "syz";
         StateDirectoryMode = "0750";
-        CacheDirectory = "syz";
-        CacheDirectoryMode = "0750";
-        WorkingDirectory = "/var/cache/syz";
+        WorkingDirectory = scratchDirectory;
       };
     };
   };
