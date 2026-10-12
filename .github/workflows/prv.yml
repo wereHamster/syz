@@ -20,6 +20,17 @@ jobs:
 
       - run: nix flake check
 
+  format:
+    if: github.event.pull_request.draft == false
+    name: Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - run: nix run github:nicknovitski/nix-develop .#workflow
+      - run: cargo fmt --all --check
+
   test:
     if: github.event.pull_request.draft == false
     name: Test

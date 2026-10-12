@@ -32,6 +32,11 @@ Main loop -> process `Message` sequential. Mutate DB sync. Avoid race/lock.
 - `src/server/handlers/` -> HTTP APIs (`POST /messages`, `GET /events`).
 - `src/core/engine/ecosystems/` -> Dependency scanner implementations (Cargo, NPM, GitHub Actions). Trait `Ecosystem`.
 
+## Formatting
+
+Before commit/push -> run `cargo fmt --all`. CI job `Format` runs `cargo fmt --all --check`, fails PR on diff.
+Config -> default rustfmt. No `rustfmt.toml`.
+
 ## Code Rules
 
 Write DB -> only inside main loop (`message.rs` `execute()`).
