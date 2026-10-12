@@ -10,6 +10,12 @@ struct Args {
     /// Directory where syzd keeps its database and auth token
     #[arg(long, env = "SYZD_DATA_DIR", default_value_os_t = default_data_dir())]
     data_dir: PathBuf,
+
+    /// Directory in which package managers run on scratch copies of a project. Put it on the
+    /// same file system as their cache so they can hard-link from it. Defaults to the system
+    /// temporary directory.
+    #[arg(long, env = "SYZD_WORK_DIR")]
+    work_dir: Option<PathBuf>,
 }
 
 /// Under systemd, the state directory (`StateDirectory=`) is exported as
@@ -40,7 +46,11 @@ async fn main() -> Result<()> {
 
     tracing::info!("using data directory {}", args.data_dir.display());
 
-    let application = syz::core::application::Application::new(&args.data_dir).await?;
+    let mut application = syz::core::application::Application::new(&args.data_dir).await?;
+    if let Some(work_dir) = args.work_dir {
+        tracing::info!("using work directory {}", work_dir.display());
+        application = application.with_work_dir(work_dir);
+    }
     let handle = application.start();
 
     let token = match std::env::var("SYZD_AUTH_TOKEN") {

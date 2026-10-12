@@ -8,7 +8,17 @@ use crate::core::database::{pk, SweepKind};
 use crate::core::engine::repository::{ProjectRepositoryMutator, ProjectRepositorySnapshot};
 use crate::core::message::Payload;
 use crate::core::platform::ProjectPlatformRepository;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::Path;
+use tempfile::TempDir;
+
+/// Creates a scratch directory inside `work_dir`, which is created if it doesn't exist yet.
+fn create_temp_dir(work_dir: &Path) -> Result<TempDir> {
+    std::fs::create_dir_all(work_dir)
+        .with_context(|| format!("Failed to create work directory {}", work_dir.display()))?;
+    TempDir::new_in(work_dir)
+        .with_context(|| format!("Failed to create a directory in {}", work_dir.display()))
+}
 
 /// A project's default branch resolved to a revision, with what is needed to read and
 /// write against it.

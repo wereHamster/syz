@@ -5,7 +5,6 @@ use crate::core::engine::{PackageInfo, RequirementVersion, UpdateTarget};
 use crate::core::message::Payload;
 use crate::core::store::BumpTargetData;
 use anyhow::Result;
-use tempfile::TempDir;
 use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 
@@ -46,6 +45,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     let repository = app.project_platform_repository(&project.id).await?;
     let is_major = bump.major;
     let bump_name = bump.name.clone();
+    let work_dir = app.work_dir();
 
     let span = tracing::Span::current();
 
@@ -64,12 +64,13 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         };
 
         // 1. Prepare temporary directory
-        let temp_dir_result = TempDir::new();
-        if let Err(e) = temp_dir_result {
-            tracing::error!("Failed to create temporary directory: {}", e);
-            return;
-        }
-        let temp_dir = temp_dir_result.unwrap();
+        let temp_dir = match super::create_temp_dir(&work_dir) {
+            Ok(dir) => dir,
+            Err(e) => {
+                tracing::error!("Failed to create temporary directory: {:#}", e);
+                return;
+            }
+        };
 
         // 2. Apply updates (via Patcher)
         let modifications = match patcher

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tracing::Instrument;
@@ -41,6 +41,9 @@ pub struct Application {
     /// Limits how many audits run at once, so that auditing all projects doesn't hit the
     /// hosting platform with a request per project at the same time.
     audit_permits: Arc<Semaphore>,
+
+    /// Where workers create the scratch directories in which package managers run.
+    work_dir: PathBuf,
 }
 
 /// How many projects are audited at the same time.
@@ -78,7 +81,23 @@ impl Application {
 
             audit_schedule: true,
             audit_permits: Arc::new(Semaphore::new(CONCURRENT_AUDITS)),
+
+            work_dir: std::env::temp_dir(),
         })
+    }
+
+    /// Choose where workers create the scratch directories in which package managers run
+    /// (the system temporary directory by default).
+    ///
+    /// Package managers hard-link from their cache into these directories, which only works
+    /// within one file system, so this should be on the same one as the cache.
+    pub fn with_work_dir(mut self, work_dir: PathBuf) -> Self {
+        self.work_dir = work_dir;
+        self
+    }
+
+    pub fn work_dir(&self) -> PathBuf {
+        self.work_dir.clone()
     }
 
     pub fn audit_permits(&self) -> Arc<Semaphore> {

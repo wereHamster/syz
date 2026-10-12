@@ -2,7 +2,6 @@ use super::{report_sweep, DefaultBranch};
 use crate::core::application::Application;
 use crate::core::database::SweepKind;
 use anyhow::Result;
-use tempfile::TempDir;
 use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 
@@ -13,6 +12,7 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
     let pr_generator = app.transitive_pull_request_generator();
     let advisory_resolver = app.advisory_resolver();
     let handle = app.handle();
+    let work_dir = app.work_dir();
 
     let span = tracing::Span::current();
 
@@ -34,12 +34,13 @@ pub async fn run(app: &Application, project_id: String) -> Result<()> {
         let mut all_summaries = Vec::new();
 
         for (ecosystem_name, patcher) in patchers {
-            let temp_dir_result = TempDir::new();
-            if let Err(e) = temp_dir_result {
-                tracing::error!("Failed to create temporary directory: {}", e);
-                continue;
-            }
-            let temp_dir = temp_dir_result.unwrap();
+            let temp_dir = match super::create_temp_dir(&work_dir) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    tracing::error!("Failed to create temporary directory: {:#}", e);
+                    continue;
+                }
+            };
 
             match patcher
                 .update_transitive_dependencies(snapshot.as_ref(), temp_dir.path())
