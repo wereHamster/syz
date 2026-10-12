@@ -123,7 +123,15 @@ impl View for OverviewView {
         for (path, value) in backend.db.iter() {
             if path.starts_with("bump/") {
                 if let Ok(bump) = serde_json::from_value::<Bump>(value.clone()) {
-                    bump_data.insert(bump.id.clone(), (bump.project_id.clone(), bump.approved, bump.url.is_some(), true));
+                    bump_data.insert(
+                        bump.id.clone(),
+                        (
+                            bump.project_id.clone(),
+                            bump.approved,
+                            bump.url.is_some(),
+                            true,
+                        ),
+                    );
                 }
             }
         }
@@ -142,9 +150,7 @@ impl View for OverviewView {
 
         let mut bumps_by_project: HashMap<String, (usize, usize, usize, usize)> = HashMap::new();
         for (_id, (project_id, approved, url_is_some, up_to_date)) in bump_data {
-            let stats = bumps_by_project
-                .entry(project_id)
-                .or_insert((0, 0, 0, 0));
+            let stats = bumps_by_project.entry(project_id).or_insert((0, 0, 0, 0));
             stats.0 += 1;
             if approved {
                 stats.1 += 1;

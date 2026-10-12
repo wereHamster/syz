@@ -103,10 +103,7 @@ mod tests {
     }
 }
 
-async fn handle_push(
-    state: AppState,
-    payload: Value,
-) -> Result<StatusCode, (StatusCode, String)> {
+async fn handle_push(state: AppState, payload: Value) -> Result<StatusCode, (StatusCode, String)> {
     let ref_name = payload.get("ref").and_then(|v| v.as_str()).unwrap_or("");
     if ref_name != "refs/heads/main" {
         return Ok(StatusCode::OK);

@@ -366,11 +366,8 @@ impl Store {
             path: format!("bump/{}", bump_id),
         });
 
-        conn.execute(
-            "DELETE FROM bumpdep WHERE bump_id = ?1",
-            params![bump_id],
-        )
-        .await?;
+        conn.execute("DELETE FROM bumpdep WHERE bump_id = ?1", params![bump_id])
+            .await?;
         conn.execute("DELETE FROM bump WHERE id = ?1", params![bump_id])
             .await?;
 
@@ -399,10 +396,7 @@ impl Store {
         Ok(pull_requests)
     }
 
-    pub async fn sweep_by_url(
-        &self,
-        url: &str,
-    ) -> Result<Option<Sweep>> {
+    pub async fn sweep_by_url(&self, url: &str) -> Result<Option<Sweep>> {
         let conn = self.database.conn()?;
 
         let mut stmt = conn
@@ -425,12 +419,7 @@ impl Store {
 
     /// Record the open pull request of the project's sweep of the given kind, replacing the
     /// previous one (if any).
-    pub async fn set_sweep(
-        &self,
-        project_id: &str,
-        kind: SweepKind,
-        url: String,
-    ) -> Result<Op> {
+    pub async fn set_sweep(&self, project_id: &str, kind: SweepKind, url: String) -> Result<Op> {
         let conn = self.database.conn()?;
 
         // Replace the row atomically, so that a failing insert doesn't lose the previous one.
@@ -475,11 +464,7 @@ impl Store {
 
     /// Forget the pull request of the project's sweep of the given kind. This is a no-op if
     /// there is none.
-    pub async fn clear_sweep(
-        &self,
-        project_id: &str,
-        kind: SweepKind,
-    ) -> Result<Op> {
+    pub async fn clear_sweep(&self, project_id: &str, kind: SweepKind) -> Result<Op> {
         let conn = self.database.conn()?;
 
         conn.execute(

@@ -239,7 +239,11 @@ async fn fresh_resolver_starts_empty() {
     let first = Resolver::new(Arc::new(forge.clone()), Options::default());
     first.resolve(&pkg("knip"), "1.0.0").await.unwrap().unwrap();
     let second = Resolver::new(Arc::new(forge.clone()), Options::default());
-    second.resolve(&pkg("knip"), "1.0.0").await.unwrap().unwrap();
+    second
+        .resolve(&pkg("knip"), "1.0.0")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(forge.release_pages_calls(), 2);
 }
 
@@ -338,7 +342,9 @@ async fn rate_limit_error_is_memoized_within_a_batch() {
     let forge = MockForge::new().rate_limited();
     let resolver = Resolver::new(Arc::new(forge.clone()), Options::default());
 
-    let results = resolver.resolve_batch(&batch(&pkg("knip"), &["1.0.0", "2.0.0"])).await;
+    let results = resolver
+        .resolve_batch(&batch(&pkg("knip"), &["1.0.0", "2.0.0"]))
+        .await;
     let first = results[0].as_ref().unwrap_err();
     let second = results[1].as_ref().unwrap_err();
     assert!(matches!(first, release_notes::Error::RateLimited { .. }));
@@ -363,10 +369,7 @@ async fn disabled_strategies_yield_none() {
         ..Options::default()
     };
     let resolver = Resolver::new(Arc::new(forge.clone()), options);
-    let result = resolver
-        .resolve(&pkg("knip"), "1.0.0")
-        .await
-        .unwrap();
+    let result = resolver.resolve(&pkg("knip"), "1.0.0").await.unwrap();
     assert!(result.is_none());
     assert_eq!(forge.release_pages_calls(), 0);
     assert_eq!(forge.tree_calls(), 0);
@@ -397,10 +400,7 @@ async fn changelog_candidate_cap() {
         .with_file("CHANGELOG3.md", Some("## 1.0.0\n\n- c\n"))
         .with_file("CHANGELOG4.md", Some("## 1.0.0\n\n- d\n"));
     let resolver = Resolver::new(Arc::new(forge.clone()), Options::default());
-    resolver
-        .resolve(&pkg("knip"), "1.0.0")
-        .await
-        .unwrap();
+    resolver.resolve(&pkg("knip"), "1.0.0").await.unwrap();
 
     assert!(forge.file_calls() <= 3);
 }

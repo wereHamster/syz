@@ -225,7 +225,9 @@ impl Resolver {
                 continue;
             }
             let tag = cand.tag.clone();
-            let probe = state.probe(&tag, || self.forge.release_by_tag(&tag)).await?;
+            let probe = state
+                .probe(&tag, || self.forge.release_by_tag(&tag))
+                .await?;
             if let Some(release) = probe.filter(|r| r.body.is_some()) {
                 let notes = self.finish_release(&release, needles);
                 state.remember(Strategy::Release(cand.shape));

@@ -83,7 +83,12 @@ async fn plan_does_not_mutate_the_database() {
 async fn apply_adds_missing_column_and_preserves_existing_rows() {
     let conn = memory_conn().await;
     let base_schema = "CREATE TABLE widgets (id text PRIMARY KEY, name text NOT NULL);";
-    tdsm::plan(&conn, base_schema).await.unwrap().apply().await.unwrap();
+    tdsm::plan(&conn, base_schema)
+        .await
+        .unwrap()
+        .apply()
+        .await
+        .unwrap();
 
     conn.execute(
         "INSERT INTO widgets (id, name) VALUES ('1', 'sprocket')",
@@ -150,7 +155,12 @@ async fn apply_creates_missing_index() {
 async fn apply_ignores_things_removed_from_the_desired_schema() {
     let conn = memory_conn().await;
     let wide_schema = fixture("with_index.sql");
-    tdsm::plan(&conn, &wide_schema).await.unwrap().apply().await.unwrap();
+    tdsm::plan(&conn, &wide_schema)
+        .await
+        .unwrap()
+        .apply()
+        .await
+        .unwrap();
 
     // A narrower desired schema (no index, and could drop a column/table in
     // principle) must not drop anything that already exists.
@@ -182,7 +192,12 @@ async fn apply_ignores_things_removed_from_the_desired_schema() {
 async fn comment_only_edit_produces_empty_migration() {
     let conn = memory_conn().await;
     let schema_a = "-- original comment\nCREATE TABLE widgets (id text PRIMARY KEY);";
-    tdsm::plan(&conn, schema_a).await.unwrap().apply().await.unwrap();
+    tdsm::plan(&conn, schema_a)
+        .await
+        .unwrap()
+        .apply()
+        .await
+        .unwrap();
 
     let schema_b = "-- a very different comment\nCREATE TABLE widgets (id text PRIMARY KEY);";
     let migration = tdsm::plan(&conn, schema_b).await.unwrap();
@@ -193,7 +208,12 @@ async fn comment_only_edit_produces_empty_migration() {
 async fn schema_fixture_reflects_pk_and_nullability_from_source() {
     let conn = memory_conn().await;
     let schema = fixture("schema.sql");
-    tdsm::plan(&conn, &schema).await.unwrap().apply().await.unwrap();
+    tdsm::plan(&conn, &schema)
+        .await
+        .unwrap()
+        .apply()
+        .await
+        .unwrap();
 
     // bumpdep has no PRIMARY KEY at all in the reference schema.
     let mut rows = conn.query("PRAGMA table_info(bumpdep)", ()).await.unwrap();
