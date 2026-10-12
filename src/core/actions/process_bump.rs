@@ -46,6 +46,8 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     let is_major = bump.major;
     let bump_name = bump.name.clone();
     let work_dir = app.work_dir();
+    let project_id = project.id.clone();
+    let branch_name = generate_branch_name(&bump_name, is_major);
 
     let span = tracing::Span::current();
 
@@ -92,6 +94,8 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
                     crate::core::database::pk(),
                     Payload::PersistBumpResult {
                         bump_id: bump_id.clone(),
+                        project_id: project_id.clone(),
+                        branch_name: branch_name.clone(),
                         pull_request_url: None,
                     },
                 )
@@ -99,9 +103,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
             return;
         }
 
-        // 3. Form branch name and PR details
-        let branch_name = generate_branch_name(&bump_name, is_major);
-
+        // 3. Form PR details and open it
         let pr_url_opt = match async {
             let title = pr_generator.generate_pull_request_title(&bump_name, &eco_type, &targets, is_major, snapshot.as_ref()).await?;
             let body = pr_generator.generate_pull_request_body(&bump_name, &eco_type, &targets, is_major).await?;
@@ -131,6 +133,8 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
         // 5. Send result message
         let result_payload = Payload::PersistBumpResult {
             bump_id: bump_id.clone(),
+            project_id,
+            branch_name,
             pull_request_url: pr_url_opt,
         };
 
@@ -147,7 +151,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     Ok(())
 }
 
-fn generate_branch_name(bump_name: &str, is_major: bool) -> String {
+pub fn generate_branch_name(bump_name: &str, is_major: bool) -> String {
     let safe_branch_name = bump_name
         .chars()
         .map(|c| {

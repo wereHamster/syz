@@ -303,6 +303,12 @@ impl Store {
     }
 
     pub async fn bump(&self, bump_id: &str) -> Result<Bump> {
+        self.find_bump(bump_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Bump not found"))
+    }
+
+    pub async fn find_bump(&self, bump_id: &str) -> Result<Option<Bump>> {
         let conn = self.database.conn()?;
 
         let mut stmt = conn
@@ -312,17 +318,17 @@ impl Store {
         let mut rows = stmt.query((bump_id,)).await?;
 
         if let Some(row) = rows.next().await? {
-            return Ok(Bump {
+            return Ok(Some(Bump {
                 id: row.get(0).unwrap_or_default(),
                 project_id: row.get(1).unwrap_or_default(),
                 name: row.get(2).unwrap_or_default(),
                 major: row.get(3).unwrap_or_default(),
                 approved: row.get(4).unwrap_or_default(),
                 url: row.get(5).unwrap_or_default(),
-            });
+            }));
         }
 
-        Err(anyhow::anyhow!("Bump not found"))
+        Ok(None)
     }
 
     pub async fn bump_by_url(&self, url: &str) -> Result<Option<Bump>> {
@@ -668,7 +674,7 @@ impl Store {
         &self,
         bump_id: &str,
         pull_request_url: Option<String>,
-    ) -> Result<Bump> {
+    ) -> Result<Option<Bump>> {
         let conn = self.database.conn()?;
         if let Some(url) = pull_request_url {
             conn.execute(
@@ -678,7 +684,7 @@ impl Store {
             .await?;
         }
 
-        self.bump(bump_id).await
+        self.find_bump(bump_id).await
     }
 
     /// Forget the bump's pull request and retract its approval.
@@ -712,11 +718,14 @@ impl Store {
         self.bump(bump_id).await
     }
 
+    /// Replace the project's dependencies with the scan result. Returns the ops to broadcast
+    /// and the bumps that no longer have anything to update but still own a pull request,
+    /// which the caller is responsible for closing.
     pub async fn persist_analyzed_project_dependencies(
         &self,
         project_id: &str,
         scan_result: AnalyzedProjectDependencies,
-    ) -> Result<Vec<Op>> {
+    ) -> Result<(Vec<Op>, Vec<Bump>)> {
         let mut ops = Vec::new();
         let scan_id = pk();
         let now = chrono::Utc::now().to_rfc3339();
@@ -907,15 +916,26 @@ impl Store {
 
         let mut bumps_to_delete_query = conn
             .query(
-                "SELECT id FROM bump WHERE project_id = ? AND id NOT IN (SELECT bump_id FROM bumpdep)",
+                "SELECT id, project_id, name, major, approved, url FROM bump WHERE project_id = ? AND id NOT IN (SELECT bump_id FROM bumpdep)",
                 params![project_id],
             )
             .await?;
+        let mut obsolete_bumps = Vec::new();
         while let Some(row) = bumps_to_delete_query.next().await? {
-            let id = row.get_value(0)?.as_text().unwrap().to_string();
+            let bump = Bump {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                major: row.get(3)?,
+                approved: row.get(4)?,
+                url: row.get(5)?,
+            };
             ops.push(Op::Delete {
-                path: format!("bump/{}", id),
+                path: format!("bump/{}", bump.id),
             });
+            if bump.url.is_some() {
+                obsolete_bumps.push(bump);
+            }
         }
 
         conn.execute(
@@ -931,7 +951,7 @@ impl Store {
         );
         tracing::info!("{}", msg);
 
-        Ok(ops)
+        Ok((ops, obsolete_bumps))
     }
 }
 
@@ -1012,5 +1032,64 @@ mod tests {
 
         assert!(!bump.approved);
         assert_eq!(bump.url, None);
+    }
+
+    #[tokio::test]
+    async fn persist_bump_result_reports_a_bump_that_no_longer_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+
+        let bump = store
+            .persist_bump_result(
+                "gone",
+                Some("https://github.com/owner/repo/pull/1".to_string()),
+            )
+            .await
+            .unwrap();
+
+        assert!(bump.is_none());
+    }
+
+    #[tokio::test]
+    async fn rescan_reports_removed_bumps_that_own_a_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+
+        let project = store
+            .add_project(Platform::GitHub, "owner/repo".to_string())
+            .await
+            .unwrap();
+        let conn = store.database.conn().unwrap();
+        conn.execute(
+            "INSERT INTO bump (id, project_id, name, major, approved, url) VALUES (?, ?, ?, 0, 1, ?)",
+            params!["with-pr", project.id.as_str(), "serde", "https://github.com/owner/repo/pull/1"],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bump (id, project_id, name, major, approved) VALUES (?, ?, ?, 0, 0)",
+            params!["without-pr", project.id.as_str(), "tokio"],
+        )
+        .await
+        .unwrap();
+
+        let (ops, obsolete) = store
+            .persist_analyzed_project_dependencies(
+                &project.id,
+                AnalyzedProjectDependencies {
+                    analyzed_project_dependencies: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ops.len(), 2);
+        assert_eq!(obsolete.len(), 1);
+        assert_eq!(obsolete[0].id, "with-pr");
+        assert_eq!(
+            obsolete[0].url.as_deref(),
+            Some("https://github.com/owner/repo/pull/1")
+        );
+        assert!(store.list_bumps().await.unwrap().is_empty());
     }
 }

@@ -100,6 +100,8 @@ pub enum Payload {
     #[serde(skip)]
     PersistBumpResult {
         bump_id: String,
+        project_id: String,
+        branch_name: String,
         pull_request_url: Option<String>,
     },
 
@@ -357,12 +359,28 @@ impl Payload {
 
             Payload::PersistBumpResult {
                 bump_id,
+                project_id,
+                branch_name,
                 pull_request_url,
             } => {
-                let updated_bump = app
+                let Some(updated_bump) = app
                     .store()
-                    .persist_bump_result(&bump_id, pull_request_url)
-                    .await?;
+                    .persist_bump_result(&bump_id, pull_request_url.clone())
+                    .await?
+                else {
+                    // A rescan removed the bump while its worker was creating the pull
+                    // request, so the rescan could not know about it. Nothing tracks the
+                    // pull request now, close it.
+                    if pull_request_url.is_some() {
+                        super::actions::close_pull_requests::run(
+                            app,
+                            project_id,
+                            vec![branch_name],
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                };
 
                 app.handle().broadcast(crate::core::event::Event::Commit {
                     ops: vec![crate::core::event::Op::Upsert {
@@ -409,13 +427,27 @@ impl Payload {
                 scan_result,
                 trigger_bumps,
             } => {
-                let ops = app
+                let (ops, obsolete_bumps) = app
                     .store()
                     .persist_analyzed_project_dependencies(&project_id, scan_result)
                     .await?;
 
                 app.handle()
                     .broadcast(crate::core::event::Event::Commit { ops })?;
+
+                // The rescan dropped these bumps; their pull requests would be left dangling.
+                if !obsolete_bumps.is_empty() {
+                    let branch_names = obsolete_bumps
+                        .iter()
+                        .map(|bump| {
+                            super::actions::process_bump::generate_branch_name(
+                                &bump.name, bump.major,
+                            )
+                        })
+                        .collect();
+                    super::actions::close_pull_requests::run(app, project_id.clone(), branch_names)
+                        .await?;
+                }
 
                 if trigger_bumps {
                     let bumps = app.store().list_bumps().await?;
