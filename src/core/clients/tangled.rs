@@ -343,6 +343,70 @@ impl ProjectRepositoryView for TangledProjectRepositoryView {
         }
     }
 
+    async fn list_branches(&self, prefix: &str) -> Result<Vec<String>> {
+        let mut branches = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let mut query = format!("?repo={}&limit=100", urlencoding::encode(&self.repo_did));
+            if let Some(cursor) = &cursor {
+                query.push_str(&format!("&cursor={}", urlencoding::encode(cursor)));
+            }
+            let full_url = format!("{}/xrpc/sh.tangled.repo.branches{}", self.knot_url, query);
+
+            let session = self.agent.get_session().await;
+            let client = reqwest::Client::new();
+            let mut builder = client.get(&full_url);
+            if let Some(s) = session {
+                builder = builder.header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {}", s.access_jwt),
+                );
+            }
+
+            let response = builder.send().await?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let error_body = response.text().await.unwrap_or_default();
+                anyhow::bail!(
+                    "Failed to list branches: HTTP {} for {}\nBody: {}",
+                    status,
+                    full_url,
+                    error_body
+                );
+            }
+
+            let json: serde_json::Value = response.json().await?;
+            let page = json
+                .get("branches")
+                .and_then(|b| b.as_array())
+                .with_context(|| format!("Invalid response from branches: {:?}", json))?;
+
+            branches.extend(
+                page.iter()
+                    .filter_map(|branch| {
+                        branch
+                            .pointer("/reference/name")
+                            .or_else(|| branch.get("name"))
+                            .and_then(|n| n.as_str())
+                    })
+                    .filter(|name| name.starts_with(prefix))
+                    .map(str::to_string),
+            );
+
+            cursor = json
+                .get("cursor")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+                .map(str::to_string);
+            if cursor.is_none() || page.is_empty() {
+                break;
+            }
+        }
+
+        Ok(branches)
+    }
+
     fn snapshot(&self, revision: &str) -> Box<dyn ProjectRepositorySnapshot> {
         Box::new(TangledProjectRepositorySnapshot {
             view: Arc::new(self.clone()),

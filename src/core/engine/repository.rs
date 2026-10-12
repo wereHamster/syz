@@ -28,6 +28,9 @@ pub trait ProjectRepositoryView: Send + Sync {
     /// for a given branch or ref. Returns Err() if the branch doesn't exist.
     async fn get_revision(&self, branch_name: &str) -> Result<String>;
 
+    /// Lists the names of the branches that start with `prefix`.
+    async fn list_branches(&self, prefix: &str) -> Result<Vec<String>>;
+
     /// Returns an atomic view of the repository at the given revision.
     fn snapshot(&self, revision: &str) -> Box<dyn ProjectRepositorySnapshot>;
 }

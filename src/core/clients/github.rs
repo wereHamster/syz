@@ -446,6 +446,22 @@ impl ProjectRepositoryView for GitHubProjectRepositoryView {
         Ok(commit_sha)
     }
 
+    async fn list_branches(&self, prefix: &str) -> Result<Vec<String>> {
+        // Not paginated: the endpoint ignores `per_page` and `page`, and returns every match.
+        let url = format!(
+            "/repos/{}/{}/git/matching-refs/heads/{}",
+            self.owner, self.repo, prefix
+        );
+        let refs: Vec<Value> = self.octocrab.get(&url, None::<&()>).await?;
+
+        Ok(refs
+            .iter()
+            .filter_map(|r| r["ref"].as_str())
+            .filter_map(|r| r.strip_prefix("refs/heads/"))
+            .map(str::to_string)
+            .collect())
+    }
+
     fn snapshot(&self, revision: &str) -> Box<dyn ProjectRepositorySnapshot> {
         Box::new(GitHubProjectRepositorySnapshot::new(
             self.octocrab.clone(),

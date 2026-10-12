@@ -48,6 +48,11 @@ pub enum Job {
         kind: SweepKind,
     },
 
+    /// Close the pull requests of the branches that syz created in the project's repository
+    /// and that no bump or sweep tracks anymore, and delete those branches. This looks at what
+    /// the repository has, so that it catches the branches that earlier cleanups missed.
+    PruneBranches { lane: LaneKey, project_id: String },
+
     /// Close the pull requests opened from the given branches, and delete the branches. This
     /// looks nothing up, so that it works after the records owning the branches are gone.
     ClosePullRequests {
@@ -73,6 +78,7 @@ impl Job {
             Job::Scan { lane, .. }
             | Job::PublishBump { lane, .. }
             | Job::PublishSweep { lane, .. }
+            | Job::PruneBranches { lane, .. }
             | Job::ClosePullRequests { lane, .. } => lane,
         }
     }
@@ -118,6 +124,13 @@ impl Job {
                     ..
                 },
             ) => project_id == other_project_id && kind == other_kind,
+            (
+                Job::PruneBranches { project_id, .. },
+                Job::PruneBranches {
+                    project_id: other_project_id,
+                    ..
+                },
+            ) => project_id == other_project_id,
             // Branch sets can differ, and closing is idempotent.
             _ => false,
         }
@@ -132,6 +145,7 @@ impl std::fmt::Display for Job {
                 write!(f, "publish of bump {} in {}", bump_id, lane)
             }
             Job::PublishSweep { lane, kind, .. } => write!(f, "{} sweep of {}", kind, lane),
+            Job::PruneBranches { lane, .. } => write!(f, "branch pruning of {}", lane),
             Job::ClosePullRequests { lane, branches } => {
                 write!(f, "close of {} in {}", branches.join(", "), lane)
             }
@@ -191,6 +205,13 @@ mod tests {
         }
     }
 
+    fn prune(project_id: &str) -> Job {
+        Job::PruneBranches {
+            lane: lane(),
+            project_id: project_id.to_string(),
+        }
+    }
+
     fn close(branches: &[&str]) -> Job {
         Job::ClosePullRequests {
             lane: lane(),
@@ -223,6 +244,12 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_prune_is_dropped() {
+        assert!(prune("a").absorb(&prune("a")));
+        assert!(!prune("a").absorb(&prune("b")));
+    }
+
+    #[test]
     fn closes_never_merge() {
         assert!(!close(&["x"]).absorb(&close(&["x"])));
     }
@@ -245,6 +272,7 @@ mod tests {
         );
         assert_eq!(scan("a").class(), JobClass::General);
         assert_eq!(publish_bump("x").class(), JobClass::General);
+        assert_eq!(prune("a").class(), JobClass::General);
         assert_eq!(close(&["x"]).class(), JobClass::General);
     }
 
@@ -258,6 +286,10 @@ mod tests {
         assert_eq!(
             publish_sweep("a", SweepKind::Audit).to_string(),
             "audit sweep of github:owner/repo"
+        );
+        assert_eq!(
+            prune("a").to_string(),
+            "branch pruning of github:owner/repo"
         );
         assert_eq!(
             close(&["syz/a", "syz/b"]).to_string(),
