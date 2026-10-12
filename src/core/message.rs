@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::collections::HashSet;
+use tokio::sync::oneshot;
 
 use super::actions::analyze_project_dependencies::AnalyzedProjectDependencies;
 use super::actions::process_bump::generate_branch_name;
@@ -10,7 +11,6 @@ use super::job::{Job, LaneKey, PublishOutcome};
 use super::platform::Platform;
 use super::store::Store;
 
-#[derive(Clone)]
 pub struct Message {
     /// A client-defined ID of the message.
     ///
@@ -19,6 +19,10 @@ pub struct Message {
     pub message_id: String,
 
     pub payload: Payload,
+
+    /// Signalled once the main loop has executed the message and enqueued its jobs, whether
+    /// it succeeded or not.
+    pub processed: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]

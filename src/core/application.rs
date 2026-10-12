@@ -120,15 +120,18 @@ impl Application {
     }
 
     async fn run(mut self) -> Result<()> {
-        while let Some(msg) = self.mailbox.recv().await {
-            let message_id = msg.message_id.clone();
-
+        while let Some(Message {
+            message_id,
+            payload,
+            processed,
+        }) = self.mailbox.recv().await
+        {
             let span = tracing::info_span!("message", mid = %message_id);
 
             async {
-                tracing::info!("Processing {:}", msg.payload);
+                tracing::info!("Processing {:}", payload);
 
-                match msg.payload.execute(&self.context).await {
+                match payload.execute(&self.context).await {
                     // Enqueued within the message's span, which the jobs then run under.
                     Ok(jobs) => {
                         for job in jobs {
@@ -140,6 +143,11 @@ impl Application {
             }
             .instrument(span)
             .await;
+
+            if let Some(processed) = processed {
+                // The sender may have stopped waiting.
+                let _ = processed.send(());
+            }
         }
 
         tracing::error!("Application loop is unexpectedly exiting");
@@ -221,6 +229,7 @@ impl Handle {
         let message = Message {
             message_id,
             payload,
+            processed: None,
         };
 
         self.mailbox

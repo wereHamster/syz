@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::instrument::WithSubscriber;
 use tracing::{Dispatch, Instrument, Span};
 
@@ -213,11 +213,16 @@ impl Dispatcher {
         async {
             match result {
                 Ok(Some(payload)) => {
+                    // The lane waits until the main loop has applied the outcome, so that the
+                    // next job reads the state it left. Otherwise a publish queued behind a
+                    // scan could read the targets from before the scan.
+                    let (processed, applied) = oneshot::channel();
                     let message = Message {
                         message_id: pk(),
                         payload,
+                        processed: Some(processed),
                     };
-                    if self.inner.outcomes.send(message).await.is_err() {
+                    if self.inner.outcomes.send(message).await.is_err() || applied.await.is_err() {
                         tracing::error!(
                             "Failed to report the outcome of {}: application mailbox unreachable",
                             description
@@ -480,6 +485,50 @@ mod tests {
 
         let message = h.outcomes.recv().await.unwrap();
         assert!(matches!(message.payload, Payload::Purge));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_next_job_waits_until_the_outcome_is_applied() {
+        let mut h = Harness::new(Limits::default(), |job| match job {
+            Job::Scan { .. } => async { Ok(Some(Payload::Purge)) }.boxed(),
+            _ => sleep(0),
+        });
+
+        h.dispatcher.enqueue(scan("a", false));
+        h.dispatcher.enqueue(publish_bump("a", "1"));
+
+        let message = h.outcomes.recv().await.unwrap();
+        // Give the lane every chance to move on if it didn't wait.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            h.log(),
+            vec!["start scan of github:a", "end scan of github:a"]
+        );
+
+        message.processed.unwrap().send(()).unwrap();
+        h.settle().await;
+        assert_eq!(
+            &h.log()[2..],
+            &[
+                "start publish of bump 1 in github:a",
+                "end publish of bump 1 in github:a"
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_lane_moves_on_if_the_outcome_is_dropped_unapplied() {
+        let mut h = Harness::new(Limits::default(), |job| match job {
+            Job::Scan { .. } => async { Ok(Some(Payload::Purge)) }.boxed(),
+            _ => sleep(0),
+        });
+
+        h.dispatcher.enqueue(scan("a", false));
+        h.dispatcher.enqueue(publish_bump("a", "1"));
+
+        drop(h.outcomes.recv().await.unwrap());
+        h.settle().await;
+        assert_eq!(h.log().len(), 4);
     }
 
     #[tokio::test(start_paused = true)]
