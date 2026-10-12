@@ -137,6 +137,12 @@ pub enum Payload {
         trigger_bumps: bool,
     },
 
+    /// Close the pull requests of the branches that syz created in the project's repository
+    /// and that no bump or sweep tracks, and delete those branches.
+    PruneBranches {
+        project_id: String,
+    },
+
     /// Purge all caches.
     Purge,
 }
@@ -167,6 +173,7 @@ impl std::fmt::Display for Payload {
             Payload::PersistAnalyzedProjectDependencies { .. } => {
                 write!(f, "PersistAnalyzedProjectDependencies")
             }
+            Payload::PruneBranches { .. } => write!(f, "PruneBranches"),
             Payload::Purge => write!(f, "Purge"),
         }
     }
@@ -522,6 +529,15 @@ impl Payload {
                 }
 
                 Ok(jobs)
+            }
+
+            Payload::PruneBranches { project_id } => {
+                let project = store.project(&project_id).await?;
+
+                Ok(vec![Job::PruneBranches {
+                    lane: LaneKey::of(&project),
+                    project_id,
+                }])
             }
 
             Payload::Purge => {

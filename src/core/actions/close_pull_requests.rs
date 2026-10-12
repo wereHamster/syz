@@ -16,7 +16,7 @@ pub async fn run(services: &Services, lane: LaneKey, branches: Vec<String>) -> R
 }
 
 /// Close the pull request of every branch, even if closing one of them fails.
-async fn close_all(
+pub(super) async fn close_all(
     mutator: &dyn ProjectRepositoryMutator,
     default_branch: &str,
     branches: &[String],
