@@ -103,18 +103,14 @@ pub enum Payload {
         pull_request_url: Option<String>,
     },
 
-    /// Clear a bump's stored pull request URL and retract its approval, because
-    /// the PR was closed without being merged. Closing signals the change is
-    /// unwanted, so the bump must not be reprocessed until approved again.
+    /// A bump's pull request was closed. A merged pull request removes the bump; one that
+    /// was closed without merging clears the bump's URL and retracts its approval, since
+    /// closing signals the change is unwanted and it must not be reprocessed until approved
+    /// again.
     #[serde(skip)]
-    AbandonBump {
-        bump_id: String,
-    },
-
-    /// Remove a bump entirely, e.g. because its pull request was merged.
-    #[serde(skip)]
-    RemoveBump {
-        bump_id: String,
+    BumpPullRequestClosed {
+        pull_request_url: String,
+        merged: bool,
     },
 
     #[serde(skip)]
@@ -150,8 +146,7 @@ impl std::fmt::Display for Payload {
             Payload::PersistSweep { .. } => write!(f, "PersistSweep"),
             Payload::SweepPullRequestClosed { .. } => write!(f, "SweepPullRequestClosed"),
             Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
-            Payload::AbandonBump { .. } => write!(f, "AbandonBump"),
-            Payload::RemoveBump { .. } => write!(f, "RemoveBump"),
+            Payload::BumpPullRequestClosed { .. } => write!(f, "BumpPullRequestClosed"),
             Payload::PersistAnalyzedProjectDependencies { .. } => {
                 write!(f, "PersistAnalyzedProjectDependencies")
             }
@@ -379,24 +374,32 @@ impl Payload {
                 Ok(())
             }
 
-            Payload::AbandonBump { bump_id } => {
-                let updated_bump = app.store().abandon_bump(&bump_id).await?;
+            Payload::BumpPullRequestClosed {
+                pull_request_url,
+                merged,
+            } => {
+                // Looked up here rather than by the sender, so that it is ordered after any
+                // PersistBumpResult that is already queued.
+                let Some(bump) = app.store().bump_by_url(&pull_request_url).await? else {
+                    tracing::info!("No bump found for pull request {}", pull_request_url);
+                    return Ok(());
+                };
 
-                app.handle().broadcast(crate::core::event::Event::Commit {
-                    ops: vec![crate::core::event::Op::Upsert {
-                        path: format!("bump/{}", updated_bump.id),
-                        data: serde_json::to_value(updated_bump).unwrap_or_default(),
-                    }],
-                })?;
+                if merged {
+                    let ops = app.store().remove_bump(&bump.id).await?;
 
-                Ok(())
-            }
+                    app.handle()
+                        .broadcast(crate::core::event::Event::Commit { ops })?;
+                } else {
+                    let updated_bump = app.store().abandon_bump(&bump.id).await?;
 
-            Payload::RemoveBump { bump_id } => {
-                let ops = app.store().remove_bump(&bump_id).await?;
-
-                app.handle()
-                    .broadcast(crate::core::event::Event::Commit { ops })?;
+                    app.handle().broadcast(crate::core::event::Event::Commit {
+                        ops: vec![crate::core::event::Op::Upsert {
+                            path: format!("bump/{}", updated_bump.id),
+                            data: serde_json::to_value(updated_bump).unwrap_or_default(),
+                        }],
+                    })?;
+                }
 
                 Ok(())
             }
