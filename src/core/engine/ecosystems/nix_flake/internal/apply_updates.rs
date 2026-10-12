@@ -211,14 +211,20 @@ fn secrets_in_nix_config(config: &str) -> Vec<String> {
     secrets
 }
 
-/// Replaces the `secrets` in `text`, so that nix's output can be logged.
+/// Replaces the `secrets` in `text`, so that nix's output can be logged. The longest secrets go
+/// first: when one is a prefix of another, replacing the short one first would leave the rest of
+/// the long one behind.
 fn redact(text: &str, secrets: &[String]) -> String {
-    secrets
+    let mut secrets: Vec<&str> = secrets
         .iter()
+        .map(String::as_str)
         .filter(|secret| !secret.is_empty())
-        .fold(text.to_string(), |text, secret| {
-            text.replace(secret.as_str(), "***")
-        })
+        .collect();
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+
+    secrets
+        .into_iter()
+        .fold(text.to_string(), |text, secret| text.replace(secret, "***"))
 }
 
 /// The root inputs whose `original` ref matches an approved target, paired with that target.
@@ -401,6 +407,21 @@ mod tests {
         assert_eq!(
             redact("fetch ghs_one failed, ghs_two too, ghs_one", &secrets),
             "fetch *** failed, *** too, ***"
+        );
+    }
+
+    #[test]
+    fn test_redact_hides_a_secret_that_has_another_as_its_prefix() {
+        let short_first = vec!["abc".to_string(), "abcdef".to_string()];
+        let long_first = vec!["abcdef".to_string(), "abc".to_string()];
+
+        assert_eq!(
+            redact("token abcdef and abc", &short_first),
+            "token *** and ***"
+        );
+        assert_eq!(
+            redact("token abcdef and abc", &long_first),
+            "token *** and ***"
         );
     }
 
