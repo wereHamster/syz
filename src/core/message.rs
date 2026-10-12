@@ -365,7 +365,10 @@ impl Payload {
             }
 
             Payload::Vacuum => {
-                store.vacuum().await?;
+                let ops = store.vacuum().await?;
+
+                ctx.handle().broadcast(Event::Commit { ops })?;
+
                 Ok(Vec::new())
             }
 
@@ -1050,5 +1053,51 @@ mod tests {
         let conn = f.store.database().conn().unwrap();
         let mut rows = conn.query("SELECT 1 FROM scan", ()).await.unwrap();
         assert!(rows.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn vacuuming_broadcasts_what_it_deleted() {
+        let f = Fixture::new().await;
+        let conn = f.store.database().conn().unwrap();
+        for (id, time) in [
+            ("old", "2026-01-01T00:00:00Z"),
+            ("new", "2026-02-01T00:00:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO scan (id, project_id, create_time) VALUES (?, ?, ?)",
+                params![id, f.project.id.as_str(), time],
+            )
+            .await
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO package (id, type, name, version) VALUES ('pkg', 'cargo', 'serde', '1.0.0')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dependency (id, scan_id, package_id) VALUES ('dep', 'old', 'pkg')",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (ctx, mut events) = Context::for_tests(f.store.clone());
+        let jobs = Payload::Vacuum.execute(&ctx).await.unwrap();
+
+        assert!(jobs.is_empty());
+        let Event::Commit { ops } = events.try_recv().unwrap() else {
+            panic!("expected a commit");
+        };
+        let mut deleted: Vec<String> = ops
+            .into_iter()
+            .map(|op| match op {
+                Op::Delete { path } => path,
+                Op::Upsert { path, .. } => panic!("unexpected upsert of {path}"),
+            })
+            .collect();
+        deleted.sort();
+        assert_eq!(deleted, ["dependency/dep", "package/pkg", "scan/old"]);
     }
 }
