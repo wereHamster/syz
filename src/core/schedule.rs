@@ -38,6 +38,14 @@ async fn audit_all_projects(handle: &Handle) -> anyhow::Result<()> {
             .send(
                 pk(),
                 Payload::UpdateVulnerableDependencies {
+                    project_id: project.id.clone(),
+                },
+            )
+            .await?;
+        handle
+            .send(
+                pk(),
+                Payload::PruneBranches {
                     project_id: project.id,
                 },
             )
