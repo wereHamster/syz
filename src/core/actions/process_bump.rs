@@ -1,154 +1,93 @@
-use super::DefaultBranch;
-use crate::core::application::Application;
+use super::{Change, DefaultBranch};
 use crate::core::engine::ecosystems::Patcher;
 use crate::core::engine::{PackageInfo, RequirementVersion, UpdateTarget};
+use crate::core::job::LaneKey;
 use crate::core::message::Payload;
+use crate::core::services::Services;
 use crate::core::store::BumpTargetData;
-use anyhow::Result;
-use tracing::instrument::WithSubscriber;
-use tracing::Instrument;
+use anyhow::{Context, Result};
 
-pub async fn run(app: &Application, bump_id: String) -> Result<()> {
-    let bump = app.store().bump(&bump_id).await?;
-    if !bump.approved {
-        return Ok(());
-    }
-    let project = app.store().project(&bump.project_id).await?;
+/// Create or update the bump's pull request, or close it if there is nothing to do.
+///
+/// The bump is read here rather than when the job was enqueued, so that a bump that was
+/// removed or retracted meanwhile isn't published, and a rescan's newer targets are used.
+pub async fn run(services: &Services, lane: LaneKey, bump_id: String) -> Result<Option<Payload>> {
+    let store = services.store();
 
-    let bump_targets_data = app.store().bump_targets(&bump_id).await?;
-    if bump_targets_data.is_empty() {
-        tracing::warn!("No bump targets found for bump {}", bump_id);
-        return Ok(());
-    }
-
-    let eco_type = bump_targets_data[0].eco_type.clone();
-    let patcher = match app.patcher(&eco_type) {
-        Some(p) => p,
-        None => {
-            tracing::error!("No patcher found for ecosystem {}", eco_type);
-            anyhow::bail!("No patcher found for ecosystem {}", eco_type);
-        }
+    let Some(bump) = store.find_bump(&bump_id).await? else {
+        tracing::info!("Bump {} no longer exists, not publishing it", bump_id);
+        return Ok(None);
     };
+    if !bump.approved {
+        tracing::info!(
+            "Bump {} ({}) is no longer approved, not publishing it",
+            bump.name,
+            bump_id
+        );
+        return Ok(None);
+    }
+
+    let bump_targets_data = store.bump_targets(&bump_id).await?;
+    let eco_type = bump_targets_data
+        .first()
+        .with_context(|| format!("Bump {} ({}) has no targets", bump.name, bump_id))?
+        .eco_type
+        .clone();
+    let patcher = services
+        .patcher(&eco_type)
+        .with_context(|| format!("No patcher found for ecosystem {}", eco_type))?;
 
     let targets = build_update_targets(patcher.as_ref(), bump_targets_data);
+    let branch_name = generate_branch_name(&bump.name, bump.major);
 
-    if targets.is_empty() {
-        tracing::info!(
-            "No changes detected. Target '{}' is already up to date.",
-            bump.name
-        );
-        return Ok(());
-    }
+    let default_branch = DefaultBranch::resolve(services.repository(&lane)?.as_ref()).await?;
 
-    let handle = app.handle();
-    let pr_generator = app.pull_request_generator();
-    let repository = app.project_platform_repository(&project.id).await?;
-    let is_major = bump.major;
-    let bump_name = bump.name.clone();
-    let work_dir = app.work_dir();
-    let project_id = project.id.clone();
-    let branch_name = generate_branch_name(&bump_name, is_major);
-
-    let span = tracing::Span::current();
-
-    tokio::spawn(async move {
-        let DefaultBranch {
-            name: default_branch,
-            revision: base_revision,
-            snapshot,
-            mutator,
-        } = match DefaultBranch::resolve(repository.as_ref()).await {
-            Ok(branch) => branch,
-            Err(e) => {
-                tracing::error!("Failed to resolve the default branch for bump {}: {:#}", bump_id, e);
-                return;
-            }
-        };
-
-        // 1. Prepare temporary directory
-        let temp_dir = match super::create_temp_dir(&work_dir) {
-            Ok(dir) => dir,
-            Err(e) => {
-                tracing::error!("Failed to create temporary directory: {:#}", e);
-                return;
-            }
-        };
-
-        // 2. Apply updates (via Patcher)
-        let modifications = match patcher
-            .apply_updates(snapshot.as_ref(), temp_dir.path(), &targets)
+    let modifications = if targets.is_empty() {
+        tracing::info!("Bump {} is already up to date", bump.name);
+        Vec::new()
+    } else {
+        let temp_dir = super::create_temp_dir(services.work_dir())?;
+        patcher
+            .apply_updates(default_branch.snapshot.as_ref(), temp_dir.path(), &targets)
             .await
-        {
-            Ok(mods) => mods,
-            Err(e) => {
-                tracing::error!("Failed to apply updates: {}", e);
-                return;
-            }
-        };
+            .with_context(|| format!("Failed to apply the updates of bump {}", bump.name))?
+    };
 
-        if modifications.is_empty() {
-            tracing::info!("Modifications resulted in no changes. Skip creating PR.");
-            // Send empty result
-            let _ = handle
-                .send(
-                    crate::core::database::pk(),
-                    Payload::PersistBumpResult {
-                        bump_id: bump_id.clone(),
-                        project_id: project_id.clone(),
-                        branch_name: branch_name.clone(),
-                        pull_request_url: None,
-                    },
-                )
-                .await;
-            return;
-        }
+    // Generating the title and body makes registry, advisory and GitHub requests, which
+    // are wasted when there is nothing to publish.
+    let change = if modifications.is_empty() {
+        None
+    } else {
+        let pr_generator = services.pull_request_generator();
+        let title = pr_generator
+            .generate_pull_request_title(
+                &bump.name,
+                &eco_type,
+                &targets,
+                bump.major,
+                default_branch.snapshot.as_ref(),
+            )
+            .await?;
+        let body = pr_generator
+            .generate_pull_request_body(&bump.name, &eco_type, &targets, bump.major)
+            .await?;
 
-        // 3. Form PR details and open it
-        let pr_url_opt = match async {
-            let title = pr_generator.generate_pull_request_title(&bump_name, &eco_type, &targets, is_major, snapshot.as_ref()).await?;
-            let body = pr_generator.generate_pull_request_body(&bump_name, &eco_type, &targets, is_major).await?;
+        Some(Change {
+            title,
+            body,
+            modifications,
+        })
+    };
 
-            // 4. Commit changes
-            if let Some(_sha) = mutator
-                .commit_changes(&base_revision, &branch_name, &title, modifications)
-                .await?
-            {
-                let url = mutator
-                    .create_pull_request(&title, &branch_name, &default_branch, &body)
-                    .await?;
-                Ok::<Option<String>, anyhow::Error>(Some(url))
-            } else {
-                tracing::info!("Modifications resulted in no changes relative to base branch. Cleaning up empty PRs.");
-                let _ = mutator.close_pull_request(&branch_name, &default_branch).await;
-                Ok(None)
-            }
-        }.await {
-            Ok(url) => url,
-            Err(e) => {
-                tracing::error!("Failed to process branch/PR generation: {:?}", e);
-                None
-            }
-        };
+    let outcome = default_branch.publish(&branch_name, change).await?;
 
-        // 5. Send result message
-        let result_payload = Payload::PersistBumpResult {
-            bump_id: bump_id.clone(),
-            project_id,
-            branch_name,
-            pull_request_url: pr_url_opt,
-        };
-
-        if let Err(e) = handle
-            .send(crate::core::database::pk(), result_payload)
-            .await
-        {
-            tracing::error!("Failed to send PersistBumpResult: {}", e);
-        }
-    }
-    .instrument(span)
-    .with_current_subscriber());
-
-    Ok(())
+    Ok(Some(Payload::BumpPublished {
+        lane,
+        project_id: bump.project_id,
+        bump_id,
+        branch_name,
+        outcome,
+    }))
 }
 
 pub fn generate_branch_name(bump_name: &str, is_major: bool) -> String {

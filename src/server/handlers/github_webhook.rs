@@ -158,7 +158,7 @@ async fn handle_push(state: AppState, payload: Value) -> Result<StatusCode, (Sta
     tracing::info!("Found project {} for repository {}", project.id, repo_url);
 
     // 1. Run AnalyzeProjectDependencies to ensure the database is up to date.
-    // This will also trigger ProcessBump for any approved bumps after it completes.
+    // With trigger_bumps, the approved bumps are published after it completes.
     tracing::info!(
         "Scheduling AnalyzeProjectDependencies for project {}",
         project.id

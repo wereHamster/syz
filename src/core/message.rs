@@ -1,11 +1,16 @@
 use anyhow::Result;
+use std::collections::HashSet;
+use tokio::sync::oneshot;
 
 use super::actions::analyze_project_dependencies::AnalyzedProjectDependencies;
-use super::application::Application;
+use super::actions::process_bump::generate_branch_name;
+use super::application::Context;
 use super::database::{Sweep, SweepKind};
+use super::event::{Event, Op};
+use super::job::{Job, LaneKey, PublishOutcome};
 use super::platform::Platform;
+use super::store::Store;
 
-#[derive(Clone)]
 pub struct Message {
     /// A client-defined ID of the message.
     ///
@@ -14,6 +19,10 @@ pub struct Message {
     pub message_id: String,
 
     pub payload: Payload,
+
+    /// Signalled once the main loop has executed the message and enqueued its jobs, whether
+    /// it succeeded or not.
+    pub processed: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -22,7 +31,7 @@ pub enum Payload {
     /// Broadcast current state of the application to all clients.
     Bootstrap,
 
-    /// Lists all projects and sends an AnalyzeProjectDependencies message for each one.
+    /// Scan every project, as AnalyzeProjectDependencies does.
     AnalyzeAllProjectsDependencies,
 
     /// Scan the project source code, identify which dependencies it has, check which
@@ -43,7 +52,7 @@ pub enum Payload {
         repository: String,
     },
 
-    /// Remove a project from the database.
+    /// Remove a project from the database, and close its bump and sweep pull requests.
     RemoveProject {
         platform: Platform,
         repository: String,
@@ -55,8 +64,8 @@ pub enum Payload {
         bump_id: String,
     },
 
-    /// Retract previous approval of a bump. This only updates the database but does not
-    /// cancel any inflight updates.
+    /// Retract previous approval of a bump. This only updates the database, but a publish of
+    /// the bump that is still queued then does nothing.
     RetractBumpApproval {
         bump_id: String,
     },
@@ -81,13 +90,14 @@ pub enum Payload {
         project_id: String,
     },
 
-    /// Record the outcome of a sweep: the URL of its open pull
-    /// request, or `None` if it has none (anymore).
+    /// A sweep was published: its pull request is open, or there was nothing to do and it is
+    /// closed.
     #[serde(skip)]
-    PersistSweep {
+    SweepPublished {
+        lane: LaneKey,
         project_id: String,
         kind: SweepKind,
-        pull_request_url: Option<String>,
+        outcome: PublishOutcome,
     },
 
     /// A sweep's pull request was closed or merged. Forget it, unless the sweep has
@@ -97,12 +107,15 @@ pub enum Payload {
         pull_request_url: String,
     },
 
+    /// A bump was published: its pull request is open, or there was nothing to do and it is
+    /// closed.
     #[serde(skip)]
-    PersistBumpResult {
-        bump_id: String,
+    BumpPublished {
+        lane: LaneKey,
         project_id: String,
+        bump_id: String,
         branch_name: String,
-        pull_request_url: Option<String>,
+        outcome: PublishOutcome,
     },
 
     /// A bump's pull request was closed. A merged pull request removes the bump; one that
@@ -115,6 +128,8 @@ pub enum Payload {
         merged: bool,
     },
 
+    /// A scan finished. With `trigger_bumps`, the approved bumps of the project are
+    /// published afterwards.
     #[serde(skip)]
     PersistAnalyzedProjectDependencies {
         project_id: String,
@@ -145,9 +160,9 @@ impl std::fmt::Display for Payload {
                 write!(f, "UpdateVulnerableDependencies")
             }
             Payload::UpdateSweeps { .. } => write!(f, "UpdateSweeps"),
-            Payload::PersistSweep { .. } => write!(f, "PersistSweep"),
+            Payload::SweepPublished { .. } => write!(f, "SweepPublished"),
             Payload::SweepPullRequestClosed { .. } => write!(f, "SweepPullRequestClosed"),
-            Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
+            Payload::BumpPublished { .. } => write!(f, "BumpPublished"),
             Payload::BumpPullRequestClosed { .. } => write!(f, "BumpPullRequestClosed"),
             Payload::PersistAnalyzedProjectDependencies { .. } => {
                 write!(f, "PersistAnalyzedProjectDependencies")
@@ -158,238 +173,279 @@ impl std::fmt::Display for Payload {
 }
 
 impl Payload {
-    pub async fn execute(self, app: &Application) -> Result<()> {
+    /// Apply the message to the database and broadcast the change. Returns the jobs that the
+    /// message asks for, which the caller dispatches; nothing here talks to the outside world.
+    pub async fn execute(self, ctx: &Context) -> Result<Vec<Job>> {
+        let store = ctx.store();
+
         match self {
             Payload::Bootstrap => {
                 let mut ops = Vec::new();
 
-                let projects = app.store().list_projects().await?;
+                let projects = store.list_projects().await?;
                 for project in projects {
-                    ops.push(crate::core::event::Op::Upsert {
+                    ops.push(Op::Upsert {
                         path: format!("project/{}", project.id),
                         data: serde_json::to_value(project).unwrap_or_default(),
                     });
                 }
 
-                let dependencies = app.store().list_dependencies().await?;
+                let dependencies = store.list_dependencies().await?;
                 for dependency in dependencies {
-                    ops.push(crate::core::event::Op::Upsert {
+                    ops.push(Op::Upsert {
                         path: format!("dependency/{}", dependency.id),
                         data: serde_json::to_value(dependency).unwrap_or_default(),
                     });
                 }
 
-                let packages = app.store().list_packages().await?;
+                let packages = store.list_packages().await?;
                 for package in packages {
-                    ops.push(crate::core::event::Op::Upsert {
+                    ops.push(Op::Upsert {
                         path: format!("package/{}", package.id),
                         data: serde_json::to_value(package).unwrap_or_default(),
                     });
                 }
 
-                let bumps = app.store().list_bumps().await?;
+                let bumps = store.list_bumps().await?;
                 for bump in bumps {
-                    ops.push(crate::core::event::Op::Upsert {
+                    ops.push(Op::Upsert {
                         path: format!("bump/{}", bump.id),
                         data: serde_json::to_value(bump).unwrap_or_default(),
                     });
                 }
 
-                let bumpdeps = app.store().list_bumpdeps().await?;
+                let bumpdeps = store.list_bumpdeps().await?;
                 for bumpdep in bumpdeps {
-                    ops.push(crate::core::event::Op::Upsert {
+                    ops.push(Op::Upsert {
                         path: format!("bumpdep/{}/{}", bumpdep.bump_id, bumpdep.dependency_id),
                         data: serde_json::to_value(bumpdep).unwrap_or_default(),
                     });
                 }
 
-                let sweeps = app.store().list_sweeps().await?;
+                let sweeps = store.list_sweeps().await?;
                 for pull_request in sweeps {
-                    ops.push(crate::core::event::Op::Upsert {
+                    ops.push(Op::Upsert {
                         path: Sweep::path(&pull_request.project_id, pull_request.kind),
                         data: serde_json::to_value(pull_request).unwrap_or_default(),
                     });
                 }
 
-                app.handle()
-                    .broadcast(crate::core::event::Event::Commit { ops })?;
+                ctx.handle().broadcast(Event::Commit { ops })?;
 
-                Ok(())
+                Ok(Vec::new())
             }
 
-            Payload::AnalyzeAllProjectsDependencies => {
-                let projects = app.store().list_projects().await?;
-                for project in projects {
-                    app.handle()
-                        .send(
-                            super::database::pk(),
-                            Payload::AnalyzeProjectDependencies {
-                                project_id: project.id,
-                                trigger_bumps: false,
-                            },
-                        )
-                        .await?;
-                }
-
-                Ok(())
-            }
+            Payload::AnalyzeAllProjectsDependencies => Ok(store
+                .list_projects()
+                .await?
+                .into_iter()
+                .map(|project| Job::Scan {
+                    lane: LaneKey::of(&project),
+                    project_id: project.id,
+                    trigger_bumps: false,
+                })
+                .collect()),
 
             Payload::AnalyzeProjectDependencies {
                 project_id,
                 trigger_bumps,
             } => {
-                super::actions::analyze_project_dependencies::run(app, project_id, trigger_bumps)
-                    .await
+                let project = store.project(&project_id).await?;
+
+                Ok(vec![Job::Scan {
+                    lane: LaneKey::of(&project),
+                    project_id,
+                    trigger_bumps,
+                }])
             }
 
             Payload::AddProject {
                 platform,
                 repository,
             } => {
-                let project = app.store().add_project(platform, repository).await?;
+                let project = store.add_project(platform, repository).await?;
 
-                app.handle().broadcast(crate::core::event::Event::Commit {
-                    ops: vec![crate::core::event::Op::Upsert {
+                ctx.handle().broadcast(Event::Commit {
+                    ops: vec![Op::Upsert {
                         path: format!("project/{}", project.id),
                         data: serde_json::to_value(project).unwrap_or_default(),
                     }],
                 })?;
 
-                Ok(())
+                Ok(Vec::new())
             }
 
             Payload::RemoveProject {
                 platform,
                 repository,
             } => {
-                let ops = app.store().remove_project(platform, repository).await?;
+                let Some(project) = store
+                    .find_project_by_repository(platform, &repository)
+                    .await?
+                else {
+                    anyhow::bail!("Project not found");
+                };
 
-                app.handle()
-                    .broadcast(crate::core::event::Event::Commit { ops })?;
+                // Collected before the rows are gone. A pull request that is being opened
+                // right now is closed when its outcome finds the record gone.
+                let mut branches: Vec<String> = store
+                    .list_bumps()
+                    .await?
+                    .into_iter()
+                    .filter(|bump| bump.project_id == project.id && bump.url.is_some())
+                    .map(|bump| generate_branch_name(&bump.name, bump.major))
+                    .collect();
+                branches.sort();
+                branches.dedup();
+                branches.extend(
+                    store
+                        .list_sweeps()
+                        .await?
+                        .into_iter()
+                        .filter(|sweep| sweep.project_id == project.id)
+                        .map(|sweep| sweep.kind.branch_name().to_string()),
+                );
 
-                Ok(())
+                let ops = store.remove_project(platform, repository).await?;
+
+                ctx.handle().broadcast(Event::Commit { ops })?;
+
+                Ok(close_pull_requests(LaneKey::of(&project), branches))
             }
 
             Payload::ApproveBump { bump_id } => {
-                let updated_bump = app.store().approve_bump(&bump_id).await?;
+                let updated_bump = store.approve_bump(&bump_id).await?;
 
-                app.handle().broadcast(crate::core::event::Event::Commit {
-                    ops: vec![crate::core::event::Op::Upsert {
+                ctx.handle().broadcast(Event::Commit {
+                    ops: vec![Op::Upsert {
                         path: format!("bump/{}", updated_bump.id),
                         data: serde_json::to_value(updated_bump).unwrap_or_default(),
                     }],
                 })?;
 
-                Ok(())
+                Ok(Vec::new())
             }
 
             Payload::RetractBumpApproval { bump_id } => {
-                let updated_bump = app.store().retract_bump_approval(&bump_id).await?;
+                let updated_bump = store.retract_bump_approval(&bump_id).await?;
 
-                app.handle().broadcast(crate::core::event::Event::Commit {
-                    ops: vec![crate::core::event::Op::Upsert {
+                ctx.handle().broadcast(Event::Commit {
+                    ops: vec![Op::Upsert {
                         path: format!("bump/{}", updated_bump.id),
                         data: serde_json::to_value(updated_bump).unwrap_or_default(),
                     }],
                 })?;
 
-                Ok(())
+                Ok(Vec::new())
             }
 
             Payload::ProcessBump { bump_id } => {
-                super::actions::process_bump::run(app, bump_id).await
+                let bump = store.bump(&bump_id).await?;
+                if !bump.approved {
+                    tracing::info!(
+                        "Bump {} ({}) is not approved, not publishing it",
+                        bump.name,
+                        bump_id
+                    );
+                    return Ok(Vec::new());
+                }
+                let project = store.project(&bump.project_id).await?;
+
+                Ok(vec![Job::PublishBump {
+                    lane: LaneKey::of(&project),
+                    bump_id,
+                }])
             }
 
             Payload::UpdateTransitiveDependencies { project_id } => {
-                super::actions::update_transitive_dependencies::run(app, project_id).await
+                publish_sweep(store, project_id, SweepKind::Transitive).await
             }
 
             Payload::UpdateVulnerableDependencies { project_id } => {
-                super::actions::update_vulnerable_dependencies::run(app, project_id).await
+                publish_sweep(store, project_id, SweepKind::Audit).await
             }
 
             Payload::UpdateSweeps { project_id } => {
-                let sweeps = app.store().list_sweeps().await?;
-                for payload in sweep_updates(sweeps, &project_id) {
-                    app.handle()
-                        .send(crate::core::database::pk(), payload)
-                        .await
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                }
+                let project = store.project(&project_id).await?;
+                let sweeps = store.list_sweeps().await?;
 
-                Ok(())
+                Ok(sweep_updates(sweeps, &LaneKey::of(&project), &project_id))
             }
 
             Payload::Vacuum => {
-                app.store().vacuum().await?;
-                Ok(())
+                store.vacuum().await?;
+                Ok(Vec::new())
             }
 
-            Payload::PersistSweep {
+            Payload::SweepPublished {
+                lane,
                 project_id,
                 kind,
-                pull_request_url,
+                outcome,
             } => {
-                let op = match pull_request_url {
-                    Some(url) => app.store().set_sweep(&project_id, kind, url).await?,
-                    None => app.store().clear_sweep(&project_id, kind).await?,
+                if store.find_project(&project_id).await?.is_none() {
+                    // The project was removed while the sweep was being published. Nothing
+                    // tracks its pull request now, close it.
+                    return Ok(match outcome {
+                        PublishOutcome::Opened { .. } => {
+                            close_pull_requests(lane, vec![kind.branch_name().to_string()])
+                        }
+                        PublishOutcome::Closed => Vec::new(),
+                    });
+                }
+
+                let op = match outcome {
+                    PublishOutcome::Opened { url } => {
+                        store.set_sweep(&project_id, kind, url).await?
+                    }
+                    PublishOutcome::Closed => store.clear_sweep(&project_id, kind).await?,
                 };
 
-                app.handle()
-                    .broadcast(crate::core::event::Event::Commit { ops: vec![op] })?;
+                ctx.handle().broadcast(Event::Commit { ops: vec![op] })?;
 
-                Ok(())
+                Ok(Vec::new())
             }
 
             Payload::SweepPullRequestClosed { pull_request_url } => {
                 // Looked up here rather than by the sender, so that it is ordered after any
-                // PersistSweep that is already queued.
-                if let Some(sweep) = app.store().sweep_by_url(&pull_request_url).await? {
-                    let op = app
-                        .store()
-                        .clear_sweep(&sweep.project_id, sweep.kind)
-                        .await?;
+                // SweepPublished that is already queued.
+                if let Some(sweep) = store.sweep_by_url(&pull_request_url).await? {
+                    let op = store.clear_sweep(&sweep.project_id, sweep.kind).await?;
 
-                    app.handle()
-                        .broadcast(crate::core::event::Event::Commit { ops: vec![op] })?;
+                    ctx.handle().broadcast(Event::Commit { ops: vec![op] })?;
                 }
 
-                Ok(())
+                Ok(Vec::new())
             }
 
-            Payload::PersistBumpResult {
-                bump_id,
+            Payload::BumpPublished {
+                lane,
                 project_id,
+                bump_id,
                 branch_name,
-                pull_request_url,
+                outcome,
             } => {
-                let Some(updated_bump) = app
-                    .store()
-                    .persist_bump_result(&bump_id, pull_request_url.clone())
-                    .await?
-                else {
-                    // A rescan removed the bump while its worker was creating the pull
-                    // request, so the rescan could not know about it. Nothing tracks the
-                    // pull request now, close it.
-                    if pull_request_url.is_some() {
-                        super::actions::close_pull_requests::run(
-                            app,
-                            project_id,
-                            vec![branch_name],
-                        )
-                        .await?;
-                    }
-                    return Ok(());
+                let Some(updated_bump) = store.set_bump_url(&bump_id, outcome.url()).await? else {
+                    // The bump was removed (by a rescan, or with its project) while it was
+                    // being published, so the removal could not know about its pull request.
+                    // Nothing tracks the pull request now, close it.
+                    return match outcome {
+                        PublishOutcome::Opened { .. } => {
+                            close_unused_pull_requests(store, lane, &project_id, vec![branch_name])
+                                .await
+                        }
+                        PublishOutcome::Closed => Ok(Vec::new()),
+                    };
                 };
 
-                app.handle().broadcast(crate::core::event::Event::Commit {
-                    ops: vec![crate::core::event::Op::Upsert {
+                ctx.handle().broadcast(Event::Commit {
+                    ops: vec![Op::Upsert {
                         path: format!("bump/{}", updated_bump.id),
                         data: serde_json::to_value(updated_bump).unwrap_or_default(),
                     }],
                 })?;
 
-                Ok(())
+                Ok(Vec::new())
             }
 
             Payload::BumpPullRequestClosed {
@@ -397,29 +453,28 @@ impl Payload {
                 merged,
             } => {
                 // Looked up here rather than by the sender, so that it is ordered after any
-                // PersistBumpResult that is already queued.
-                let Some(bump) = app.store().bump_by_url(&pull_request_url).await? else {
+                // BumpPublished that is already queued.
+                let Some(bump) = store.bump_by_url(&pull_request_url).await? else {
                     tracing::info!("No bump found for pull request {}", pull_request_url);
-                    return Ok(());
+                    return Ok(Vec::new());
                 };
 
                 if merged {
-                    let ops = app.store().remove_bump(&bump.id).await?;
+                    let ops = store.remove_bump(&bump.id).await?;
 
-                    app.handle()
-                        .broadcast(crate::core::event::Event::Commit { ops })?;
+                    ctx.handle().broadcast(Event::Commit { ops })?;
                 } else {
-                    let updated_bump = app.store().abandon_bump(&bump.id).await?;
+                    let updated_bump = store.abandon_bump(&bump.id).await?;
 
-                    app.handle().broadcast(crate::core::event::Event::Commit {
-                        ops: vec![crate::core::event::Op::Upsert {
+                    ctx.handle().broadcast(Event::Commit {
+                        ops: vec![Op::Upsert {
                             path: format!("bump/{}", updated_bump.id),
                             data: serde_json::to_value(updated_bump).unwrap_or_default(),
                         }],
                     })?;
                 }
 
-                Ok(())
+                Ok(Vec::new())
             }
 
             Payload::PersistAnalyzedProjectDependencies {
@@ -427,73 +482,165 @@ impl Payload {
                 scan_result,
                 trigger_bumps,
             } => {
-                let (ops, obsolete_bumps) = app
-                    .store()
+                let Some(project) = store.find_project(&project_id).await? else {
+                    tracing::info!(
+                        "Project {} was removed while it was scanned, dropping the scan",
+                        project_id
+                    );
+                    return Ok(Vec::new());
+                };
+                let lane = LaneKey::of(&project);
+
+                let (ops, obsolete_bumps) = store
                     .persist_analyzed_project_dependencies(&project_id, scan_result)
                     .await?;
 
-                app.handle()
-                    .broadcast(crate::core::event::Event::Commit { ops })?;
+                ctx.handle().broadcast(Event::Commit { ops })?;
 
                 // The rescan dropped these bumps; their pull requests would be left dangling.
-                if !obsolete_bumps.is_empty() {
-                    let branch_names = obsolete_bumps
-                        .iter()
-                        .map(|bump| {
-                            super::actions::process_bump::generate_branch_name(
-                                &bump.name, bump.major,
-                            )
-                        })
-                        .collect();
-                    super::actions::close_pull_requests::run(app, project_id.clone(), branch_names)
-                        .await?;
-                }
+                let branches = obsolete_bumps
+                    .iter()
+                    .map(|bump| generate_branch_name(&bump.name, bump.major))
+                    .collect();
+                let mut jobs =
+                    close_unused_pull_requests(store, lane.clone(), &project_id, branches).await?;
 
                 if trigger_bumps {
-                    let bumps = app.store().list_bumps().await?;
-                    for bump in bumps
-                        .into_iter()
-                        .filter(|b| b.project_id == project_id && b.approved)
-                    {
-                        app.handle()
-                            .send(
-                                crate::core::database::pk(),
-                                Payload::ProcessBump { bump_id: bump.id },
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!(e))?;
-                    }
+                    let bumps = store.list_bumps().await?;
+                    jobs.extend(
+                        bumps
+                            .into_iter()
+                            .filter(|b| b.project_id == project_id && b.approved)
+                            .map(|bump| Job::PublishBump {
+                                lane: lane.clone(),
+                                bump_id: bump.id,
+                            }),
+                    );
                 }
-                Ok(())
+
+                Ok(jobs)
             }
 
             Payload::Purge => {
-                app.purge_cache().await;
-                Ok(())
+                ctx.purge_cache().await;
+                Ok(Vec::new())
             }
         }
     }
 }
 
-/// The messages that re-run the given project's sweeps which have an open pull request.
-fn sweep_updates(sweeps: Vec<Sweep>, project_id: &str) -> Vec<Payload> {
+/// The job that publishes the project's sweep of the given kind.
+async fn publish_sweep(store: &Store, project_id: String, kind: SweepKind) -> Result<Vec<Job>> {
+    let project = store.project(&project_id).await?;
+
+    Ok(vec![Job::PublishSweep {
+        lane: LaneKey::of(&project),
+        project_id,
+        kind,
+    }])
+}
+
+/// The jobs that re-run the given project's sweeps which have an open pull request.
+fn sweep_updates(sweeps: Vec<Sweep>, lane: &LaneKey, project_id: &str) -> Vec<Job> {
     sweeps
         .into_iter()
         .filter(|sweep| sweep.project_id == project_id)
-        .map(|sweep| match sweep.kind {
-            SweepKind::Audit => Payload::UpdateVulnerableDependencies {
-                project_id: project_id.to_string(),
-            },
-            SweepKind::Transitive => Payload::UpdateTransitiveDependencies {
-                project_id: project_id.to_string(),
-            },
+        .map(|sweep| Job::PublishSweep {
+            lane: lane.clone(),
+            project_id: project_id.to_string(),
+            kind: sweep.kind,
         })
         .collect()
+}
+
+/// The job that closes the pull requests of the branches, if there are any.
+fn close_pull_requests(lane: LaneKey, branches: Vec<String>) -> Vec<Job> {
+    if branches.is_empty() {
+        return Vec::new();
+    }
+
+    vec![Job::ClosePullRequests { lane, branches }]
+}
+
+/// The job that closes the pull requests of the branches that none of the project's bumps
+/// uses. Different bump names can map to the same branch, and so share a pull request.
+async fn close_unused_pull_requests(
+    store: &Store,
+    lane: LaneKey,
+    project_id: &str,
+    branches: Vec<String>,
+) -> Result<Vec<Job>> {
+    let live: HashSet<String> = store
+        .list_bumps()
+        .await?
+        .into_iter()
+        .filter(|bump| bump.project_id == project_id)
+        .map(|bump| generate_branch_name(&bump.name, bump.major))
+        .collect();
+
+    let (kept, unused): (Vec<String>, Vec<String>) = branches
+        .into_iter()
+        .partition(|branch| live.contains(branch));
+    for branch in kept {
+        tracing::info!("Keeping the pull request of {}, a bump uses it", branch);
+    }
+
+    Ok(close_pull_requests(lane, unused))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::database::{Database, Project};
+    use turso::params;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        store: Store,
+        ctx: Context,
+        project: Project,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(Database::open(dir.path()).await.unwrap());
+            let project = store
+                .add_project(Platform::GitHub, "owner/repo".to_string())
+                .await
+                .unwrap();
+            let (ctx, _) = Context::for_tests(store.clone());
+
+            Self {
+                _dir: dir,
+                store,
+                ctx,
+                project,
+            }
+        }
+
+        fn lane(&self) -> LaneKey {
+            LaneKey::of(&self.project)
+        }
+
+        async fn insert_bump(&self, id: &str, name: &str, approved: bool, url: Option<&str>) {
+            let conn = self.store.database().conn().unwrap();
+            conn.execute(
+                "INSERT INTO bump (id, project_id, name, major, approved, url) VALUES (?, ?, ?, 0, ?, ?)",
+                params![id, self.project.id.as_str(), name, approved, url],
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn execute(&self, payload: Payload) -> Vec<Job> {
+            payload.execute(&self.ctx).await.unwrap()
+        }
+    }
+
+    fn url(n: u32) -> String {
+        format!("https://github.com/owner/repo/pull/{}", n)
+    }
 
     fn sweep(project_id: &str, kind: SweepKind) -> Sweep {
         Sweep {
@@ -503,21 +650,34 @@ mod tests {
         }
     }
 
+    fn lane() -> LaneKey {
+        LaneKey {
+            platform: Platform::GitHub,
+            repository: "owner/repo".to_string(),
+        }
+    }
+
+    fn publish_sweep(project_id: &str, kind: SweepKind) -> Job {
+        Job::PublishSweep {
+            lane: lane(),
+            project_id: project_id.to_string(),
+            kind,
+        }
+    }
+
     #[test]
     fn updates_only_the_kinds_with_an_open_pull_request() {
         let sweeps = vec![sweep("a", SweepKind::Audit)];
-        let updates = sweep_updates(sweeps, "a");
-        assert!(matches!(
-            updates.as_slice(),
-            [Payload::UpdateVulnerableDependencies { project_id }] if project_id == "a"
-        ));
+        assert_eq!(
+            sweep_updates(sweeps, &lane(), "a"),
+            vec![publish_sweep("a", SweepKind::Audit)]
+        );
 
         let sweeps = vec![sweep("a", SweepKind::Transitive)];
-        let updates = sweep_updates(sweeps, "a");
-        assert!(matches!(
-            updates.as_slice(),
-            [Payload::UpdateTransitiveDependencies { project_id }] if project_id == "a"
-        ));
+        assert_eq!(
+            sweep_updates(sweeps, &lane(), "a"),
+            vec![publish_sweep("a", SweepKind::Transitive)]
+        );
     }
 
     #[test]
@@ -526,7 +686,7 @@ mod tests {
             sweep("a", SweepKind::Audit),
             sweep("a", SweepKind::Transitive),
         ];
-        assert_eq!(sweep_updates(sweeps, "a").len(), 2);
+        assert_eq!(sweep_updates(sweeps, &lane(), "a").len(), 2);
     }
 
     #[test]
@@ -535,11 +695,322 @@ mod tests {
             sweep("b", SweepKind::Audit),
             sweep("b", SweepKind::Transitive),
         ];
-        assert!(sweep_updates(sweeps, "a").is_empty());
+        assert!(sweep_updates(sweeps, &lane(), "a").is_empty());
     }
 
     #[test]
     fn updates_nothing_without_open_sweeps() {
-        assert!(sweep_updates(Vec::new(), "a").is_empty());
+        assert!(sweep_updates(Vec::new(), &lane(), "a").is_empty());
+    }
+
+    #[tokio::test]
+    async fn analyzing_all_projects_scans_each_on_its_own_lane() {
+        let f = Fixture::new().await;
+        let other = f
+            .store
+            .add_project(Platform::Tangled, "owner/other".to_string())
+            .await
+            .unwrap();
+
+        let mut jobs = f.execute(Payload::AnalyzeAllProjectsDependencies).await;
+        jobs.sort_by_key(|job| job.lane().repository.clone());
+
+        assert_eq!(
+            jobs,
+            vec![
+                Job::Scan {
+                    lane: LaneKey::of(&other),
+                    project_id: other.id.clone(),
+                    trigger_bumps: false,
+                },
+                Job::Scan {
+                    lane: f.lane(),
+                    project_id: f.project.id.clone(),
+                    trigger_bumps: false,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn processing_a_bump_publishes_it_only_if_approved() {
+        let f = Fixture::new().await;
+        f.insert_bump("approved", "serde", true, None).await;
+        f.insert_bump("pending", "tokio", false, None).await;
+
+        let jobs = f
+            .execute(Payload::ProcessBump {
+                bump_id: "approved".to_string(),
+            })
+            .await;
+        assert_eq!(
+            jobs,
+            vec![Job::PublishBump {
+                lane: f.lane(),
+                bump_id: "approved".to_string(),
+            }]
+        );
+
+        let jobs = f
+            .execute(Payload::ProcessBump {
+                bump_id: "pending".to_string(),
+            })
+            .await;
+        assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn updating_sweeps_publishes_the_open_ones() {
+        let f = Fixture::new().await;
+        f.store
+            .set_sweep(&f.project.id, SweepKind::Audit, url(1))
+            .await
+            .unwrap();
+
+        let jobs = f
+            .execute(Payload::UpdateSweeps {
+                project_id: f.project.id.clone(),
+            })
+            .await;
+
+        assert_eq!(jobs, vec![publish_sweep(&f.project.id, SweepKind::Audit)]);
+    }
+
+    #[tokio::test]
+    async fn a_published_bump_records_its_pull_request() {
+        let f = Fixture::new().await;
+        f.insert_bump("bump", "serde", true, None).await;
+
+        let jobs = f
+            .execute(Payload::BumpPublished {
+                lane: f.lane(),
+                project_id: f.project.id.clone(),
+                bump_id: "bump".to_string(),
+                branch_name: generate_branch_name("serde", false),
+                outcome: PublishOutcome::Opened { url: url(1) },
+            })
+            .await;
+
+        assert!(jobs.is_empty());
+        assert_eq!(f.store.bump("bump").await.unwrap().url, Some(url(1)));
+    }
+
+    #[tokio::test]
+    async fn a_bump_with_nothing_to_publish_forgets_its_closed_pull_request() {
+        let f = Fixture::new().await;
+        f.insert_bump("bump", "serde", true, Some(&url(1))).await;
+
+        let jobs = f
+            .execute(Payload::BumpPublished {
+                lane: f.lane(),
+                project_id: f.project.id.clone(),
+                bump_id: "bump".to_string(),
+                branch_name: generate_branch_name("serde", false),
+                outcome: PublishOutcome::Closed,
+            })
+            .await;
+
+        assert!(jobs.is_empty());
+        assert_eq!(f.store.bump("bump").await.unwrap().url, None);
+    }
+
+    #[tokio::test]
+    async fn a_late_bump_publish_closes_the_pull_request_nothing_tracks() {
+        let f = Fixture::new().await;
+        let branch_name = generate_branch_name("serde", false);
+
+        let jobs = f
+            .execute(Payload::BumpPublished {
+                lane: f.lane(),
+                project_id: f.project.id.clone(),
+                bump_id: "gone".to_string(),
+                branch_name: branch_name.clone(),
+                outcome: PublishOutcome::Opened { url: url(1) },
+            })
+            .await;
+        assert_eq!(
+            jobs,
+            vec![Job::ClosePullRequests {
+                lane: f.lane(),
+                branches: vec![branch_name.clone()],
+            }]
+        );
+
+        let jobs = f
+            .execute(Payload::BumpPublished {
+                lane: f.lane(),
+                project_id: f.project.id.clone(),
+                bump_id: "gone".to_string(),
+                branch_name,
+                outcome: PublishOutcome::Closed,
+            })
+            .await;
+        assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_late_bump_publish_keeps_a_pull_request_another_bump_uses() {
+        let f = Fixture::new().await;
+        // "Foo@Bar" and "foo---bar" map to the same branch; only the latter exists.
+        assert_eq!(
+            generate_branch_name("Foo@Bar", false),
+            generate_branch_name("foo---bar", false)
+        );
+        f.insert_bump("live", "foo---bar", false, None).await;
+
+        let jobs = f
+            .execute(Payload::BumpPublished {
+                lane: f.lane(),
+                project_id: f.project.id.clone(),
+                bump_id: "gone".to_string(),
+                branch_name: generate_branch_name("Foo@Bar", false),
+                outcome: PublishOutcome::Opened { url: url(1) },
+            })
+            .await;
+
+        assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_published_sweep_records_or_forgets_its_pull_request() {
+        let f = Fixture::new().await;
+        let published = |outcome| Payload::SweepPublished {
+            lane: f.lane(),
+            project_id: f.project.id.clone(),
+            kind: SweepKind::Audit,
+            outcome,
+        };
+
+        let jobs = f
+            .execute(published(PublishOutcome::Opened { url: url(1) }))
+            .await;
+        assert!(jobs.is_empty());
+        assert_eq!(f.store.list_sweeps().await.unwrap().len(), 1);
+
+        let jobs = f.execute(published(PublishOutcome::Closed)).await;
+        assert!(jobs.is_empty());
+        assert!(f.store.list_sweeps().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_late_sweep_publish_closes_the_pull_request_of_a_removed_project() {
+        let f = Fixture::new().await;
+        f.execute(Payload::RemoveProject {
+            platform: Platform::GitHub,
+            repository: "owner/repo".to_string(),
+        })
+        .await;
+
+        let jobs = f
+            .execute(Payload::SweepPublished {
+                lane: f.lane(),
+                project_id: f.project.id.clone(),
+                kind: SweepKind::Transitive,
+                outcome: PublishOutcome::Opened { url: url(1) },
+            })
+            .await;
+
+        assert_eq!(
+            jobs,
+            vec![Job::ClosePullRequests {
+                lane: f.lane(),
+                branches: vec!["syz/transitive".to_string()],
+            }]
+        );
+        assert!(f.store.list_sweeps().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_a_project_closes_its_pull_requests() {
+        let f = Fixture::new().await;
+        f.insert_bump("open", "serde", true, Some(&url(1))).await;
+        f.insert_bump("unpublished", "tokio", true, None).await;
+        f.store
+            .set_sweep(&f.project.id, SweepKind::Audit, url(2))
+            .await
+            .unwrap();
+
+        let jobs = f
+            .execute(Payload::RemoveProject {
+                platform: Platform::GitHub,
+                repository: "owner/repo".to_string(),
+            })
+            .await;
+
+        assert_eq!(
+            jobs,
+            vec![Job::ClosePullRequests {
+                lane: f.lane(),
+                branches: vec![
+                    generate_branch_name("serde", false),
+                    "syz/audit".to_string()
+                ],
+            }]
+        );
+        assert!(f.store.list_projects().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn removing_a_project_without_pull_requests_runs_nothing() {
+        let f = Fixture::new().await;
+
+        let jobs = f
+            .execute(Payload::RemoveProject {
+                platform: Platform::GitHub,
+                repository: "owner/repo".to_string(),
+            })
+            .await;
+
+        assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rescan_closes_dropped_pull_requests_and_publishes_approved_bumps() {
+        let f = Fixture::new().await;
+        // Dropped by the rescan, which finds no dependencies.
+        f.insert_bump("dropped", "serde", true, Some(&url(1))).await;
+
+        let jobs = f
+            .execute(Payload::PersistAnalyzedProjectDependencies {
+                project_id: f.project.id.clone(),
+                scan_result: AnalyzedProjectDependencies {
+                    analyzed_project_dependencies: Vec::new(),
+                },
+                trigger_bumps: true,
+            })
+            .await;
+
+        assert_eq!(
+            jobs,
+            vec![Job::ClosePullRequests {
+                lane: f.lane(),
+                branches: vec![generate_branch_name("serde", false)],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scan_of_a_removed_project_is_dropped() {
+        let f = Fixture::new().await;
+        f.execute(Payload::RemoveProject {
+            platform: Platform::GitHub,
+            repository: "owner/repo".to_string(),
+        })
+        .await;
+
+        let jobs = f
+            .execute(Payload::PersistAnalyzedProjectDependencies {
+                project_id: f.project.id.clone(),
+                scan_result: AnalyzedProjectDependencies {
+                    analyzed_project_dependencies: Vec::new(),
+                },
+                trigger_bumps: true,
+            })
+            .await;
+
+        assert!(jobs.is_empty());
+        let conn = f.store.database().conn().unwrap();
+        let mut rows = conn.query("SELECT 1 FROM scan", ()).await.unwrap();
+        assert!(rows.next().await.unwrap().is_none());
     }
 }

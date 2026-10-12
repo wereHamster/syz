@@ -1,136 +1,85 @@
-use super::{report_sweep, DefaultBranch};
-use crate::core::application::Application;
+use super::{Change, DefaultBranch};
 use crate::core::database::SweepKind;
-use anyhow::Result;
-use tracing::instrument::WithSubscriber;
-use tracing::Instrument;
+use crate::core::job::LaneKey;
+use crate::core::message::Payload;
+use crate::core::services::Services;
+use anyhow::{Context, Result};
 
-pub async fn run(app: &Application, project_id: String) -> Result<()> {
-    let repository = app.project_platform_repository(&project_id).await?;
-    let patchers = app.patchers();
+/// Create or update the pull request that updates all transitive dependencies of the project,
+/// or close it if there is nothing to update.
+pub async fn run(
+    services: &Services,
+    lane: LaneKey,
+    project_id: String,
+) -> Result<Option<Payload>> {
+    let default_branch = DefaultBranch::resolve(services.repository(&lane)?.as_ref()).await?;
 
-    let pr_generator = app.transitive_pull_request_generator();
-    let advisory_resolver = app.advisory_resolver();
-    let handle = app.handle();
-    let work_dir = app.work_dir();
+    let pr_generator = services.transitive_pull_request_generator();
+    let advisory_resolver = services.advisory_resolver();
 
-    let span = tracing::Span::current();
+    let mut modifications = Vec::new();
+    let mut summaries = Vec::new();
 
-    tokio::spawn(async move {
-        let DefaultBranch {
-            name: default_branch,
-            revision: base_revision,
-            snapshot,
-            mutator,
-        } = match DefaultBranch::resolve(repository.as_ref()).await {
-            Ok(branch) => branch,
+    for (ecosystem_name, patcher) in services.patchers() {
+        let temp_dir = super::create_temp_dir(services.work_dir())?;
+
+        // Without a trustworthy result for every ecosystem, neither opening nor closing the
+        // pull request would be correct.
+        let Some(mut result) = patcher
+            .update_transitive_dependencies(default_branch.snapshot.as_ref(), temp_dir.path())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to update transitive dependencies for {}",
+                    ecosystem_name
+                )
+            })?
+        else {
+            continue;
+        };
+        if result.modifications.is_empty() {
+            continue;
+        }
+
+        modifications.extend(result.modifications);
+
+        // Resolve advisories for bumped packages
+        resolve_advisories_for_bumps(
+            advisory_resolver.as_ref(),
+            ecosystem_name,
+            &mut result.summary,
+        )
+        .await;
+
+        let body = match pr_generator
+            .generate_pull_request_body(&result.summary)
+            .await
+        {
+            Ok(b) => b,
             Err(e) => {
-                tracing::error!("Failed to resolve the default branch of {}: {:#}", project_id, e);
-                return;
+                tracing::error!("Failed to generate transitive PR body: {}", e);
+                String::from("Failed to generate PR body.")
             }
         };
 
-        let mut all_modifications = Vec::new();
-        let mut all_summaries = Vec::new();
-
-        for (ecosystem_name, patcher) in patchers {
-            let temp_dir = match super::create_temp_dir(&work_dir) {
-                Ok(dir) => dir,
-                Err(e) => {
-                    tracing::error!("Failed to create temporary directory: {:#}", e);
-                    continue;
-                }
-            };
-
-            match patcher
-                .update_transitive_dependencies(snapshot.as_ref(), temp_dir.path())
-                .await
-            {
-                Ok(Some(mut result)) => {
-                    if !result.modifications.is_empty() {
-                        all_modifications.extend(result.modifications);
-
-                        // Resolve advisories for bumped packages
-                        resolve_advisories_for_bumps(
-                            advisory_resolver.as_ref(),
-                            ecosystem_name,
-                            &mut result.summary,
-                        )
-                        .await;
-
-                        let body = match pr_generator
-                            .generate_pull_request_body(&result.summary)
-                            .await
-                        {
-                            Ok(b) => b,
-                            Err(e) => {
-                                tracing::error!("Failed to generate transitive PR body: {}", e);
-                                String::from("Failed to generate PR body.")
-                            }
-                        };
-
-                        all_summaries.push(format!("### {}\n\n{}", ecosystem_name, body));
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to update transitive dependencies for {}: {}",
-                        ecosystem_name,
-                        e
-                    );
-                }
-            }
-        }
-
-        let kind = SweepKind::Transitive;
-        let branch_name = kind.branch_name();
-
-        // Failing to close a pull request isn't tracked: the record is dropped regardless.
-        if all_modifications.is_empty() {
-            let _ = mutator
-                .close_pull_request(branch_name, &default_branch)
-                .await;
-            report_sweep(&handle, &project_id, kind, None).await;
-            return;
-        }
-
-        let title = "Update transitive dependencies".to_string();
-        let combined_summary = all_summaries.join("\n\n");
-
-        let commit_res = mutator
-            .commit_changes(&base_revision, branch_name, &title, all_modifications)
-            .await;
-
-        match commit_res {
-            Ok(Some(_sha)) => {
-                match mutator
-                    .create_pull_request(&title, branch_name, &default_branch, &combined_summary)
-                    .await
-                {
-                    Ok(url) => {
-                        tracing::info!("Created transitive update PR: {}", url);
-                        report_sweep(&handle, &project_id, kind, Some(url)).await;
-                    }
-                    Err(e) => tracing::error!("Failed to create transitive PR: {}", e),
-                }
-            }
-            Ok(None) => {
-                tracing::info!("Modifications resulted in no changes relative to base branch. Cleaning up empty PRs.");
-                let _ = mutator
-                    .close_pull_request(branch_name, &default_branch)
-                    .await;
-                report_sweep(&handle, &project_id, kind, None).await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to commit changes for transitive updates: {}", e);
-            }
-        }
+        summaries.push(format!("### {}\n\n{}", ecosystem_name, body));
     }
-    .instrument(span)
-    .with_current_subscriber());
 
-    Ok(())
+    let change = (!modifications.is_empty()).then(|| Change {
+        title: "Update transitive dependencies".to_string(),
+        body: summaries.join("\n\n"),
+        modifications,
+    });
+
+    let kind = SweepKind::Transitive;
+    let outcome = default_branch.publish(kind.branch_name(), change).await?;
+
+    Ok(Some(Payload::SweepPublished {
+        lane,
+        project_id,
+        kind,
+        outcome,
+    }))
 }
 
 /// Parse a version bump description like `` `1.2.3` -> `2.0.0` `` or

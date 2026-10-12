@@ -55,6 +55,12 @@ impl Store {
     }
 
     pub async fn project(&self, project_id: &str) -> Result<Project> {
+        self.find_project(project_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Project not found"))
+    }
+
+    pub async fn find_project(&self, project_id: &str) -> Result<Option<Project>> {
         let conn = self.database.conn()?;
 
         let mut stmt = conn
@@ -65,14 +71,26 @@ impl Store {
 
         if let Some(row) = rows.next().await? {
             let platform: String = row.get(1).context("Missing platform column")?;
-            return Ok(Project {
+            return Ok(Some(Project {
                 id: row.get(0).unwrap_or_default(),
                 platform: platform.parse().context("Invalid platform in database")?,
                 repository: row.get(2).unwrap_or_default(),
-            });
+            }));
         }
 
-        Err(anyhow::anyhow!("Project not found"))
+        Ok(None)
+    }
+
+    pub async fn find_project_by_repository(
+        &self,
+        platform: Platform,
+        repository: &str,
+    ) -> Result<Option<Project>> {
+        Ok(self
+            .list_projects()
+            .await?
+            .into_iter()
+            .find(|project| project.platform == platform && project.repository == repository))
     }
 
     pub async fn add_project(&self, platform: Platform, repository: String) -> Result<Project> {
@@ -670,19 +688,15 @@ impl Store {
         Ok(targets)
     }
 
-    pub async fn persist_bump_result(
-        &self,
-        bump_id: &str,
-        pull_request_url: Option<String>,
-    ) -> Result<Option<Bump>> {
+    /// Record the bump's open pull request, or that it has none. Returns `None` if the bump no
+    /// longer exists.
+    pub async fn set_bump_url(&self, bump_id: &str, url: Option<&str>) -> Result<Option<Bump>> {
         let conn = self.database.conn()?;
-        if let Some(url) = pull_request_url {
-            conn.execute(
-                "UPDATE bump SET url = ? WHERE id = ?",
-                turso::params![url, bump_id],
-            )
-            .await?;
-        }
+        conn.execute(
+            "UPDATE bump SET url = ? WHERE id = ?",
+            turso::params![url, bump_id],
+        )
+        .await?;
 
         self.find_bump(bump_id).await
     }
@@ -1035,19 +1049,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_bump_result_reports_a_bump_that_no_longer_exists() {
+    async fn set_bump_url_reports_a_bump_that_no_longer_exists() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir).await;
 
         let bump = store
-            .persist_bump_result(
-                "gone",
-                Some("https://github.com/owner/repo/pull/1".to_string()),
-            )
+            .set_bump_url("gone", Some("https://github.com/owner/repo/pull/1"))
             .await
             .unwrap();
 
         assert!(bump.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_bump_url_sets_and_clears_the_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+
+        let project = store
+            .add_project(Platform::GitHub, "owner/repo".to_string())
+            .await
+            .unwrap();
+        let conn = store.database.conn().unwrap();
+        conn.execute(
+            "INSERT INTO bump (id, project_id, name, major, approved) VALUES (?, ?, ?, 0, 1)",
+            params!["bump", project.id.as_str(), "serde"],
+        )
+        .await
+        .unwrap();
+
+        let url = "https://github.com/owner/repo/pull/1";
+        let bump = store.set_bump_url("bump", Some(url)).await.unwrap();
+        assert_eq!(bump.unwrap().url.as_deref(), Some(url));
+
+        let bump = store.set_bump_url("bump", None).await.unwrap();
+        assert_eq!(bump.unwrap().url, None);
     }
 
     #[tokio::test]

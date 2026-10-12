@@ -1,53 +1,33 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio::sync::{broadcast, mpsc};
 use tracing::Instrument;
 
-use crate::core::clients;
 use crate::core::platform::{GitHubPlatformAdapter, PlatformRegistry, TangledPlatformAdapter};
 
 use super::clients::github::GitHub;
 use super::clients::tangled::Tangled;
 use super::database::Database;
 
-use super::engine::ecosystems::{
-    cargo::{CargoRegistry, CargoScanner},
-    github_actions::{GitHubRegistry, GitHubScanner},
-    nix_flake::{NixFlakePatcher, NixFlakeRegistry, NixFlakeScanner},
-    npm::{NpmRegistry, NpmScanner},
-    registry_router::RegistryRouter,
-    Registry, Scanner,
-};
+use super::dispatcher::{Dispatcher, Limits};
 use super::event::Event;
 use super::http_agent::HttpAgent;
 use super::message::{Message, Payload};
+use super::services::Services;
 use super::store::Store;
 
 pub struct Application {
-    store: Store,
-    handle: Handle,
+    context: Context,
 
     mailbox: mpsc::Receiver<Message>,
 
-    http_agent: HttpAgent,
-    github: GitHub,
-
-    platforms: PlatformRegistry,
+    /// Runs the jobs that messages ask for.
+    dispatcher: Dispatcher,
 
     /// Whether `start` also launches the daily audit of all projects.
     audit_schedule: bool,
-
-    /// Limits how many audits run at once, so that auditing all projects doesn't hit the
-    /// hosting platform with a request per project at the same time.
-    audit_permits: Arc<Semaphore>,
-
-    /// Where workers create the scratch directories in which package managers run.
-    work_dir: PathBuf,
 }
-
-/// How many projects are audited at the same time.
-const CONCURRENT_AUDITS: usize = 4;
 
 impl Application {
     pub async fn new(data_dir: &Path, work_dir: PathBuf) -> Result<Self> {
@@ -65,33 +45,31 @@ impl Application {
         platforms.register(Arc::new(GitHubPlatformAdapter::new(github.clone())));
         platforms.register(Arc::new(TangledPlatformAdapter::new(tangled)));
 
+        let services = Services::new(
+            store.clone(),
+            http_agent.clone(),
+            github,
+            platforms,
+            work_dir,
+        );
+        let dispatcher = Dispatcher::new(Arc::new(services), mailbox_tx.clone(), Limits::default());
+
         Ok(Self {
-            store: store.clone(),
-            handle: Handle {
-                store,
-                mailbox: mailbox_tx,
-                events,
+            context: Context {
+                store: store.clone(),
+                handle: Handle {
+                    store,
+                    mailbox: mailbox_tx,
+                    events,
+                },
+                http_agent,
             },
 
             mailbox: mailbox_rx,
-
-            http_agent,
-            github,
-            platforms,
+            dispatcher,
 
             audit_schedule: true,
-            audit_permits: Arc::new(Semaphore::new(CONCURRENT_AUDITS)),
-
-            work_dir,
         })
-    }
-
-    pub fn work_dir(&self) -> PathBuf {
-        self.work_dir.clone()
-    }
-
-    pub fn audit_permits(&self) -> Arc<Semaphore> {
-        self.audit_permits.clone()
     }
 
     /// Choose whether `start` launches the daily audit of all projects (on by default).
@@ -101,7 +79,7 @@ impl Application {
     }
 
     pub fn start(self) -> Handle {
-        let handle = self.handle.clone();
+        let handle = self.context.handle.clone();
 
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -134,187 +112,88 @@ impl Application {
     }
 
     pub fn handle(&self) -> Handle {
-        self.handle.clone()
-    }
-
-    pub async fn purge_cache(&self) {
-        self.http_agent.purge().await;
+        self.context.handle.clone()
     }
 
     pub fn store(&self) -> &Store {
-        &self.store
-    }
-
-    pub fn scanners(&self) -> Vec<Box<dyn Scanner>> {
-        vec![
-            Box::new(CargoScanner),
-            Box::new(NpmScanner),
-            Box::new(GitHubScanner),
-            Box::new(NixFlakeScanner),
-        ]
-    }
-
-    pub fn registry_router(&self) -> RegistryRouter {
-        let mut registries: std::collections::HashMap<String, Box<dyn Registry>> =
-            std::collections::HashMap::new();
-
-        registries.insert(
-            "cargo".to_string(),
-            Box::new(CargoRegistry::new(clients::crates::Crates::new(
-                self.http_agent.clone(),
-            ))),
-        );
-        registries.insert(
-            "npm".to_string(),
-            Box::new(NpmRegistry::new(clients::npm::Npm::new(
-                self.http_agent.clone(),
-            ))),
-        );
-        registries.insert(
-            "github-actions".to_string(),
-            Box::new(GitHubRegistry::new(self.github.clone())),
-        );
-        registries.insert(
-            "nix-flake".to_string(),
-            Box::new(NixFlakeRegistry::new(self.github.clone())),
-        );
-
-        RegistryRouter::new(registries)
-    }
-
-    pub async fn project_platform_repository(
-        &self,
-        project_id: &str,
-    ) -> Result<Box<dyn super::platform::ProjectPlatformRepository>> {
-        let project = self.store.project(project_id).await?;
-        let platform = self.platforms.resolve(project.platform)?;
-
-        Ok(platform.repository(&project.repository))
-    }
-
-    pub async fn project_repository_view(
-        &self,
-        project_id: &str,
-    ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryView>> {
-        let repository = self.project_platform_repository(project_id).await?;
-        repository.view().await
+        &self.context.store
     }
 
     async fn run(mut self) -> Result<()> {
-        while let Some(msg) = self.mailbox.recv().await {
-            let message_id = msg.message_id.clone();
-
+        while let Some(Message {
+            message_id,
+            payload,
+            processed,
+        }) = self.mailbox.recv().await
+        {
             let span = tracing::info_span!("message", mid = %message_id);
 
             async {
-                tracing::info!("Processing {:}", msg.payload);
+                tracing::info!("Processing {:}", payload);
 
-                if let Err(e) = msg.payload.execute(&self).await {
-                    tracing::warn!("Failed to process message {}: {:#}", message_id, e);
+                match payload.execute(&self.context).await {
+                    // Enqueued within the message's span, which the jobs then run under.
+                    Ok(jobs) => {
+                        for job in jobs {
+                            self.dispatcher.enqueue(job);
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to process message {}: {:#}", message_id, e),
                 }
             }
             .instrument(span)
             .await;
+
+            if let Some(processed) = processed {
+                // The sender may have stopped waiting.
+                let _ = processed.send(());
+            }
         }
 
         tracing::error!("Application loop is unexpectedly exiting");
 
         Ok(())
     }
+}
 
-    pub async fn project_repository_mutator(
-        &self,
-        project_id: &str,
-    ) -> Result<Box<dyn super::engine::repository::ProjectRepositoryMutator>> {
-        let repository = self.project_platform_repository(project_id).await?;
-        repository.mutator().await
+/// What messages work with while the main loop executes them. Side effects are not part of it:
+/// messages return them as jobs instead.
+pub struct Context {
+    store: Store,
+    handle: Handle,
+    http_agent: HttpAgent,
+}
+
+impl Context {
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
-    pub fn advisory_resolver(&self) -> Box<dyn crate::core::engine::advisories::AdvisoryResolver> {
-        let osv_client = crate::core::clients::osv::OsvClient::new(self.http_agent.clone());
-        Box::new(crate::core::engine::advisories::OsvAdvisoryResolver::new(
-            osv_client,
-        ))
+    pub fn handle(&self) -> &Handle {
+        &self.handle
     }
 
-    pub fn pull_request_generator(
-        &self,
-    ) -> Box<dyn crate::core::engine::pull_request_generator::PullRequestGenerator> {
-        Box::new(
-            crate::core::engine::pull_request_generator::DefaultPullRequestGenerator::new(
-                self.registry_router(),
-                self.advisory_resolver(),
-                self.github.clone(),
-            ),
-        )
+    pub async fn purge_cache(&self) {
+        self.http_agent.purge().await;
     }
 
-    pub fn transitive_pull_request_generator(
-        &self,
-    ) -> Box<dyn crate::core::engine::pull_request_generator::TransitiveUpdatesPullRequestGenerator>
-    {
-        Box::new(crate::core::engine::pull_request_generator::DefaultTransitiveUpdatesPullRequestGenerator)
-    }
+    /// A context on the given store. Clients of the returned receiver see what is broadcast.
+    #[cfg(test)]
+    pub fn for_tests(store: Store) -> (Self, broadcast::Receiver<Event>) {
+        // Messages don't send to the mailbox, so nothing needs to receive from it.
+        let (mailbox, _) = mpsc::channel(1);
+        let (events, receiver) = broadcast::channel(1000);
 
-    pub fn audit_pull_request_generator(
-        &self,
-    ) -> Box<dyn crate::core::engine::pull_request_generator::AuditPullRequestGenerator> {
-        Box::new(crate::core::engine::pull_request_generator::DefaultAuditPullRequestGenerator)
-    }
-
-    pub fn patchers(
-        &self,
-    ) -> Vec<(
-        &'static str,
-        Box<dyn crate::core::engine::ecosystems::Patcher>,
-    )> {
-        vec![
-            (
-                "npm",
-                Box::new(crate::core::engine::ecosystems::npm::NpmPatcher::new(
-                    crate::core::clients::npm::Npm::new(self.http_agent.clone()),
-                )),
-            ),
-            (
-                "github-actions",
-                Box::new(
-                    crate::core::engine::ecosystems::github_actions::GitHubPatcher::new(
-                        self.github.clone(),
-                    ),
-                ),
-            ),
-            (
-                "cargo",
-                Box::new(crate::core::engine::ecosystems::cargo::CargoPatcher::new()),
-            ),
-            (
-                "nix-flake",
-                Box::new(NixFlakePatcher::new(self.github.clone())),
-            ),
-        ]
-    }
-
-    pub fn patcher(
-        &self,
-        ecosystem: &str,
-    ) -> Option<Box<dyn crate::core::engine::ecosystems::Patcher>> {
-        match ecosystem {
-            "npm" => Some(Box::new(
-                crate::core::engine::ecosystems::npm::NpmPatcher::new(
-                    crate::core::clients::npm::Npm::new(self.http_agent.clone()),
-                ),
-            )),
-            "github-actions" => Some(Box::new(
-                crate::core::engine::ecosystems::github_actions::GitHubPatcher::new(
-                    self.github.clone(),
-                ),
-            )),
-            "cargo" => Some(Box::new(
-                crate::core::engine::ecosystems::cargo::CargoPatcher::new(),
-            )),
-            "nix-flake" => Some(Box::new(NixFlakePatcher::new(self.github.clone()))),
-            _ => None,
-        }
+        let context = Self {
+            store: store.clone(),
+            handle: Handle {
+                store,
+                mailbox,
+                events,
+            },
+            http_agent: HttpAgent::new(),
+        };
+        (context, receiver)
     }
 }
 
@@ -350,6 +229,7 @@ impl Handle {
         let message = Message {
             message_id,
             payload,
+            processed: None,
         };
 
         self.mailbox
