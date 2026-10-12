@@ -147,7 +147,7 @@ pub async fn run(app: &Application, bump_id: String) -> Result<()> {
     Ok(())
 }
 
-fn generate_branch_name(bump_name: &str, is_major: bool) -> String {
+pub(super) fn generate_branch_name(bump_name: &str, is_major: bool) -> String {
     let safe_branch_name = bump_name
         .chars()
         .map(|c| {

@@ -409,13 +409,23 @@ impl Payload {
                 scan_result,
                 trigger_bumps,
             } => {
-                let ops = app
+                let (ops, obsolete_bumps) = app
                     .store()
                     .persist_analyzed_project_dependencies(&project_id, scan_result)
                     .await?;
 
                 app.handle()
                     .broadcast(crate::core::event::Event::Commit { ops })?;
+
+                // The rescan dropped these bumps; their pull requests would be left dangling.
+                if !obsolete_bumps.is_empty() {
+                    super::actions::close_obsolete_bumps::run(
+                        app,
+                        project_id.clone(),
+                        obsolete_bumps,
+                    )
+                    .await?;
+                }
 
                 if trigger_bumps {
                     let bumps = app.store().list_bumps().await?;
