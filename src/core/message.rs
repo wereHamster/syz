@@ -36,10 +36,9 @@ pub enum Payload {
 
     /// Scan the project source code, identify which dependencies it has, check which
     /// dependencies are outdated, and update the local database with the information.
-    /// With `trigger_bumps`, the approved bumps of the project are processed afterwards.
+    /// The approved bumps of the project are published afterwards.
     AnalyzeProjectDependencies {
         project_id: String,
-        trigger_bumps: bool,
     },
 
     /// Remove all but the latest scan for each project, and delete all
@@ -128,13 +127,11 @@ pub enum Payload {
         merged: bool,
     },
 
-    /// A scan finished. With `trigger_bumps`, the approved bumps of the project are
-    /// published afterwards.
+    /// A scan finished. The approved bumps of the project are published afterwards.
     #[serde(skip)]
     PersistAnalyzedProjectDependencies {
         project_id: String,
         scan_result: AnalyzedProjectDependencies,
-        trigger_bumps: bool,
     },
 
     /// Purge all caches.
@@ -242,20 +239,15 @@ impl Payload {
                 .map(|project| Job::Scan {
                     lane: LaneKey::of(&project),
                     project_id: project.id,
-                    trigger_bumps: false,
                 })
                 .collect()),
 
-            Payload::AnalyzeProjectDependencies {
-                project_id,
-                trigger_bumps,
-            } => {
+            Payload::AnalyzeProjectDependencies { project_id } => {
                 let project = store.project(&project_id).await?;
 
                 Ok(vec![Job::Scan {
                     lane: LaneKey::of(&project),
                     project_id,
-                    trigger_bumps,
                 }])
             }
 
@@ -480,7 +472,6 @@ impl Payload {
             Payload::PersistAnalyzedProjectDependencies {
                 project_id,
                 scan_result,
-                trigger_bumps,
             } => {
                 let Some(project) = store.find_project(&project_id).await? else {
                     tracing::info!(
@@ -505,18 +496,16 @@ impl Payload {
                 let mut jobs =
                     close_unused_pull_requests(store, lane.clone(), &project_id, branches).await?;
 
-                if trigger_bumps {
-                    let bumps = store.list_bumps().await?;
-                    jobs.extend(
-                        bumps
-                            .into_iter()
-                            .filter(|b| b.project_id == project_id && b.approved)
-                            .map(|bump| Job::PublishBump {
-                                lane: lane.clone(),
-                                bump_id: bump.id,
-                            }),
-                    );
-                }
+                let bumps = store.list_bumps().await?;
+                jobs.extend(
+                    bumps
+                        .into_iter()
+                        .filter(|b| b.project_id == project_id && b.approved)
+                        .map(|bump| Job::PublishBump {
+                            lane: lane.clone(),
+                            bump_id: bump.id,
+                        }),
+                );
 
                 Ok(jobs)
             }
@@ -721,12 +710,10 @@ mod tests {
                 Job::Scan {
                     lane: LaneKey::of(&other),
                     project_id: other.id.clone(),
-                    trigger_bumps: false,
                 },
                 Job::Scan {
                     lane: f.lane(),
                     project_id: f.project.id.clone(),
-                    trigger_bumps: false,
                 },
             ]
         );
@@ -965,7 +952,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rescan_closes_dropped_pull_requests_and_publishes_approved_bumps() {
+    async fn a_rescan_closes_the_pull_requests_of_dropped_bumps() {
         let f = Fixture::new().await;
         // Dropped by the rescan, which finds no dependencies.
         f.insert_bump("dropped", "serde", true, Some(&url(1))).await;
@@ -976,7 +963,6 @@ mod tests {
                 scan_result: AnalyzedProjectDependencies {
                     analyzed_project_dependencies: Vec::new(),
                 },
-                trigger_bumps: true,
             })
             .await;
 
@@ -985,6 +971,59 @@ mod tests {
             vec![Job::ClosePullRequests {
                 lane: f.lane(),
                 branches: vec![generate_branch_name("serde", false)],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rescan_publishes_the_approved_bumps_that_survive() {
+        use crate::core::actions::analyze_project_dependencies::AnalyzedProjectDependency;
+        use crate::core::engine::{
+            DependencyUpdateOption, DiscoveredDependency, PackageInfo, ProposedBump, UpdateType,
+            PURL,
+        };
+
+        let f = Fixture::new().await;
+        f.insert_bump("approved", "serde", true, None).await;
+        f.insert_bump("pending", "tokio", false, None).await;
+
+        let analyzed = |name: &str| AnalyzedProjectDependency {
+            discovered_dependency: DiscoveredDependency {
+                purl: PURL {
+                    ecosystem: "cargo".to_string(),
+                    namespace: None,
+                    name: name.to_string(),
+                    subpath: None,
+                    version: Some("1.0.0".to_string()),
+                },
+                requirement: "1".to_string(),
+                minimum_release_age: None,
+            },
+            dependency_update_options: DependencyUpdateOption {
+                package_info: PackageInfo { repo_url: None },
+                bumps: vec![ProposedBump {
+                    target_version: "1.1.0".to_string(),
+                    head_version: "1.1.0".to_string(),
+                    is_major: false,
+                    update_type: UpdateType::Minor,
+                }],
+            },
+        };
+
+        let jobs = f
+            .execute(Payload::PersistAnalyzedProjectDependencies {
+                project_id: f.project.id.clone(),
+                scan_result: AnalyzedProjectDependencies {
+                    analyzed_project_dependencies: vec![analyzed("serde"), analyzed("tokio")],
+                },
+            })
+            .await;
+
+        assert_eq!(
+            jobs,
+            vec![Job::PublishBump {
+                lane: f.lane(),
+                bump_id: "approved".to_string(),
             }]
         );
     }
@@ -1004,7 +1043,6 @@ mod tests {
                 scan_result: AnalyzedProjectDependencies {
                     analyzed_project_dependencies: Vec::new(),
                 },
-                trigger_bumps: true,
             })
             .await;
 
