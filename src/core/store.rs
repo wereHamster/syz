@@ -77,6 +77,22 @@ impl Store {
 
     pub async fn add_project(&self, platform: Platform, repository: String) -> Result<Project> {
         let conn = self.database.conn()?;
+
+        // The schema has no unique index on (platform, repository), so this check is the only
+        // thing preventing duplicates. It is race-free because projects are only added from the
+        // application's main loop, which processes messages one at a time.
+        let mut stmt = conn
+            .prepare("SELECT 1 FROM project WHERE platform = ?1 AND repository = ?2")
+            .await?;
+        let mut rows = stmt.query((platform.as_str(), repository.as_str())).await?;
+        if rows.next().await?.is_some() {
+            anyhow::bail!(
+                "Project {}:{} already exists",
+                platform.as_str(),
+                repository
+            );
+        }
+
         let id = pk();
 
         conn.execute(
@@ -941,4 +957,48 @@ pub struct BumpTargetData {
     pub namespace: Option<String>,
     pub subpath: Option<String>,
     pub minimum_release_age: Option<chrono::Duration>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn store(dir: &tempfile::TempDir) -> Store {
+        Store::new(Database::open(dir.path()).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn add_project_rejects_a_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+
+        store
+            .add_project(Platform::GitHub, "owner/repo".to_string())
+            .await
+            .unwrap();
+        let err = store
+            .add_project(Platform::GitHub, "owner/repo".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("already exists"), "{err:#}");
+        assert_eq!(store.list_projects().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn add_project_accepts_the_same_repository_on_another_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+
+        store
+            .add_project(Platform::GitHub, "owner/repo".to_string())
+            .await
+            .unwrap();
+        store
+            .add_project(Platform::Tangled, "owner/repo".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(store.list_projects().await.unwrap().len(), 2);
+    }
 }
