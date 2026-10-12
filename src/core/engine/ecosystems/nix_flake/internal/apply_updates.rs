@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use futures::{stream, StreamExt};
 
 use crate::core::clients::github::GitHub;
 use crate::core::engine::repository::{FileModification, FileState, ProjectRepositorySnapshot};
@@ -94,21 +95,62 @@ pub async fn run(
     }
 }
 
+/// How many tokens are minted at the same time.
+const TOKEN_CONCURRENCY: usize = 4;
+
 /// Mints a read-only token for each of `owners` the GitHub App is installed for, as
 /// `(owner, token)` pairs. Public inputs need none, so owners without an installation, or whose
 /// token can't be created, are skipped and nix is left to fetch their inputs anonymously.
+///
+/// GitHub treats owners case-insensitively, so spellings of the same owner share one token. Nix
+/// still matches its keys case-sensitively, so each spelling gets its own pair.
 async fn github_tokens(github: &GitHub, owners: &[String]) -> Vec<(String, String)> {
-    let mut tokens = Vec::new();
+    let accounts = group_by_account(owners);
 
-    for owner in owners {
-        match github.contents_read_token(owner).await {
-            Ok(Some(token)) => tokens.push((owner.clone(), token)),
-            Ok(None) => {}
-            Err(e) => tracing::warn!("No GitHub token for flake inputs of '{}': {:#}", owner, e),
+    // Collected first, so that the stream doesn't carry the closure's type: rustc can't prove
+    // that closure general enough once it is part of an `async_trait` future.
+    let lookups: Vec<_> = accounts
+        .iter()
+        .map(|spellings| mint_token(github, &spellings[0]))
+        .collect();
+    let minted: Vec<Option<String>> = stream::iter(lookups)
+        .buffered(TOKEN_CONCURRENCY)
+        .collect()
+        .await;
+
+    accounts
+        .iter()
+        .zip(minted)
+        .filter_map(|(spellings, token)| Some((spellings, token?)))
+        .flat_map(|(spellings, token)| {
+            spellings
+                .iter()
+                .map(move |owner| (owner.clone(), token.clone()))
+        })
+        .collect()
+}
+
+/// Mints the token of one owner, or `None` (after a warning if it failed) when there is none.
+async fn mint_token(github: &GitHub, owner: &str) -> Option<String> {
+    match github.contents_read_token(owner).await {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::warn!("No GitHub token for flake inputs of '{}': {:#}", owner, e);
+            None
         }
     }
+}
 
-    tokens
+/// Groups the spellings of `owners` that name the same account.
+fn group_by_account(owners: &[String]) -> Vec<Vec<String>> {
+    let mut accounts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for owner in owners {
+        let spellings = accounts.entry(owner.to_lowercase()).or_default();
+        if !spellings.contains(owner) {
+            spellings.push(owner.clone());
+        }
+    }
+    accounts.into_values().collect()
 }
 
 /// The nix config line that makes nix authenticate to github.com with a token per owner, or
@@ -209,6 +251,21 @@ mod tests {
         assert_eq!(
             access_tokens_config(&tokens).as_deref(),
             Some("extra-access-tokens = github.com/acme=ghs_one github.com/NixOS=ghs_two")
+        );
+    }
+
+    #[test]
+    fn test_group_by_account_merges_spellings_of_one_owner() {
+        let owners = vec![
+            "Acme".to_string(),
+            "acme".to_string(),
+            "NixOS".to_string(),
+            "acme".to_string(),
+        ];
+
+        assert_eq!(
+            group_by_account(&owners),
+            vec![vec!["Acme", "acme"], vec!["NixOS"]]
         );
     }
 
