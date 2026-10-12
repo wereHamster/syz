@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -10,7 +10,7 @@ use crate::core::clients::github::GitHub;
 use crate::core::engine::repository::{FileModification, FileState, ProjectRepositorySnapshot};
 use crate::core::engine::UpdateTarget;
 
-use super::flake_lock::{self, FlakeLock};
+use super::flake_lock::{self, FlakeLock, RootInput};
 use super::helpers;
 
 pub async fn run(
@@ -45,7 +45,14 @@ pub async fn run(
     fs::write(temp_dir.join("flake.nix"), &flake_nix_content)?;
     fs::write(temp_dir.join("flake.lock"), &flake_lock_content)?;
 
-    let tokens = github_tokens(github, &flake_lock::github_owners(&lock)).await;
+    // The overridden inputs bring the inputs of their new revision along, which may belong to
+    // owners that the current lock doesn't mention yet.
+    let mut owners: BTreeSet<String> = flake_lock::github_owners(&lock).into_iter().collect();
+    let sources = github_override_sources(&lock, &target_map);
+    owners.extend(dependency_lock_owners(github, &sources).await);
+    let owners: Vec<String> = owners.into_iter().collect();
+
+    let tokens = github_tokens(github, &owners).await;
     let nix_config = access_tokens_config(&tokens);
 
     let temp_dir_owned = temp_dir.to_path_buf();
@@ -176,6 +183,25 @@ fn redact(text: &str, tokens: &[(String, String)]) -> String {
     })
 }
 
+/// The root inputs whose `original` ref matches an approved target, paired with that target.
+fn matched_inputs<'a, 't>(
+    lock: &'a FlakeLock,
+    target_map: &HashMap<&str, &'t UpdateTarget>,
+) -> Vec<(RootInput<'a>, &'t UpdateTarget)> {
+    flake_lock::root_inputs(lock)
+        .into_iter()
+        .filter_map(|input| {
+            let normalized = match &input {
+                RootInput::Github(gh) => helpers::format_github_ref(gh.owner, gh.repo, gh.git_ref),
+                RootInput::Git(g) => helpers::format_git_ref(g.url, g.git_ref),
+                RootInput::Tarball(t) => helpers::format_tarball_ref(t.url),
+            };
+            let target = *target_map.get(normalized.as_str())?;
+            Some((input, target))
+        })
+        .collect()
+}
+
 /// For each root input whose `original` ref matches an approved target, returns
 /// `(local_alias, override_flake_ref)` pairs suitable for `nix flake lock --override-input`.
 /// `override_flake_ref` pins to the target's exact approved SHA, not the ref's current tip.
@@ -183,40 +209,96 @@ fn override_args_for_targets(
     lock: &FlakeLock,
     target_map: &HashMap<&str, &UpdateTarget>,
 ) -> Vec<(String, String)> {
-    let mut overrides = Vec::new();
-
-    for input in flake_lock::root_inputs(lock) {
-        let normalized = match &input {
-            flake_lock::RootInput::Github(gh) => {
-                helpers::format_github_ref(gh.owner, gh.repo, gh.git_ref)
-            }
-            flake_lock::RootInput::Git(g) => helpers::format_git_ref(g.url, g.git_ref),
-            flake_lock::RootInput::Tarball(t) => helpers::format_tarball_ref(t.url),
-        };
-
-        let target = match target_map.get(normalized.as_str()) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        let override_ref = match &input {
-            flake_lock::RootInput::Github(gh) => format!(
-                "github:{}/{}/{}",
-                gh.owner, gh.repo, target.target_version.version
-            ),
-            flake_lock::RootInput::Git(g) => {
-                format!("git+{}?rev={}", g.url, target.target_version.version)
-            }
-            flake_lock::RootInput::Tarball(_) => {
-                format!("tarball+{}", target.target_version.version)
-            }
-        };
-
-        overrides.push((input.alias().to_string(), override_ref));
-    }
+    let mut overrides: Vec<(String, String)> = matched_inputs(lock, target_map)
+        .into_iter()
+        .map(|(input, target)| {
+            let override_ref = match &input {
+                RootInput::Github(gh) => format!(
+                    "github:{}/{}/{}",
+                    gh.owner, gh.repo, target.target_version.version
+                ),
+                RootInput::Git(g) => {
+                    format!("git+{}?rev={}", g.url, target.target_version.version)
+                }
+                RootInput::Tarball(_) => {
+                    format!("tarball+{}", target.target_version.version)
+                }
+            };
+            (input.alias().to_string(), override_ref)
+        })
+        .collect();
 
     overrides.sort();
     overrides
+}
+
+/// The `(owner, repo, rev)` of every github input that is overridden, which is where the
+/// inputs of the new revision are declared.
+fn github_override_sources(
+    lock: &FlakeLock,
+    target_map: &HashMap<&str, &UpdateTarget>,
+) -> Vec<(String, String, String)> {
+    matched_inputs(lock, target_map)
+        .into_iter()
+        .filter_map(|(input, target)| match input {
+            RootInput::Github(gh)
+                if flake_lock::is_valid_owner(gh.owner) && flake_lock::is_valid_repo(gh.repo) =>
+            {
+                Some((
+                    gh.owner.to_string(),
+                    gh.repo.to_string(),
+                    target.target_version.version.clone(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The github owners in the `flake.lock` of each of `sources` at its revision. That lock pins
+/// the whole input graph of the dependency, which nix reuses when it locks the override. The
+/// lookup is best effort: a dependency without a lock, or one that can't be read, adds nothing.
+async fn dependency_lock_owners(
+    github: &GitHub,
+    sources: &[(String, String, String)],
+) -> Vec<String> {
+    let lookups: Vec<_> = sources
+        .iter()
+        .map(|(owner, repo, rev)| dependency_owners(github, owner, repo, rev))
+        .collect();
+
+    stream::iter(lookups)
+        .buffered(TOKEN_CONCURRENCY)
+        .collect::<Vec<Vec<String>>>()
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+async fn dependency_owners(github: &GitHub, owner: &str, repo: &str, rev: &str) -> Vec<String> {
+    let content = match github
+        .get_foreign_file(owner, repo, "flake.lock", Some(rev))
+        .await
+    {
+        Ok(Some(content)) => content,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to read flake.lock of {}/{}@{}: {:#}",
+                owner,
+                repo,
+                rev,
+                e
+            );
+            return Vec::new();
+        }
+    };
+
+    match serde_json::from_str::<FlakeLock>(&content) {
+        Ok(lock) => flake_lock::github_owners(&lock),
+        Err(_) => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +527,76 @@ mod tests {
                 "git+https://tangled.org/@tangled.org/core?rev=cccccccccccccccccccccccccccccccccccccccc".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn test_github_override_sources_are_the_overridden_github_inputs() {
+        let content = r#"
+        {
+          "nodes": {
+            "internal": {
+              "locked": { "type": "github", "owner": "acme", "repo": "internal", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "github", "owner": "acme", "repo": "internal", "ref": "main" }
+            },
+            "untouched": {
+              "locked": { "type": "github", "owner": "acme", "repo": "untouched", "rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+              "original": { "type": "github", "owner": "acme", "repo": "untouched" }
+            },
+            "core": {
+              "locked": { "type": "git", "rev": "cccccccccccccccccccccccccccccccccccccccc" },
+              "original": { "type": "git", "url": "https://tangled.org/@tangled.org/core" }
+            },
+            "root": { "inputs": { "internal": "internal", "untouched": "untouched", "core": "core" } }
+          },
+          "root": "root"
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        let internal = make_target(
+            "github:acme/internal/main",
+            "dddddddddddddddddddddddddddddddddddddddd",
+        );
+        let core = make_target(
+            "git+https://tangled.org/@tangled.org/core",
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        );
+        let target_map: HashMap<&str, &UpdateTarget> = [
+            (internal.name.as_str(), &internal),
+            (core.name.as_str(), &core),
+        ]
+        .into();
+
+        assert_eq!(
+            github_override_sources(&lock, &target_map),
+            vec![(
+                "acme".to_string(),
+                "internal".to_string(),
+                "dddddddddddddddddddddddddddddddddddddddd".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn test_github_override_sources_skip_invalid_names() {
+        let content = r#"
+        {
+          "nodes": {
+            "bad": {
+              "locked": { "type": "github", "owner": "acme", "repo": "..", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "github", "owner": "acme", "repo": ".." }
+            },
+            "root": { "inputs": { "bad": "bad" } }
+          },
+          "root": "root"
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        let target = make_target("github:acme/..", "dddddddddddddddddddddddddddddddddddddddd");
+        let target_map: HashMap<&str, &UpdateTarget> = [(target.name.as_str(), &target)].into();
+
+        assert!(github_override_sources(&lock, &target_map).is_empty());
     }
 
     #[test]

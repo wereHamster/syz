@@ -375,13 +375,25 @@ impl GitHub {
         parts.next().map(|s| s.to_string())
     }
 
+    /// Reads `path` of another repository, at `reference` (a branch, tag or commit) or at its
+    /// default branch.
     pub async fn get_foreign_file(
         &self,
         owner: &str,
         repo: &str,
         path: &str,
+        reference: Option<&str>,
     ) -> Result<Option<String>> {
-        let route = format!("/repos/{}/{}/contents/{}", owner, repo, path);
+        let route = match reference {
+            Some(r) => format!(
+                "/repos/{}/{}/contents/{}?ref={}",
+                owner,
+                repo,
+                path,
+                urlencoding::encode(r)
+            ),
+            None => format!("/repos/{}/{}/contents/{}", owner, repo, path),
+        };
         let response = match self.get_json(&route).await {
             Ok(res) => res,
             Err(e) => {
