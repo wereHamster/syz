@@ -681,10 +681,14 @@ impl Store {
         self.bump(bump_id).await
     }
 
-    pub async fn clear_bump_url(&self, bump_id: &str) -> Result<Bump> {
+    /// Forget the bump's pull request and retract its approval.
+    pub async fn abandon_bump(&self, bump_id: &str) -> Result<Bump> {
         let conn = self.database.conn()?;
-        conn.execute("UPDATE bump SET url = NULL WHERE id = ?", params![bump_id])
-            .await?;
+        conn.execute(
+            "UPDATE bump SET url = NULL, approved = 0 WHERE id = ?",
+            params![bump_id],
+        )
+        .await?;
         self.bump(bump_id).await
     }
 
@@ -985,5 +989,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.list_projects().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn abandon_bump_clears_the_url_and_retracts_the_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+
+        let project = store
+            .add_project(Platform::GitHub, "owner/repo".to_string())
+            .await
+            .unwrap();
+        let conn = store.database.conn().unwrap();
+        conn.execute(
+            "INSERT INTO bump (id, project_id, name, major, approved, url) VALUES (?, ?, ?, ?, 1, ?)",
+            params!["bump", project.id.as_str(), "serde", 1, "https://github.com/owner/repo/pull/1"],
+        )
+        .await
+        .unwrap();
+
+        let bump = store.abandon_bump("bump").await.unwrap();
+
+        assert!(!bump.approved);
+        assert_eq!(bump.url, None);
     }
 }

@@ -259,46 +259,30 @@ async fn handle_pull_request(
         return Ok(StatusCode::OK);
     }
 
-    let bump = state
+    // Which bump the pull request belongs to is decided by the application, so that it is
+    // ordered with the bump results that are already queued.
+    tracing::info!(
+        "Pull request {} closed (merged: {}), scheduling BumpPullRequestClosed",
+        pr_url,
+        merged
+    );
+    state
         .handle
-        .store()
-        .bump_by_url(pr_url)
+        .send(
+            pk(),
+            Payload::BumpPullRequestClosed {
+                pull_request_url: pr_url.to_string(),
+                merged,
+            },
+        )
         .await
         .map_err(|e| {
-            tracing::error!("Failed to look up bump by url: {}", e);
+            tracing::error!("Failed to send BumpPullRequestClosed message: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to look up bump".to_string(),
+                "Failed to schedule BumpPullRequestClosed".to_string(),
             )
         })?;
-
-    let bump = match bump {
-        Some(b) => b,
-        None => {
-            tracing::info!("No bump found for pull request {}", pr_url);
-            return Ok(StatusCode::OK);
-        }
-    };
-
-    let (payload, description) = if merged {
-        (Payload::RemoveBump { bump_id: bump.id }, "RemoveBump")
-    } else {
-        (Payload::ClearBumpUrl { bump_id: bump.id }, "ClearBumpUrl")
-    };
-
-    tracing::info!(
-        "Pull request {} closed (merged: {}), scheduling {}",
-        pr_url,
-        merged,
-        description
-    );
-    state.handle.send(pk(), payload).await.map_err(|e| {
-        tracing::error!("Failed to send {} message: {}", description, e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to schedule {}", description),
-        )
-    })?;
 
     Ok(StatusCode::OK)
 }
