@@ -1,6 +1,8 @@
+use super::process_bump::generate_branch_name;
 use super::DefaultBranch;
 use crate::core::application::Application;
 use anyhow::Result;
+use std::collections::HashSet;
 use tracing::instrument::WithSubscriber;
 use tracing::Instrument;
 
@@ -8,6 +10,24 @@ use tracing::Instrument;
 /// branches. Used for bumps that no longer exist, so nothing is left to track the pull
 /// requests.
 pub async fn run(app: &Application, project_id: String, branch_names: Vec<String>) -> Result<()> {
+    // Different bump names can map to the same branch (and so share a pull request), so
+    // leave alone any branch that a surviving bump still uses.
+    let live_branches: HashSet<String> = app
+        .store()
+        .list_bumps()
+        .await?
+        .into_iter()
+        .filter(|bump| bump.project_id == project_id)
+        .map(|bump| generate_branch_name(&bump.name, bump.major))
+        .collect();
+    let branch_names: Vec<String> = branch_names
+        .into_iter()
+        .filter(|branch_name| !live_branches.contains(branch_name))
+        .collect();
+    if branch_names.is_empty() {
+        return Ok(());
+    }
+
     let repository = app.project_platform_repository(&project_id).await?;
 
     let span = tracing::Span::current();
