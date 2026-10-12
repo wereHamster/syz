@@ -312,11 +312,10 @@ mod tests {
         }
     }
 
-    fn scan(repository: &str, trigger_bumps: bool) -> Job {
+    fn scan(repository: &str) -> Job {
         Job::Scan {
             lane: lane(repository),
             project_id: repository.to_string(),
-            trigger_bumps,
         }
     }
 
@@ -451,9 +450,9 @@ mod tests {
 
         h.dispatcher.enqueue(publish_bump("a", "1"));
         h.dispatcher.enqueue(publish_bump("a", "1"));
-        h.dispatcher.enqueue(scan("a", false));
+        h.dispatcher.enqueue(scan("a"));
         h.dispatcher.enqueue(publish_sweep("a", SweepKind::Audit));
-        h.dispatcher.enqueue(scan("a", true));
+        h.dispatcher.enqueue(scan("a"));
         h.dispatcher.enqueue(publish_sweep("a", SweepKind::Audit));
         h.dispatcher.enqueue(close("a", "syz/x"));
         h.dispatcher.enqueue(close("a", "syz/x"));
@@ -464,7 +463,7 @@ mod tests {
                 running: Some(publish_bump("a", "1")),
                 queued: vec![
                     publish_bump("a", "1"),
-                    scan("a", true),
+                    scan("a"),
                     publish_sweep("a", SweepKind::Audit),
                     close("a", "syz/x"),
                     close("a", "syz/x"),
@@ -481,7 +480,7 @@ mod tests {
             async { Ok(Some(Payload::Purge)) }.boxed()
         });
 
-        h.dispatcher.enqueue(scan("a", false));
+        h.dispatcher.enqueue(scan("a"));
 
         let message = h.outcomes.recv().await.unwrap();
         assert!(matches!(message.payload, Payload::Purge));
@@ -494,7 +493,7 @@ mod tests {
             _ => sleep(0),
         });
 
-        h.dispatcher.enqueue(scan("a", false));
+        h.dispatcher.enqueue(scan("a"));
         h.dispatcher.enqueue(publish_bump("a", "1"));
 
         let message = h.outcomes.recv().await.unwrap();
@@ -523,7 +522,7 @@ mod tests {
             _ => sleep(0),
         });
 
-        h.dispatcher.enqueue(scan("a", false));
+        h.dispatcher.enqueue(scan("a"));
         h.dispatcher.enqueue(publish_bump("a", "1"));
 
         drop(h.outcomes.recv().await.unwrap());

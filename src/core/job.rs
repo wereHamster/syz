@@ -31,13 +31,9 @@ impl std::fmt::Display for LaneKey {
 /// Jobs may read the store, but never write to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    /// Scan the project and look up which of its dependencies are outdated. With
-    /// `trigger_bumps`, the approved bumps of the project are published afterwards.
-    Scan {
-        lane: LaneKey,
-        project_id: String,
-        trigger_bumps: bool,
-    },
+    /// Scan the project and look up which of its dependencies are outdated. The approved
+    /// bumps of the project are published afterwards.
+    Scan { lane: LaneKey, project_id: String },
 
     /// Create or update the pull request of the bump, or close it if there is nothing to do.
     /// The bump is read when the job starts, so that it uses the freshest targets, and the
@@ -105,21 +101,12 @@ impl Job {
     pub fn absorb(&mut self, other: &Job) -> bool {
         match (self, other) {
             (
-                Job::Scan {
-                    project_id,
-                    trigger_bumps,
-                    ..
-                },
+                Job::Scan { project_id, .. },
                 Job::Scan {
                     project_id: other_project_id,
-                    trigger_bumps: other_trigger_bumps,
                     ..
                 },
-            ) if project_id == other_project_id => {
-                // Dropping the newer request must not lose its trigger.
-                *trigger_bumps |= *other_trigger_bumps;
-                true
-            }
+            ) => project_id == other_project_id,
             (
                 Job::PublishBump { bump_id, .. },
                 Job::PublishBump {
@@ -196,11 +183,10 @@ mod tests {
         }
     }
 
-    fn scan(project_id: &str, trigger_bumps: bool) -> Job {
+    fn scan(project_id: &str) -> Job {
         Job::Scan {
             lane: lane(),
             project_id: project_id.to_string(),
-            trigger_bumps,
         }
     }
 
@@ -234,19 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn scans_merge_and_keep_a_trigger() {
-        let mut queued = scan("a", false);
-        assert!(queued.absorb(&scan("a", true)));
-        assert_eq!(queued, scan("a", true));
-
-        let mut queued = scan("a", true);
-        assert!(queued.absorb(&scan("a", false)));
-        assert_eq!(queued, scan("a", true));
+    fn a_duplicate_scan_is_dropped() {
+        assert!(scan("a").absorb(&scan("a")));
     }
 
     #[test]
     fn scans_of_different_projects_do_not_merge() {
-        assert!(!scan("a", false).absorb(&scan("b", false)));
+        assert!(!scan("a").absorb(&scan("b")));
     }
 
     #[test]
@@ -276,8 +256,8 @@ mod tests {
 
     #[test]
     fn different_kinds_never_merge() {
-        assert!(!scan("a", true).absorb(&publish_sweep("a", SweepKind::Audit)));
-        assert!(!publish_bump("x").absorb(&scan("a", false)));
+        assert!(!scan("a").absorb(&publish_sweep("a", SweepKind::Audit)));
+        assert!(!publish_bump("x").absorb(&scan("a")));
     }
 
     #[test]
@@ -290,7 +270,7 @@ mod tests {
             publish_sweep("a", SweepKind::Transitive).class(),
             JobClass::General
         );
-        assert_eq!(scan("a", false).class(), JobClass::General);
+        assert_eq!(scan("a").class(), JobClass::General);
         assert_eq!(publish_bump("x").class(), JobClass::General);
         assert_eq!(prune("a").class(), JobClass::General);
         assert_eq!(close(&["x"]).class(), JobClass::General);
@@ -298,7 +278,7 @@ mod tests {
 
     #[test]
     fn describes_the_job_and_its_repository() {
-        assert_eq!(scan("a", false).to_string(), "scan of github:owner/repo");
+        assert_eq!(scan("a").to_string(), "scan of github:owner/repo");
         assert_eq!(
             publish_bump("x").to_string(),
             "publish of bump x in github:owner/repo"

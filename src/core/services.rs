@@ -157,13 +157,8 @@ impl Services {
 impl Runner for Services {
     async fn run(&self, job: Job) -> Result<Option<Payload>> {
         match job {
-            Job::Scan {
-                lane,
-                project_id,
-                trigger_bumps,
-            } => {
-                actions::analyze_project_dependencies::run(self, lane, project_id, trigger_bumps)
-                    .await
+            Job::Scan { lane, project_id } => {
+                actions::analyze_project_dependencies::run(self, lane, project_id).await
             }
             Job::PublishBump { lane, bump_id } => {
                 actions::process_bump::run(self, lane, bump_id).await

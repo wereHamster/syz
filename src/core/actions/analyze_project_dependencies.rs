@@ -35,7 +35,6 @@ pub async fn run(
     services: &Services,
     lane: LaneKey,
     project_id: String,
-    trigger_bumps: bool,
 ) -> Result<Option<Payload>> {
     let repository = services.repository(&lane)?;
     let view = repository.view().await?;
@@ -82,7 +81,6 @@ pub async fn run(
         scan_result: AnalyzedProjectDependencies {
             analyzed_project_dependencies,
         },
-        trigger_bumps,
     }))
 }
 
