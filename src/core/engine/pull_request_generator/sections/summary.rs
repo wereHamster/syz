@@ -145,11 +145,18 @@ impl PullRequestSectionGenerator for SummarySection {
                         }
                     }
 
-                    let is_major_bump = semver::Version::parse(target.current_version.version.trim_start_matches('v'))
-                        .ok()
-                        .zip(semver::Version::parse(target.target_version.version.trim_start_matches('v')).ok())
-                        .map(|(old, new)| old.major != new.major)
-                        .unwrap_or(false);
+                    let is_major_bump = semver::Version::parse(
+                        target.current_version.version.trim_start_matches('v'),
+                    )
+                    .ok()
+                    .zip(
+                        semver::Version::parse(
+                            target.target_version.version.trim_start_matches('v'),
+                        )
+                        .ok(),
+                    )
+                    .map(|(old, new)| old.major != new.major)
+                    .unwrap_or(false);
                     let major_suffix = if is_major_bump { " (major)" } else { "" };
 
                     if !repo_url.is_empty() {

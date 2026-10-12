@@ -215,7 +215,11 @@ pub async fn get_latest_tarball_location(url: &str) -> Option<String> {
 }
 
 fn immutable_link_url(response: &reqwest::Response) -> Option<String> {
-    let header_value = response.headers().get(reqwest::header::LINK)?.to_str().ok()?;
+    let header_value = response
+        .headers()
+        .get(reqwest::header::LINK)?
+        .to_str()
+        .ok()?;
     parse_immutable_link(header_value).map(|url| url.split('?').next().unwrap_or(&url).to_string())
 }
 
@@ -229,8 +233,8 @@ fn parse_immutable_link(header_value: &str) -> Option<String> {
             .strip_prefix('<')?
             .strip_suffix('>')?;
 
-        let is_immutable = segments
-            .any(|param| matches!(param.trim(), "rel=\"immutable\"" | "rel=immutable"));
+        let is_immutable =
+            segments.any(|param| matches!(param.trim(), "rel=\"immutable\"" | "rel=immutable"));
 
         if is_immutable {
             return Some(url.to_string());

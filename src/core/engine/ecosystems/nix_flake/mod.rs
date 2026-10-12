@@ -36,8 +36,7 @@ impl Registry for NixFlakeRegistry {
         &self,
         dependency: &DiscoveredDependency,
     ) -> Result<DependencyUpdateOption> {
-        internal::query_dependency_update_options::run(self.github_client.clone(), dependency)
-            .await
+        internal::query_dependency_update_options::run(self.github_client.clone(), dependency).await
     }
 
     async fn fetch_package_info(&self, name: &str) -> Result<crate::core::engine::PackageInfo> {
