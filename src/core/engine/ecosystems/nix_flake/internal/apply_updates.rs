@@ -5,6 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+use crate::core::clients::github::GitHub;
 use crate::core::engine::repository::{FileModification, FileState, ProjectRepositorySnapshot};
 use crate::core::engine::UpdateTarget;
 
@@ -12,6 +13,7 @@ use super::flake_lock::{self, FlakeLock};
 use super::helpers;
 
 pub async fn run(
+    github: &GitHub,
     repo: &dyn ProjectRepositorySnapshot,
     temp_dir: &Path,
     targets: &[UpdateTarget],
@@ -42,9 +44,12 @@ pub async fn run(
     fs::write(temp_dir.join("flake.nix"), &flake_nix_content)?;
     fs::write(temp_dir.join("flake.lock"), &flake_lock_content)?;
 
+    let tokens = github_tokens(github, &flake_lock::github_owners(&lock)).await;
+    let nix_config = access_tokens_config(&tokens);
+
     let temp_dir_owned = temp_dir.to_path_buf();
     let overrides_owned = overrides.clone();
-    let status = tokio::task::spawn_blocking(move || {
+    let output = tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new("nix");
         cmd.arg("--extra-experimental-features")
             .arg("nix-command flakes")
@@ -54,13 +59,28 @@ pub async fn run(
         for (alias, override_ref) in &overrides_owned {
             cmd.arg("--override-input").arg(alias).arg(override_ref);
         }
-        cmd.status()
+        if let Some(config) = nix_config {
+            // Through the environment rather than `--option` or a config file, so the tokens
+            // are neither visible in the process list nor left on disk.
+            let config = match std::env::var("NIX_CONFIG") {
+                Ok(existing) if !existing.is_empty() => format!("{existing}\n{config}"),
+                _ => config,
+            };
+            cmd.env("NIX_CONFIG", config);
+        }
+        cmd.output()
     })
     .await
     .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
 
-    if !status.success() {
-        tracing::warn!("nix flake lock --override-input failed, continuing anyway...");
+    if !output.status.success() {
+        let stderr = redact(&String::from_utf8_lossy(&output.stderr), &tokens);
+        anyhow::bail!(
+            "nix flake lock failed in {:?} ({}): {}",
+            temp_dir,
+            output.status,
+            stderr.trim()
+        );
     }
 
     let updated_lock = fs::read_to_string(temp_dir.join("flake.lock"))?;
@@ -72,6 +92,46 @@ pub async fn run(
     } else {
         Ok(Vec::new())
     }
+}
+
+/// Mints a read-only token for each of `owners` the GitHub App is installed for, as
+/// `(owner, token)` pairs. Public inputs need none, so owners without an installation, or whose
+/// token can't be created, are skipped and nix is left to fetch their inputs anonymously.
+async fn github_tokens(github: &GitHub, owners: &[String]) -> Vec<(String, String)> {
+    let mut tokens = Vec::new();
+
+    for owner in owners {
+        match github.contents_read_token(owner).await {
+            Ok(Some(token)) => tokens.push((owner.clone(), token)),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("No GitHub token for flake inputs of '{}': {:#}", owner, e),
+        }
+    }
+
+    tokens
+}
+
+/// The nix config line that makes nix authenticate to github.com with a token per owner, or
+/// `None` without tokens. Nix picks the token whose key is the longest prefix of
+/// `github.com/{owner}/{repo}`, and `extra-` appends to any `access-tokens` already configured
+/// on the host instead of replacing them.
+fn access_tokens_config(tokens: &[(String, String)]) -> Option<String> {
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let entries: Vec<String> = tokens
+        .iter()
+        .map(|(owner, token)| format!("github.com/{owner}={token}"))
+        .collect();
+    Some(format!("extra-access-tokens = {}", entries.join(" ")))
+}
+
+/// Replaces the tokens in `text`, so that nix's output can be logged.
+fn redact(text: &str, tokens: &[(String, String)]) -> String {
+    tokens.iter().fold(text.to_string(), |text, (_, token)| {
+        text.replace(token.as_str(), "***")
+    })
 }
 
 /// For each root input whose `original` ref matches an approved target, returns
@@ -137,6 +197,37 @@ mod tests {
             package_info: PackageInfo { repo_url: None },
             minimum_release_age: None,
         }
+    }
+
+    #[test]
+    fn test_access_tokens_config_has_a_key_per_owner() {
+        let tokens = vec![
+            ("acme".to_string(), "ghs_one".to_string()),
+            ("NixOS".to_string(), "ghs_two".to_string()),
+        ];
+
+        assert_eq!(
+            access_tokens_config(&tokens).as_deref(),
+            Some("extra-access-tokens = github.com/acme=ghs_one github.com/NixOS=ghs_two")
+        );
+    }
+
+    #[test]
+    fn test_access_tokens_config_is_absent_without_tokens() {
+        assert_eq!(access_tokens_config(&[]), None);
+    }
+
+    #[test]
+    fn test_redact_hides_every_token() {
+        let tokens = vec![
+            ("acme".to_string(), "ghs_one".to_string()),
+            ("other".to_string(), "ghs_two".to_string()),
+        ];
+
+        assert_eq!(
+            redact("fetch ghs_one failed, ghs_two too, ghs_one", &tokens),
+            "fetch *** failed, *** too, ***"
+        );
     }
 
     #[test]

@@ -175,6 +175,32 @@ impl GitHub {
         }
     }
 
+    /// Mints a short-lived token that can read the contents of the repositories the GitHub App
+    /// may access for `owner`, or `None` when the app isn't installed for them. The token is
+    /// meant for tools that talk to GitHub themselves (e.g. `nix`), so it is limited to
+    /// `contents: read`, whatever else the installation is allowed to do.
+    pub async fn contents_read_token(&self, owner: &str) -> Result<Option<String>> {
+        let Some(id) = self.installation_id(owner).await? else {
+            return Ok(None);
+        };
+
+        let request = octocrab::models::apps::CreateInstallationAccessToken {
+            permissions: Some(HashMap::from([(
+                "contents".to_string(),
+                "read".to_string(),
+            )])),
+            ..Default::default()
+        };
+        let token = self
+            .octocrab
+            .apps()
+            .create_installation_access_token(id, &request)
+            .await
+            .with_context(|| format!("Failed to create an access token for '{}'", owner))?;
+
+        Ok(Some(token.token))
+    }
+
     /// Returns a client authorized for `owner`, falling back to `public_client` when no
     /// installation covers that owner (e.g. a public repo with no app installation at all).
     async fn client_for_owner(&self, owner: &str) -> Result<Octocrab> {
