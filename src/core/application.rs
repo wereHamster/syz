@@ -50,7 +50,7 @@ pub struct Application {
 const CONCURRENT_AUDITS: usize = 4;
 
 impl Application {
-    pub async fn new(data_dir: &Path) -> Result<Self> {
+    pub async fn new(data_dir: &Path, work_dir: PathBuf) -> Result<Self> {
         let (mailbox_tx, mailbox_rx) = mpsc::channel(100);
         let (events, _) = broadcast::channel(1000);
 
@@ -59,7 +59,7 @@ impl Application {
 
         let http_agent = HttpAgent::new();
         let github = GitHub::new().await?;
-        let tangled = Tangled::new().await?;
+        let tangled = Tangled::new(work_dir.clone()).await?;
 
         let mut platforms = PlatformRegistry::new();
         platforms.register(Arc::new(GitHubPlatformAdapter::new(github.clone())));
@@ -82,18 +82,8 @@ impl Application {
             audit_schedule: true,
             audit_permits: Arc::new(Semaphore::new(CONCURRENT_AUDITS)),
 
-            work_dir: std::env::temp_dir(),
+            work_dir,
         })
-    }
-
-    /// Choose where workers create the scratch directories in which package managers run
-    /// (the system temporary directory by default).
-    ///
-    /// Package managers hard-link from their cache into these directories, which only works
-    /// within one file system, so this should be on the same one as the cache.
-    pub fn with_work_dir(mut self, work_dir: PathBuf) -> Self {
-        self.work_dir = work_dir;
-        self
     }
 
     pub fn work_dir(&self) -> PathBuf {

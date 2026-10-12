@@ -2,23 +2,25 @@ use crate::core::engine::repository::{
     FileModification, FileState, ProjectRepositoryMutator, ProjectRepositorySnapshot,
     ProjectRepositoryView,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use atrium_api::agent::atp_agent::{store::MemorySessionStore, AtpAgent};
 use atrium_xrpc_client::reqwest::ReqwestClient;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 
 #[derive(Clone)]
 pub struct Tangled {
     agent: Arc<AtpAgent<MemorySessionStore, ReqwestClient>>,
+    work_dir: PathBuf,
 }
 
 impl Tangled {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(work_dir: PathBuf) -> Result<Self> {
         let handle = env::var("ATPROTO_HANDLE").unwrap_or_default();
         let password = env::var("ATPROTO_PASSWORD").unwrap_or_default();
         let pds_url = env::var("ATPROTO_PDS").unwrap_or_else(|_| "https://bsky.social".to_string());
@@ -33,6 +35,7 @@ impl Tangled {
 
         Ok(Self {
             agent: Arc::new(agent),
+            work_dir,
         })
     }
 
@@ -173,6 +176,7 @@ impl Tangled {
         let (repo_did, repo_at_uri, knot_url) = self.resolve_repo(&owner, &repo).await?;
         Ok(TangledProjectRepositoryMutator {
             agent: self.agent.clone(),
+            work_dir: self.work_dir.clone(),
             owner_handle: owner,
             repo_name: repo,
             repo_did,
@@ -426,6 +430,7 @@ impl ProjectRepositorySnapshot for TangledProjectRepositorySnapshot {
 
 pub struct TangledProjectRepositoryMutator {
     agent: Arc<AtpAgent<MemorySessionStore, ReqwestClient>>,
+    work_dir: PathBuf,
     owner_handle: String,
     repo_name: String,
     repo_did: String,
@@ -434,6 +439,18 @@ pub struct TangledProjectRepositoryMutator {
 }
 
 impl TangledProjectRepositoryMutator {
+    fn temp_dir(&self, prefix: &str) -> Result<TempDir> {
+        std::fs::create_dir_all(&self.work_dir).with_context(|| {
+            format!(
+                "Failed to create work directory {}",
+                self.work_dir.display()
+            )
+        })?;
+        Ok(tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(&self.work_dir)?)
+    }
+
     fn clone_repo(&self, temp_dir: &TempDir) -> Result<git2::Repository> {
         let mut fetch_options = git2::FetchOptions::new();
         let mut callbacks = git2::RemoteCallbacks::new();
@@ -465,7 +482,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
         commit_message: &str,
         modifications: Vec<FileModification>,
     ) -> Result<Option<String>> {
-        let temp_dir = tempfile::Builder::new().prefix("syz-tangled-").tempdir()?;
+        let temp_dir = self.temp_dir("syz-tangled-")?;
         let repo = self.clone_repo(&temp_dir)?;
 
         let obj = repo.revparse_single(base_revision)?;
@@ -631,9 +648,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
         }
 
         let patch_content = {
-            let temp_dir = tempfile::Builder::new()
-                .prefix("syz-tangled-diff-")
-                .tempdir()?;
+            let temp_dir = self.temp_dir("syz-tangled-diff-")?;
             let repo = self.clone_repo(&temp_dir)?;
 
             let base_obj = repo.revparse_single(&format!("origin/{}", base_branch))?;
@@ -795,9 +810,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
     }
 
     async fn close_pull_request(&self, head_branch: &str, _base_branch: &str) -> Result<()> {
-        let temp_dir = tempfile::Builder::new()
-            .prefix("syz-tangled-del-")
-            .tempdir()?;
+        let temp_dir = self.temp_dir("syz-tangled-del-")?;
         let repo = self.clone_repo(&temp_dir)?;
 
         let mut remote = repo.find_remote("origin")?;
