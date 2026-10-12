@@ -447,29 +447,19 @@ impl ProjectRepositoryView for GitHubProjectRepositoryView {
     }
 
     async fn list_branches(&self, prefix: &str) -> Result<Vec<String>> {
-        const PER_PAGE: usize = 100;
+        // Not paginated: the endpoint ignores `per_page` and `page`, and returns every match.
+        let url = format!(
+            "/repos/{}/{}/git/matching-refs/heads/{}",
+            self.owner, self.repo, prefix
+        );
+        let refs: Vec<Value> = self.octocrab.get(&url, None::<&()>).await?;
 
-        let mut branches = Vec::new();
-        for page in 1.. {
-            let url = format!(
-                "/repos/{}/{}/git/matching-refs/heads/{}?per_page={}&page={}",
-                self.owner, self.repo, prefix, PER_PAGE, page
-            );
-            let refs: Vec<Value> = self.octocrab.get(&url, None::<&()>).await?;
-
-            branches.extend(
-                refs.iter()
-                    .filter_map(|r| r["ref"].as_str())
-                    .filter_map(|r| r.strip_prefix("refs/heads/"))
-                    .map(str::to_string),
-            );
-
-            if refs.len() < PER_PAGE {
-                break;
-            }
-        }
-
-        Ok(branches)
+        Ok(refs
+            .iter()
+            .filter_map(|r| r["ref"].as_str())
+            .filter_map(|r| r.strip_prefix("refs/heads/"))
+            .map(str::to_string)
+            .collect())
     }
 
     fn snapshot(&self, revision: &str) -> Box<dyn ProjectRepositorySnapshot> {
