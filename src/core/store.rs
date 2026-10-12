@@ -681,10 +681,14 @@ impl Store {
         self.bump(bump_id).await
     }
 
-    pub async fn clear_bump_url(&self, bump_id: &str) -> Result<Bump> {
+    /// Forget the bump's pull request and retract its approval.
+    pub async fn abandon_bump(&self, bump_id: &str) -> Result<Bump> {
         let conn = self.database.conn()?;
-        conn.execute("UPDATE bump SET url = NULL WHERE id = ?", params![bump_id])
-            .await?;
+        conn.execute(
+            "UPDATE bump SET url = NULL, approved = 0 WHERE id = ?",
+            params![bump_id],
+        )
+        .await?;
         self.bump(bump_id).await
     }
 

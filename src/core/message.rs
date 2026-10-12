@@ -103,10 +103,11 @@ pub enum Payload {
         pull_request_url: Option<String>,
     },
 
-    /// Clear a bump's stored pull request URL, e.g. because the PR was closed
-    /// without being merged.
+    /// Clear a bump's stored pull request URL and retract its approval, because
+    /// the PR was closed without being merged. Closing signals the change is
+    /// unwanted, so the bump must not be reprocessed until approved again.
     #[serde(skip)]
-    ClearBumpUrl {
+    AbandonBump {
         bump_id: String,
     },
 
@@ -149,7 +150,7 @@ impl std::fmt::Display for Payload {
             Payload::PersistSweep { .. } => write!(f, "PersistSweep"),
             Payload::SweepPullRequestClosed { .. } => write!(f, "SweepPullRequestClosed"),
             Payload::PersistBumpResult { .. } => write!(f, "PersistBumpResult"),
-            Payload::ClearBumpUrl { .. } => write!(f, "ClearBumpUrl"),
+            Payload::AbandonBump { .. } => write!(f, "AbandonBump"),
             Payload::RemoveBump { .. } => write!(f, "RemoveBump"),
             Payload::PersistAnalyzedProjectDependencies { .. } => {
                 write!(f, "PersistAnalyzedProjectDependencies")
@@ -378,8 +379,8 @@ impl Payload {
                 Ok(())
             }
 
-            Payload::ClearBumpUrl { bump_id } => {
-                let updated_bump = app.store().clear_bump_url(&bump_id).await?;
+            Payload::AbandonBump { bump_id } => {
+                let updated_bump = app.store().abandon_bump(&bump_id).await?;
 
                 app.handle().broadcast(crate::core::event::Event::Commit {
                     ops: vec![crate::core::event::Op::Upsert {

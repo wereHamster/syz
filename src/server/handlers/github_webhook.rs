@@ -283,7 +283,7 @@ async fn handle_pull_request(
     let (payload, description) = if merged {
         (Payload::RemoveBump { bump_id: bump.id }, "RemoveBump")
     } else {
-        (Payload::ClearBumpUrl { bump_id: bump.id }, "ClearBumpUrl")
+        (Payload::AbandonBump { bump_id: bump.id }, "AbandonBump")
     };
 
     tracing::info!(
