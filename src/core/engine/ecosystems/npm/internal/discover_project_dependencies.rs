@@ -48,7 +48,8 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
             let mut extract_deps = |deps: &serde_yml::Value| {
                 if let Some(map) = deps.as_mapping() {
                     for (k, v) in map {
-                        if let Some(name) = k.as_str() {
+                        {
+                            let name = k;
                             if let Some(ver_str) = v.as_str() {
                                 // pnpm lockfile v6 format: "1.2.3" or "1.2.3(peer...)"
                                 locked_versions.insert(
