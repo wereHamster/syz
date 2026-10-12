@@ -49,7 +49,15 @@ impl Registry for NixFlakeRegistry {
     }
 }
 
-pub struct NixFlakePatcher;
+pub struct NixFlakePatcher {
+    github_client: clients::github::GitHub,
+}
+
+impl NixFlakePatcher {
+    pub fn new(github_client: clients::github::GitHub) -> Self {
+        Self { github_client }
+    }
+}
 
 #[async_trait]
 impl Patcher for NixFlakePatcher {
@@ -59,6 +67,6 @@ impl Patcher for NixFlakePatcher {
         temp_dir: &std::path::Path,
         targets: &[UpdateTarget],
     ) -> Result<Vec<FileModification>> {
-        internal::apply_updates::run(snapshot, temp_dir, targets).await
+        internal::apply_updates::run(&self.github_client, snapshot, temp_dir, targets).await
     }
 }

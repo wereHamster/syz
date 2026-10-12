@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Deserialize;
 
@@ -64,6 +64,43 @@ impl<'a> RootInput<'a> {
             RootInput::Tarball(input) => input.alias,
         }
     }
+}
+
+/// The distinct owners (sorted, spelled as in the lock) of every github input in the lock,
+/// including the transitive ones: nix fetches those too, so a private one needs credentials
+/// just the same. The spelling matters because nix matches `access-tokens` keys
+/// case-sensitively. The lock is controlled by the repository, so owners that are not valid
+/// GitHub account names are left out: they end up in an API route and in nix's config.
+pub(super) fn github_owners(lock: &FlakeLock) -> Vec<String> {
+    let owners: BTreeSet<String> = lock
+        .nodes
+        .values()
+        .flat_map(|node| [node.original.as_ref(), node.locked.as_ref()])
+        .flatten()
+        .filter(|flake_ref| flake_ref.ref_type == "github")
+        .filter_map(|flake_ref| flake_ref.owner.clone())
+        .filter(|owner| is_valid_owner(owner))
+        .collect();
+
+    owners.into_iter().collect()
+}
+
+/// GitHub repository names consist of ASCII letters, digits, hyphens, underscores and dots, and
+/// are never just dots.
+pub(super) fn is_valid_repo(repo: &str) -> bool {
+    !repo.is_empty()
+        && repo.bytes().any(|b| b != b'.')
+        && repo
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// GitHub account names consist of ASCII letters, digits and hyphens.
+pub(super) fn is_valid_owner(owner: &str) -> bool {
+    !owner.is_empty()
+        && owner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Direct (non-`follows`) root inputs whose `original` is a github ref, a generic git ref
@@ -143,4 +180,74 @@ pub(super) fn root_inputs(lock: &FlakeLock) -> Vec<RootInput<'_>> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_github_owners_includes_transitive_inputs_once() {
+        let content = r#"
+        {
+          "nodes": {
+            "nixpkgs": {
+              "locked": { "type": "github", "owner": "NixOS", "repo": "nixpkgs", "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+              "original": { "type": "github", "owner": "NixOS", "repo": "nixpkgs" }
+            },
+            "internal": {
+              "inputs": { "lib": "lib" },
+              "locked": { "type": "github", "owner": "acme", "repo": "internal", "rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+              "original": { "type": "github", "owner": "acme", "repo": "internal" }
+            },
+            "lib": {
+              "locked": { "type": "github", "owner": "other", "repo": "lib", "rev": "cccccccccccccccccccccccccccccccccccccccc" },
+              "original": { "type": "github", "owner": "other", "repo": "lib" }
+            },
+            "core": {
+              "locked": { "type": "git", "rev": "dddddddddddddddddddddddddddddddddddddddd" },
+              "original": { "type": "git", "url": "https://tangled.org/@tangled.org/core" }
+            },
+            "root": { "inputs": { "nixpkgs": "nixpkgs", "internal": "internal", "core": "core" } }
+          },
+          "root": "root"
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        assert_eq!(github_owners(&lock), vec!["NixOS", "acme", "other"]);
+    }
+
+    #[test]
+    fn test_github_owners_skips_names_that_are_not_valid_accounts() {
+        let content = r#"
+        {
+          "nodes": {
+            "newline": {
+              "original": { "type": "github", "owner": "evil\nmax-jobs = 0", "repo": "x" }
+            },
+            "space": {
+              "original": { "type": "github", "owner": "a b", "repo": "x" }
+            },
+            "route": {
+              "original": { "type": "github", "owner": "a/b?c#d", "repo": "x" }
+            },
+            "dots": {
+              "original": { "type": "github", "owner": "..", "repo": "x" }
+            },
+            "empty": {
+              "original": { "type": "github", "owner": "", "repo": "x" }
+            },
+            "ok": {
+              "original": { "type": "github", "owner": "my-org", "repo": "x" }
+            },
+            "root": { "inputs": {} }
+          },
+          "root": "root"
+        }
+        "#;
+        let lock: FlakeLock = serde_json::from_str(content).unwrap();
+
+        assert_eq!(github_owners(&lock), vec!["my-org"]);
+    }
 }

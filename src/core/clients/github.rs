@@ -175,6 +175,32 @@ impl GitHub {
         }
     }
 
+    /// Mints a short-lived token that can read the contents of the repositories the GitHub App
+    /// may access for `owner`, or `None` when the app isn't installed for them. The token is
+    /// meant for tools that talk to GitHub themselves (e.g. `nix`), so it is limited to
+    /// `contents: read`, whatever else the installation is allowed to do.
+    pub async fn contents_read_token(&self, owner: &str) -> Result<Option<String>> {
+        let Some(id) = self.installation_id(owner).await? else {
+            return Ok(None);
+        };
+
+        let request = octocrab::models::apps::CreateInstallationAccessToken {
+            permissions: Some(HashMap::from([(
+                "contents".to_string(),
+                "read".to_string(),
+            )])),
+            ..Default::default()
+        };
+        let token = self
+            .octocrab
+            .apps()
+            .create_installation_access_token(id, &request)
+            .await
+            .with_context(|| format!("Failed to create an access token for '{}'", owner))?;
+
+        Ok(Some(token.token))
+    }
+
     /// Returns a client authorized for `owner`, falling back to `public_client` when no
     /// installation covers that owner (e.g. a public repo with no app installation at all).
     async fn client_for_owner(&self, owner: &str) -> Result<Octocrab> {
@@ -349,13 +375,25 @@ impl GitHub {
         parts.next().map(|s| s.to_string())
     }
 
+    /// Reads `path` of another repository, at `reference` (a branch, tag or commit) or at its
+    /// default branch.
     pub async fn get_foreign_file(
         &self,
         owner: &str,
         repo: &str,
         path: &str,
+        reference: Option<&str>,
     ) -> Result<Option<String>> {
-        let route = format!("/repos/{}/{}/contents/{}", owner, repo, path);
+        let route = match reference {
+            Some(r) => format!(
+                "/repos/{}/{}/contents/{}?ref={}",
+                owner,
+                repo,
+                path,
+                urlencoding::encode(r)
+            ),
+            None => format!("/repos/{}/{}/contents/{}", owner, repo, path),
+        };
         let response = match self.get_json(&route).await {
             Ok(res) => res,
             Err(e) => {

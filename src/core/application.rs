@@ -287,7 +287,10 @@ impl Application {
                 "cargo",
                 Box::new(crate::core::engine::ecosystems::cargo::CargoPatcher::new()),
             ),
-            ("nix-flake", Box::new(NixFlakePatcher)),
+            (
+                "nix-flake",
+                Box::new(NixFlakePatcher::new(self.github.clone())),
+            ),
         ]
     }
 
@@ -309,7 +312,7 @@ impl Application {
             "cargo" => Some(Box::new(
                 crate::core::engine::ecosystems::cargo::CargoPatcher::new(),
             )),
-            "nix-flake" => Some(Box::new(NixFlakePatcher)),
+            "nix-flake" => Some(Box::new(NixFlakePatcher::new(self.github.clone()))),
             _ => None,
         }
     }
