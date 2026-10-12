@@ -271,18 +271,15 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(lockfile.as_ref().unwrap()) {
             if let Some(importers) = lock_val.get("importers").and_then(|i| i.as_mapping()) {
                 for (k, v) in importers {
-                    if let Some(project_path) = k.as_str() {
+                    {
+                        let project_path = k;
                         let mut deps = std::collections::HashMap::new();
                         for dep_type in ["dependencies", "devDependencies", "optionalDependencies"]
                         {
                             if let Some(dep_map) = v.get(dep_type).and_then(|d| d.as_mapping()) {
                                 for (pkg_name, pkg_info) in dep_map {
-                                    if let (Some(name), Some(info)) =
-                                        (pkg_name.as_str(), pkg_info.as_mapping())
-                                    {
-                                        if let Some(version_val) = info
-                                            .get(serde_yml::Value::String("version".to_string()))
-                                        {
+                                    if let (name, Some(info)) = (pkg_name, pkg_info.as_mapping()) {
+                                        if let Some(version_val) = info.get("version") {
                                             if let Some(version_str) = version_val.as_str() {
                                                 let clean_version = version_str
                                                     .split('(')
@@ -1019,7 +1016,7 @@ impl NpmPatcher {
                         "^"
                     };
                     new_overrides.insert(
-                        serde_yml::Value::String(format!("{}@{}", module, fix_version.major)),
+                        format!("{}@{}", module, fix_version.major),
                         serde_yml::Value::String(format!("{}{}", req_prefix, fix_version)),
                     );
                 }
@@ -1246,10 +1243,7 @@ impl WorkspaceRenderer {
                     existing.insert(k.clone(), v.clone());
                 }
             } else {
-                ws_map.insert(
-                    serde_yml::Value::String("overrides".to_string()),
-                    serde_yml::Value::Mapping(overrides.clone()),
-                );
+                ws_map.insert("overrides", serde_yml::Value::Mapping(overrides.clone()));
             }
         }
 
@@ -1492,7 +1486,8 @@ pub(crate) fn extract_versions_from_lock(
     if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(lock_content) {
         if let Some(packages) = lock_val.get("packages").and_then(|p| p.as_mapping()) {
             for (k, _) in packages {
-                if let Some(path) = k.as_str() {
+                {
+                    let path = k;
                     if let Some(stripped) = path.strip_prefix('/') {
                         let parts: Vec<&str> = stripped.split('@').collect();
                         if parts.len() == 2 {
