@@ -17,9 +17,11 @@ Auth -> Bearer Token. `SYZD_AUTH_TOKEN`.
 
 ## Async / Actor Model
 
-Slow task (I/O, network) -> spawn background worker (`src/core/actions/`). Read-only.
-Background worker finish -> send `Message` to app mailbox.
-Main loop -> process `Message` sequential. Mutate DB sync. Avoid race/lock.
+Main loop -> reducer. Process `Message` sequential. Mutate DB sync. Broadcast. Return `Vec<Job>`. Avoid race/lock.
+Slow task (I/O, network) -> `Job` (`src/core/job.rs`). Never spawn or send to own mailbox from `execute()`.
+Dispatcher (`src/core/dispatcher.rs`) -> per-repository lane, FIFO, one job at a time. Per-class caps (audit, general). Timeout. Coalesce duplicate queued jobs.
+Job run (`src/core/actions/`) -> read-only store. Finish -> `Ok(Some(outcome Payload))` to mailbox. Fail -> `Err`, lane logs it (log = failure channel to clients).
+Late outcome (record gone) -> loop returns `ClosePullRequests` job.
 
 ## File Map
 
@@ -28,7 +30,10 @@ Main loop -> process `Message` sequential. Mutate DB sync. Avoid race/lock.
 - `src/core/application.rs` -> Main actor loop. Mailbox logic.
 - `src/core/message.rs` -> Command payloads & execution (`Payload::execute`).
 - `src/core/event.rs` -> SSE schema (`Op::Upsert`, `Event::Commit`).
-- `src/core/actions/` -> Background async workers.
+- `src/core/job.rs` -> `Job`, `LaneKey`, `PublishOutcome`.
+- `src/core/dispatcher.rs` -> Lanes, caps, coalescing, timeouts.
+- `src/core/services.rs` -> Clonable clients for jobs. `Runner` impl.
+- `src/core/actions/` -> Job implementations. Shared publish step (`DefaultBranch::publish`).
 - `src/server/handlers/` -> HTTP APIs (`POST /messages`, `GET /events`).
 - `src/core/engine/ecosystems/` -> Dependency scanner implementations (Cargo, NPM, GitHub Actions). Trait `Ecosystem`.
 
@@ -40,6 +45,6 @@ Config -> default rustfmt. No `rustfmt.toml`.
 ## Code Rules
 
 Write DB -> only inside main loop (`message.rs` `execute()`).
-Network I/O -> only inside background worker (`actions/` or `engine/`).
+Network I/O -> only inside a job (`actions/` or `engine/`).
 Mutate state -> emit `Event::Commit` with `Op::Upsert` to sync clients.
 Add new ecosystem -> implement `Ecosystem` trait.
