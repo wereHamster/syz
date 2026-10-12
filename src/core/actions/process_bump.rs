@@ -42,16 +42,22 @@ pub async fn run(services: &Services, lane: LaneKey, bump_id: String) -> Result<
 
     let default_branch = DefaultBranch::resolve(services.repository(&lane)?.as_ref()).await?;
 
-    let change = if targets.is_empty() {
+    let modifications = if targets.is_empty() {
         tracing::info!("Bump {} is already up to date", bump.name);
-        None
+        Vec::new()
     } else {
         let temp_dir = super::create_temp_dir(services.work_dir())?;
-        let modifications = patcher
+        patcher
             .apply_updates(default_branch.snapshot.as_ref(), temp_dir.path(), &targets)
             .await
-            .with_context(|| format!("Failed to apply the updates of bump {}", bump.name))?;
+            .with_context(|| format!("Failed to apply the updates of bump {}", bump.name))?
+    };
 
+    // Generating the title and body makes registry, advisory and GitHub requests, which
+    // are wasted when there is nothing to publish.
+    let change = if modifications.is_empty() {
+        None
+    } else {
         let pr_generator = services.pull_request_generator();
         let title = pr_generator
             .generate_pull_request_title(
