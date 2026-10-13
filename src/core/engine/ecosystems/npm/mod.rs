@@ -1556,6 +1556,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reads_a_lockfile_with_many_empty_mappings() {
+        // A YAML parser that leaks nesting depth on `{}` fails on real lockfiles, which have
+        // hundreds of packages without dependencies.
+        let mut lock = String::from("lockfileVersion: '9.0'\n\npackages:\n");
+        for i in 0..300 {
+            lock.push_str(&format!("\n  pkg{i}@1.0.0: {{}}\n"));
+        }
+
+        let versions = extract_versions_from_lock(&lock);
+
+        assert_eq!(versions.len(), 300);
+        assert!(versions["pkg0"].contains("1.0.0"));
+    }
+
     /// Runs real pnpm against the npm registry: `cargo test -- --ignored release_age_closure`.
     #[tokio::test]
     #[ignore]
