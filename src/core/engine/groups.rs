@@ -59,6 +59,9 @@ pub fn get_group(package_info: &PackageInfo) -> Option<String> {
         if url.contains("github.com/jestjs/jest") {
             return Some("Jest".to_string());
         }
+        if url.contains("github.com/aws/aws-sdk-js-v3") {
+            return Some("AWS SDK for JavaScript".to_string());
+        }
     }
     None
 }
