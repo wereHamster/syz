@@ -8,6 +8,10 @@ pub struct AdvisoriesSection;
 
 #[async_trait]
 impl PullRequestSectionGenerator for AdvisoriesSection {
+    fn name(&self) -> &'static str {
+        "advisories"
+    }
+
     async fn generate(
         &self,
         ctx: &PullRequestGenerationContext<'_>,

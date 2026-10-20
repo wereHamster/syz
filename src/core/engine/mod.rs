@@ -71,6 +71,8 @@ pub struct DependencyUpdateOption {
 /// needed to modify manifests and generate a pull request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UpdateTarget {
+    /// The ecosystem the dependency belongs to, e.g. `npm` or `nix-flake`.
+    pub ecosystem: String,
     pub name: String,
     pub current_version: RequirementVersion,
     pub target_version: RequirementVersion,

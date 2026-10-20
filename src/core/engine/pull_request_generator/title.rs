@@ -145,6 +145,7 @@ mod tests {
 
     fn make_target(name: &str, current: &str, target: &str) -> UpdateTarget {
         UpdateTarget {
+            ecosystem: "npm".to_string(),
             name: name.to_string(),
             current_version: RequirementVersion {
                 requirement: current.to_string(),
