@@ -1412,7 +1412,7 @@ async fn run_pnpm_install(
     lockfile_only: bool,
     silent: bool,
 ) -> Result<bool> {
-    tokio::task::spawn_blocking(move || {
+    let output = tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new("pnpm");
         cmd.arg("install");
 
@@ -1430,18 +1430,21 @@ async fn run_pnpm_install(
         // there is nobody to answer, and the prompt would block forever.
         cmd.stdin(std::process::Stdio::null());
 
-        let output = cmd.current_dir(&dir_path).output()?;
-        if !silent {
-            super::log_output("pnpm", &output);
-        }
-        Ok(output.status.success())
+        cmd.current_dir(&dir_path).output()
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
+    // Logged here and not in the closure: the blocking thread doesn't have the subscriber of
+    // the job, so its logs would never reach the clients.
+    if !silent {
+        super::log_output("pnpm", &output);
+    }
+    Ok(output.status.success())
 }
 
 async fn run_pnpm_dedupe(dir_path: std::path::PathBuf, silent: bool) -> Result<bool> {
-    tokio::task::spawn_blocking(move || {
+    let output = tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new("pnpm");
         cmd.arg("dedupe").arg("--ignore-scripts");
 
@@ -1449,14 +1452,17 @@ async fn run_pnpm_dedupe(dir_path: std::path::PathBuf, silent: bool) -> Result<b
         // there is nobody to answer, and the prompt would block forever.
         cmd.stdin(std::process::Stdio::null());
 
-        let output = cmd.current_dir(&dir_path).output()?;
-        if !silent {
-            super::log_output("pnpm", &output);
-        }
-        Ok(output.status.success())
+        cmd.current_dir(&dir_path).output()
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
+    // Logged here and not in the closure: the blocking thread doesn't have the subscriber of
+    // the job, so its logs would never reach the clients.
+    if !silent {
+        super::log_output("pnpm", &output);
+    }
+    Ok(output.status.success())
 }
 
 async fn run_pnpm_audit(dir_path: std::path::PathBuf) -> Result<serde_json::Value> {
