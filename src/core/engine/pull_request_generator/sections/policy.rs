@@ -8,6 +8,10 @@ pub struct PolicySection;
 
 #[async_trait]
 impl PullRequestSectionGenerator for PolicySection {
+    fn name(&self) -> &'static str {
+        "policy"
+    }
+
     async fn generate(
         &self,
         ctx: &PullRequestGenerationContext<'_>,

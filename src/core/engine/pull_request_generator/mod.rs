@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::core::engine::{
     advisories::{ReleaseAgeExceptionKind, SecurityUpdateSummary},
-    repository::ProjectRepositorySnapshot,
+    repository::{FileModification, ProjectRepositorySnapshot},
     TransitiveUpdateSummary, UpdateTarget,
 };
 
@@ -13,10 +13,7 @@ pub mod sections;
 pub mod title;
 
 use context::PullRequestGenerationContext;
-use sections::{
-    advisories::AdvisoriesSection, history::HistorySection, policy::PolicySection,
-    summary::SummarySection, PullRequestSectionGenerator,
-};
+use sections::{sections_for, PullRequestSectionGenerator};
 
 #[async_trait]
 pub trait PullRequestGenerator: Send + Sync {
@@ -29,12 +26,15 @@ pub trait PullRequestGenerator: Send + Sync {
         repo: &dyn ProjectRepositorySnapshot,
     ) -> Result<String>;
 
+    /// `snapshot` is the repository before the update and `modifications` the files the
+    /// update changes.
     async fn generate_pull_request_body(
         &self,
         package_group: &str,
-        ecosystem: &str,
         targets: &[UpdateTarget],
         is_major: bool,
+        snapshot: &dyn ProjectRepositorySnapshot,
+        modifications: &[FileModification],
     ) -> Result<String>;
 }
 
@@ -336,6 +336,71 @@ fn format_duration(duration: chrono::Duration) -> String {
     format!("{} {}{}", value, unit, if value == 1 { "" } else { "s" })
 }
 
+/// What the sections of one ecosystem's targets produced.
+struct PartitionBody {
+    // Not read yet: how several partitions are laid out in one description is undecided.
+    #[allow(dead_code)]
+    ecosystem: String,
+    sections: Vec<String>,
+}
+
+/// Splits the targets by ecosystem, in the order the ecosystems first appear.
+fn partition_by_ecosystem(targets: &[UpdateTarget]) -> Vec<(String, Vec<UpdateTarget>)> {
+    let mut partitions: Vec<(String, Vec<UpdateTarget>)> = Vec::new();
+
+    for target in targets {
+        match partitions
+            .iter_mut()
+            .find(|(ecosystem, _)| *ecosystem == target.ecosystem)
+        {
+            Some((_, partition)) => partition.push(target.clone()),
+            None => partitions.push((target.ecosystem.clone(), vec![target.clone()])),
+        }
+    }
+
+    partitions
+}
+
+/// Runs the sections in order and returns what they produced, with `base_length` being the
+/// length of the description before them.
+///
+/// A section that has nothing to report is left out. One that fails is logged and left out,
+/// so it can't fail the description.
+async fn run_sections(
+    sections: &[Box<dyn PullRequestSectionGenerator>],
+    ctx: &PullRequestGenerationContext<'_>,
+    base_length: usize,
+) -> Vec<String> {
+    let mut produced = Vec::new();
+    let mut length = base_length;
+
+    for section in sections {
+        match section.generate(ctx, length).await {
+            Ok(Some(content)) => {
+                length += content.len();
+                produced.push(content);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                "Pull request section {} failed for {} ({}): {:#}",
+                section.name(),
+                ctx.package_group,
+                ctx.ecosystem,
+                e
+            ),
+        }
+    }
+
+    produced
+}
+
+fn render(partitions: &[PartitionBody]) -> String {
+    partitions
+        .iter()
+        .flat_map(|partition| partition.sections.iter().map(String::as_str))
+        .collect()
+}
+
 pub struct DefaultPullRequestGenerator {
     registry_router: crate::core::engine::ecosystems::registry_router::RegistryRouter,
     advisory_resolver: Box<dyn crate::core::engine::advisories::AdvisoryResolver>,
@@ -380,11 +445,49 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
     async fn generate_pull_request_body(
         &self,
         package_group: &str,
-        ecosystem: &str,
         targets: &[UpdateTarget],
         is_major: bool,
+        snapshot: &dyn ProjectRepositorySnapshot,
+        modifications: &[FileModification],
     ) -> Result<String> {
-        let mut display_targets = targets.to_vec();
+        let mut partitions = Vec::new();
+        let mut length = 0;
+
+        for (ecosystem, targets) in partition_by_ecosystem(targets) {
+            let display_targets = self.display_targets(&ecosystem, targets).await;
+
+            let ctx = PullRequestGenerationContext {
+                package_group,
+                ecosystem: &ecosystem,
+                targets: &display_targets,
+                is_major,
+                registry_router: &self.registry_router,
+                advisory_resolver: self.advisory_resolver.as_ref(),
+                github: Some(&self.github),
+                snapshot,
+                modifications,
+            };
+
+            let sections = run_sections(&sections_for(&ecosystem), &ctx, length).await;
+            length += sections.iter().map(String::len).sum::<usize>();
+            partitions.push(PartitionBody {
+                ecosystem,
+                sections,
+            });
+        }
+
+        Ok(render(&partitions))
+    }
+}
+
+impl DefaultPullRequestGenerator {
+    /// Rewrites the targets of an ecosystem the way they are shown in the description.
+    async fn display_targets(
+        &self,
+        ecosystem: &str,
+        targets: Vec<UpdateTarget>,
+    ) -> Vec<UpdateTarget> {
+        let mut display_targets = targets;
 
         if ecosystem == "github-actions" {
             for t in display_targets.iter_mut() {
@@ -413,38 +516,177 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
             }
         }
 
-        let ctx = PullRequestGenerationContext {
-            package_group,
-            ecosystem,
-            targets: &display_targets,
-            is_major,
-            registry_router: &self.registry_router,
-            advisory_resolver: self.advisory_resolver.as_ref(),
-            github: &self.github,
-        };
-
-        let sections: Vec<Box<dyn PullRequestSectionGenerator>> = vec![
-            Box::new(SummarySection),
-            Box::new(PolicySection),
-            Box::new(AdvisoriesSection),
-            Box::new(HistorySection),
-        ];
-
-        let mut body = String::new();
-        for section in sections {
-            if let Ok(Some(content)) = section.generate(&ctx, body.len()).await {
-                body.push_str(&content);
-            }
-        }
-
-        Ok(body)
+        display_targets
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::engine::advisories::ReleaseAgeException;
+    use crate::core::engine::advisories::{Advisory, AdvisoryResolver, ReleaseAgeException};
+    use crate::core::engine::ecosystems::registry_router::RegistryRouter;
+    use crate::core::engine::repository::test_support::MockSnapshot;
+    use crate::core::engine::{PackageInfo, RequirementVersion};
+    use std::sync::{Arc, Mutex};
+
+    fn target(ecosystem: &str, name: &str, current: &str, target: &str) -> UpdateTarget {
+        UpdateTarget {
+            ecosystem: ecosystem.to_string(),
+            name: name.to_string(),
+            current_version: RequirementVersion {
+                requirement: current.to_string(),
+                version: current.to_string(),
+            },
+            target_version: RequirementVersion {
+                requirement: target.to_string(),
+                version: target.to_string(),
+            },
+            latest_version: target.to_string(),
+            package_info: PackageInfo { repo_url: None },
+            minimum_release_age: None,
+        }
+    }
+
+    struct NoAdvisories;
+
+    #[async_trait]
+    impl AdvisoryResolver for NoAdvisories {
+        async fn resolve_advisories(
+            &self,
+            _ecosystem: &str,
+            _name: &str,
+            _current_version: &str,
+            _target_version: &str,
+        ) -> Result<Vec<Advisory>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn partitions_targets_by_ecosystem_in_order_of_appearance() {
+        let partitions = partition_by_ecosystem(&[
+            target("npm", "a", "1.0.0", "1.1.0"),
+            target("cargo", "b", "1.0.0", "1.1.0"),
+            target("npm", "c", "1.0.0", "1.1.0"),
+        ]);
+
+        let summary: Vec<(&str, Vec<&str>)> = partitions
+            .iter()
+            .map(|(ecosystem, targets)| {
+                (
+                    ecosystem.as_str(),
+                    targets.iter().map(|t| t.name.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(summary, [("npm", vec!["a", "c"]), ("cargo", vec!["b"])]);
+    }
+
+    /// A section that returns fixed content, or fails when it has none.
+    struct FakeSection(&'static str, Option<&'static str>);
+
+    #[async_trait]
+    impl PullRequestSectionGenerator for FakeSection {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        async fn generate(
+            &self,
+            _ctx: &PullRequestGenerationContext<'_>,
+            _current_length: usize,
+        ) -> Result<Option<String>> {
+            match self.1 {
+                Some(content) => Ok(Some(content.to_string())),
+                None => Err(anyhow::anyhow!("boom")),
+            }
+        }
+    }
+
+    /// Collects what is logged.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Runs the sections on the targets. Returns what they produced and what was logged.
+    ///
+    /// The context has no GitHub client, so sections can't make requests.
+    async fn run(
+        ecosystem: &str,
+        targets: &[UpdateTarget],
+        sections: Vec<Box<dyn PullRequestSectionGenerator>>,
+    ) -> (Vec<String>, String) {
+        let log = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let log = log.clone();
+                move || log.clone()
+            })
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let router = RegistryRouter::new(std::collections::HashMap::new());
+        let ctx = PullRequestGenerationContext {
+            package_group: "group",
+            ecosystem,
+            targets,
+            is_major: false,
+            registry_router: &router,
+            advisory_resolver: &NoAdvisories,
+            github: None,
+            snapshot: &MockSnapshot::empty(),
+            modifications: &[],
+        };
+
+        let produced = run_sections(&sections, &ctx, 0).await;
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        (produced, log)
+    }
+
+    #[tokio::test]
+    async fn a_failing_section_is_logged_and_left_out() {
+        let (produced, log) = run(
+            "npm",
+            &[target("npm", "react", "17.0.0", "18.0.0")],
+            vec![
+                Box::new(FakeSection("first", Some("one"))),
+                Box::new(FakeSection("broken", None)),
+                Box::new(FakeSection("second", Some("two"))),
+            ],
+        )
+        .await;
+
+        assert_eq!(produced, ["one", "two"]);
+        assert!(log.contains("WARN"), "{}", log);
+        assert!(log.contains("section broken failed"), "{}", log);
+        assert!(log.contains("boom"), "{}", log);
+    }
+
+    #[tokio::test]
+    async fn nix_flake_body_is_just_the_summary() {
+        let (produced, _) = run(
+            "nix-flake",
+            &[target("nix-flake", "nixpkgs", "aaa", "bbb")],
+            sections_for("nix-flake"),
+        )
+        .await;
+
+        assert_eq!(
+            produced,
+            ["This PR updates `nixpkgs` from version aaa to bbb.\n\n"]
+        );
+    }
 
     #[tokio::test]
     async fn audit_body_lists_release_age_exceptions() {

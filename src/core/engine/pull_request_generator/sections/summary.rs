@@ -12,6 +12,10 @@ fn npmx_diff_url(name: &str, old: &str, new: &str) -> String {
 
 #[async_trait]
 impl PullRequestSectionGenerator for SummarySection {
+    fn name(&self) -> &'static str {
+        "summary"
+    }
+
     async fn generate(
         &self,
         ctx: &PullRequestGenerationContext<'_>,

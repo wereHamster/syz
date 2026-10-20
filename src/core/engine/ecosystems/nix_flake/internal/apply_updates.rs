@@ -352,6 +352,7 @@ mod tests {
 
     fn make_target(name: &str, sha: &str) -> UpdateTarget {
         UpdateTarget {
+            ecosystem: "nix-flake".to_string(),
             name: name.to_string(),
             current_version: RequirementVersion {
                 requirement: "old-ref".to_string(),

@@ -37,6 +37,10 @@ impl HistorySection {
 
 #[async_trait]
 impl PullRequestSectionGenerator for HistorySection {
+    fn name(&self) -> &'static str {
+        "history"
+    }
+
     async fn generate(
         &self,
         ctx: &PullRequestGenerationContext<'_>,
@@ -167,7 +171,9 @@ impl PullRequestSectionGenerator for HistorySection {
                     }
                 }
 
-                let resolver = self.release_notes_resolver(&repo_url, ctx.github.clone());
+                let resolver = ctx
+                    .github
+                    .and_then(|github| self.release_notes_resolver(&repo_url, github.clone()));
 
                 let history_to_process: Vec<_> = history
                     .into_iter()

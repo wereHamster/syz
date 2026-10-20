@@ -69,7 +69,13 @@ pub async fn run(services: &Services, lane: LaneKey, bump_id: String) -> Result<
             )
             .await?;
         let body = pr_generator
-            .generate_pull_request_body(&bump.name, &eco_type, &targets, bump.major)
+            .generate_pull_request_body(
+                &bump.name,
+                &targets,
+                bump.major,
+                default_branch.snapshot.as_ref(),
+                &modifications,
+            )
             .await?;
 
         Some(Change {
@@ -129,6 +135,7 @@ fn build_update_targets(patcher: &dyn Patcher, rows: Vec<BumpTargetData>) -> Vec
 
         if let Some(new_req) = patcher.updated_requirement(&row.specifier, &row.target_version) {
             targets.push(UpdateTarget {
+                ecosystem: row.eco_type,
                 name: full_name,
                 current_version: RequirementVersion {
                     requirement: row.specifier,
