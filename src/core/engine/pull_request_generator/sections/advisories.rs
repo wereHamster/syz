@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::core::engine::pull_request_generator::budget::{fit_items, SectionKind};
 use crate::core::engine::pull_request_generator::context::PullRequestGenerationContext;
 use crate::core::engine::pull_request_generator::sections::PullRequestSectionGenerator;
 
@@ -12,12 +13,16 @@ impl PullRequestSectionGenerator for AdvisoriesSection {
         "advisories"
     }
 
+    fn kind(&self) -> SectionKind {
+        SectionKind::Notices
+    }
+
     async fn generate(
         &self,
         ctx: &PullRequestGenerationContext<'_>,
-        _current_length: usize,
+        budget: usize,
     ) -> Result<Option<String>> {
-        let mut advisories_md = String::new();
+        let mut advisories = Vec::new();
         let mut seen_advisories = std::collections::HashSet::new();
 
         for target in ctx.targets {
@@ -33,21 +38,22 @@ impl PullRequestSectionGenerator for AdvisoriesSection {
             {
                 for adv in advs {
                     if seen_advisories.insert(adv.id.clone()) {
-                        advisories_md
-                            .push_str(&format!("> - [{}]({}): {}\n", adv.id, adv.url, adv.title));
+                        advisories.push(format!("> - [{}]({}): {}\n", adv.id, adv.url, adv.title));
                     }
                 }
             }
         }
 
-        if !advisories_md.is_empty() {
-            let mut body = String::new();
-            body.push_str("> [!NOTE]\n> This update resolves the following security advisories:\n");
-            body.push_str(&advisories_md);
-            body.push('\n');
-            Ok(Some(body))
-        } else {
-            Ok(None)
+        if advisories.is_empty() {
+            return Ok(None);
         }
+
+        Ok(fit_items(
+            "> [!NOTE]\n> This update resolves the following security advisories:\n",
+            &advisories,
+            "\n",
+            budget,
+            |n| format!("> - … and {} more\n", n),
+        ))
     }
 }

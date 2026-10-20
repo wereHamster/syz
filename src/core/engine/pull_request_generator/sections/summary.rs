@@ -1,226 +1,149 @@
+//! The layout the summaries of the ecosystems have in common.
+//!
+//! An ecosystem's summary section calls [`generate`] with what is specific to it.
+
 use anyhow::Result;
-use async_trait::async_trait;
 
+use crate::core::engine::pull_request_generator::budget::fit_items;
 use crate::core::engine::pull_request_generator::context::PullRequestGenerationContext;
-use crate::core::engine::pull_request_generator::sections::PullRequestSectionGenerator;
+use crate::core::engine::UpdateTarget;
 
-pub struct SummarySection;
+/// Where to see what changed between two versions of a package: name, old and new version.
+pub type DiffUrl = fn(&str, &str, &str) -> Option<String>;
 
-fn npmx_diff_url(name: &str, old: &str, new: &str) -> String {
-    format!("https://npmx.dev/diff/{}/v/{}...{}", name, old, new)
+/// The source repository of the target, from the registry if the target doesn't carry it.
+async fn repo_url(ctx: &PullRequestGenerationContext<'_>, target: &UpdateTarget) -> String {
+    if let Some(url) = target.package_info.repo_url.as_deref() {
+        if !url.is_empty() {
+            return url.to_string();
+        }
+    }
+
+    match ctx
+        .registry_router
+        .fetch_package_info(ctx.ecosystem, &target.name)
+        .await
+    {
+        Ok(info) => info.repo_url.unwrap_or_default(),
+        Err(_) => String::new(),
+    }
 }
 
-#[async_trait]
-impl PullRequestSectionGenerator for SummarySection {
-    fn name(&self) -> &'static str {
-        "summary"
+/// `[text](url)`, or just `text` when there is no url.
+fn link(text: &str, url: Option<&str>) -> String {
+    match url {
+        Some(url) if !url.is_empty() => format!("[{}]({})", text, url),
+        _ => text.to_string(),
     }
+}
 
-    async fn generate(
-        &self,
-        ctx: &PullRequestGenerationContext<'_>,
-        _current_length: usize,
-    ) -> Result<Option<String>> {
-        let targets = ctx.targets;
-        let ecosystem = ctx.ecosystem;
-        let package_group = ctx.package_group;
-        let mut body = String::new();
+fn is_major_bump(target: &UpdateTarget) -> bool {
+    semver::Version::parse(target.current_version.version.trim_start_matches('v'))
+        .ok()
+        .zip(semver::Version::parse(target.target_version.version.trim_start_matches('v')).ok())
+        .map(|(old, new)| old.major != new.major)
+        .unwrap_or(false)
+}
 
-        if targets.len() == 1 {
-            let target = &targets[0];
-            let mut repo_url = target.package_info.repo_url.clone().unwrap_or_default();
-            if repo_url.is_empty() {
-                if let Ok(info) = ctx
-                    .registry_router
-                    .fetch_package_info(ecosystem, &target.name)
-                    .await
-                {
-                    repo_url = info.repo_url.unwrap_or_default();
-                }
-            }
+/// Builds the summary of the targets in ctx, no longer than `budget`.
+///
+/// When there are more packages than fit, the last ones are dropped from the list.
+pub async fn generate(
+    ctx: &PullRequestGenerationContext<'_>,
+    budget: usize,
+    diff_url: DiffUrl,
+) -> Result<Option<String>> {
+    let targets = ctx.targets;
+    let package_group = ctx.package_group;
 
-            if !repo_url.is_empty() {
-                if ecosystem == "npm" {
-                    let diff_url = npmx_diff_url(
-                        &target.name,
-                        &target.current_version.version,
-                        &target.target_version.version,
-                    );
-                    body.push_str(&format!(
-                        "This PR updates [{}]({}) from version [{} to {}]({}).\n\n",
-                        target.name,
-                        repo_url,
-                        target.current_version.version,
-                        target.target_version.version,
-                        diff_url
-                    ));
-                } else {
-                    body.push_str(&format!(
-                        "This PR updates [{}]({}) from version {} to {}.\n\n",
-                        target.name,
-                        repo_url,
-                        target.current_version.version,
-                        target.target_version.version
-                    ));
-                }
-            } else if ecosystem == "npm" {
-                let diff_url = npmx_diff_url(
-                    &target.name,
-                    &target.current_version.version,
-                    &target.target_version.version,
-                );
-                body.push_str(&format!(
-                    "This PR updates `{}` from version [{} to {}]({}).\n\n",
-                    target.name,
-                    target.current_version.version,
-                    target.target_version.version,
-                    diff_url
-                ));
-            } else {
-                body.push_str(&format!(
-                    "This PR updates `{}` from version {} to {}.\n\n",
-                    target.name, target.current_version.version, target.target_version.version
-                ));
-            }
-        } else if !targets.is_empty() {
-            let first_target = &targets[0];
-            let mut first_repo_url = first_target
-                .package_info
-                .repo_url
-                .clone()
-                .unwrap_or_default();
-            if first_repo_url.is_empty() {
-                if let Ok(info) = ctx
-                    .registry_router
-                    .fetch_package_info(ecosystem, &first_target.name)
-                    .await
-                {
-                    first_repo_url = info.repo_url.unwrap_or_default();
-                }
-            }
+    let Some(first) = targets.first() else {
+        return Ok(None);
+    };
 
-            let all_same = targets.iter().all(|t| {
-                t.current_version.version == first_target.current_version.version
-                    && t.target_version.version == first_target.target_version.version
-            });
+    let omitted = |n: usize| format!("- … and {} more\n", n);
 
-            if all_same {
-                if !first_repo_url.is_empty() {
-                    body.push_str(&format!(
-                        "This PR updates [{}]({}) packages from {} to {}. The following packages are part of this set:\n\n",
-                        package_group, first_repo_url, first_target.current_version.version, first_target.target_version.version
-                    ));
-                } else {
-                    body.push_str(&format!(
-                        "This PR updates `{}` packages from {} to {}. The following packages are part of this set:\n\n",
-                        package_group, first_target.current_version.version, first_target.target_version.version
-                    ));
-                }
-
-                for t in targets {
-                    if ecosystem == "npm" {
-                        let diff_url = npmx_diff_url(
-                            &t.name,
-                            &first_target.current_version.version,
-                            &first_target.target_version.version,
-                        );
-                        body.push_str(&format!("- `{}` ([diff]({}))\n", t.name, diff_url));
-                    } else {
-                        body.push_str(&format!("- `{}`\n", t.name));
-                    }
-                }
-                body.push('\n');
-            } else {
-                body.push_str(&format!(
-                    "This PR updates {} dependencies from the **{}** group.\n\n",
-                    targets.len(),
-                    package_group
-                ));
-
-                for target in targets {
-                    let mut repo_url = target.package_info.repo_url.clone().unwrap_or_default();
-                    if repo_url.is_empty() {
-                        if let Ok(info) = ctx
-                            .registry_router
-                            .fetch_package_info(ecosystem, &target.name)
-                            .await
-                        {
-                            repo_url = info.repo_url.unwrap_or_default();
-                        }
-                    }
-
-                    let is_major_bump = semver::Version::parse(
-                        target.current_version.version.trim_start_matches('v'),
-                    )
-                    .ok()
-                    .zip(
-                        semver::Version::parse(
-                            target.target_version.version.trim_start_matches('v'),
-                        )
-                        .ok(),
-                    )
-                    .map(|(old, new)| old.major != new.major)
-                    .unwrap_or(false);
-                    let major_suffix = if is_major_bump { " (major)" } else { "" };
-
-                    if !repo_url.is_empty() {
-                        if ecosystem == "npm" {
-                            let diff_url = npmx_diff_url(
-                                &target.name,
-                                &target.current_version.version,
-                                &target.target_version.version,
-                            );
-                            body.push_str(&format!(
-                                "- [{}]({}) from [`{}` to `{}`]({}){}\n",
-                                target.name,
-                                repo_url,
-                                target.current_version.version,
-                                target.target_version.version,
-                                diff_url,
-                                major_suffix
-                            ));
-                        } else {
-                            body.push_str(&format!(
-                                "- [{}]({}) from `{}` to `{}`{}\n",
-                                target.name,
-                                repo_url,
-                                target.current_version.version,
-                                target.target_version.version,
-                                major_suffix
-                            ));
-                        }
-                    } else if ecosystem == "npm" {
-                        let diff_url = npmx_diff_url(
-                            &target.name,
-                            &target.current_version.version,
-                            &target.target_version.version,
-                        );
-                        body.push_str(&format!(
-                            "- `{}` from [`{}` to `{}`]({}){}\n",
-                            target.name,
-                            target.current_version.version,
-                            target.target_version.version,
-                            diff_url,
-                            major_suffix
-                        ));
-                    } else {
-                        body.push_str(&format!(
-                            "- `{}` from `{}` to `{}`{}\n",
-                            target.name,
-                            target.current_version.version,
-                            target.target_version.version,
-                            major_suffix
-                        ));
-                    }
-                }
-                body.push('\n');
-            }
-        }
-
-        if body.is_empty() {
-            Ok(None)
+    if targets.len() == 1 {
+        let repo = repo_url(ctx, first).await;
+        let name = if repo.is_empty() {
+            format!("`{}`", first.name)
         } else {
-            Ok(Some(body))
-        }
+            link(&first.name, Some(&repo))
+        };
+        let (old, new) = (
+            &first.current_version.version,
+            &first.target_version.version,
+        );
+        let versions = link(
+            &format!("{} to {}", old, new),
+            diff_url(&first.name, old, new).as_deref(),
+        );
+
+        let body = format!("This PR updates {} from version {}.\n\n", name, versions);
+        return Ok(Some(body).filter(|body| body.len() <= budget));
     }
+
+    let all_same = targets.iter().all(|t| {
+        t.current_version.version == first.current_version.version
+            && t.target_version.version == first.target_version.version
+    });
+
+    if all_same {
+        let (old, new) = (
+            &first.current_version.version,
+            &first.target_version.version,
+        );
+        let repo = repo_url(ctx, first).await;
+        let group = if repo.is_empty() {
+            format!("`{}`", package_group)
+        } else {
+            link(package_group, Some(&repo))
+        };
+
+        let intro = format!(
+            "This PR updates {} packages from {} to {}. The following packages are part of this set:\n\n",
+            group, old, new
+        );
+        let items: Vec<String> = targets
+            .iter()
+            .map(|t| match diff_url(&t.name, old, new) {
+                Some(url) => format!("- `{}` ([diff]({}))\n", t.name, url),
+                None => format!("- `{}`\n", t.name),
+            })
+            .collect();
+
+        return Ok(fit_items(&intro, &items, "\n", budget, omitted));
+    }
+
+    let intro = format!(
+        "This PR updates {} dependencies from the **{}** group.\n\n",
+        targets.len(),
+        package_group
+    );
+    let mut items = Vec::with_capacity(targets.len());
+
+    for target in targets {
+        let repo = repo_url(ctx, target).await;
+        let name = if repo.is_empty() {
+            format!("`{}`", target.name)
+        } else {
+            link(&target.name, Some(&repo))
+        };
+        let (old, new) = (
+            &target.current_version.version,
+            &target.target_version.version,
+        );
+        let versions = link(
+            &format!("`{}` to `{}`", old, new),
+            diff_url(&target.name, old, new).as_deref(),
+        );
+        let major = if is_major_bump(target) {
+            " (major)"
+        } else {
+            ""
+        };
+
+        items.push(format!("- {} from {}{}\n", name, versions, major));
+    }
+
+    Ok(fit_items(&intro, &items, "\n", budget, omitted))
 }

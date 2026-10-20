@@ -7,11 +7,13 @@ use crate::core::engine::{
     TransitiveUpdateSummary, UpdateTarget,
 };
 
+pub mod budget;
 pub mod context;
 pub mod formatting;
 pub mod sections;
 pub mod title;
 
+use budget::{SectionKind, BODY_LIMIT};
 use context::PullRequestGenerationContext;
 use sections::{sections_for, PullRequestSectionGenerator};
 
@@ -336,12 +338,10 @@ fn format_duration(duration: chrono::Duration) -> String {
     format!("{} {}{}", value, unit, if value == 1 { "" } else { "s" })
 }
 
-/// What the sections of one ecosystem's targets produced.
-struct PartitionBody {
-    // Not read yet: how several partitions are laid out in one description is undecided.
-    #[allow(dead_code)]
-    ecosystem: String,
-    sections: Vec<String>,
+/// What the sections of one ecosystem's targets are run with.
+struct Partition<'a> {
+    ctx: PullRequestGenerationContext<'a>,
+    sections: Vec<Box<dyn PullRequestSectionGenerator>>,
 }
 
 /// Splits the targets by ecosystem, in the order the ecosystems first appear.
@@ -361,44 +361,64 @@ fn partition_by_ecosystem(targets: &[UpdateTarget]) -> Vec<(String, Vec<UpdateTa
     partitions
 }
 
-/// Runs the sections in order and returns what they produced, with `base_length` being the
-/// length of the description before them.
+/// Runs the sections of all partitions and returns what they produced, in the order it goes
+/// into the description. `limit` is how long the description may get.
 ///
-/// A section that has nothing to report is left out. One that fails is logged and left out,
-/// so it can't fail the description.
-async fn run_sections(
-    sections: &[Box<dyn PullRequestSectionGenerator>],
-    ctx: &PullRequestGenerationContext<'_>,
-    base_length: usize,
-) -> Vec<String> {
+/// The sections are run kind by kind, so the summaries of all ecosystems come first. A kind
+/// gets a budget, which its sections share: each gets an equal part of what is left of it,
+/// so what a section doesn't use goes to the ones after it.
+///
+/// A section that has nothing to report is left out. One that fails, or doesn't stay within
+/// its budget, is logged and left out, so it can't fail the description.
+async fn run_sections(partitions: &[Partition<'_>], limit: usize) -> Vec<String> {
     let mut produced = Vec::new();
-    let mut length = base_length;
+    let mut length = 0;
 
-    for section in sections {
-        match section.generate(ctx, length).await {
-            Ok(Some(content)) => {
-                length += content.len();
-                produced.push(content);
+    for kind in SectionKind::IN_ORDER {
+        let queue: Vec<_> = partitions
+            .iter()
+            .flat_map(|partition| {
+                partition
+                    .sections
+                    .iter()
+                    .filter(|section| section.kind() == kind)
+                    .map(move |section| (&partition.ctx, section))
+            })
+            .collect();
+
+        let mut kind_budget = kind.budget(limit.saturating_sub(length));
+        let count = queue.len();
+
+        for (index, (ctx, section)) in queue.into_iter().enumerate() {
+            let budget = kind_budget / (count - index);
+
+            match section.generate(ctx, budget).await {
+                Ok(Some(content)) if content.len() <= budget => {
+                    kind_budget -= content.len();
+                    length += content.len();
+                    produced.push(content);
+                }
+                Ok(Some(content)) => tracing::warn!(
+                    "Pull request section {} exceeded its budget for {} ({}): {} > {} bytes",
+                    section.name(),
+                    ctx.package_group,
+                    ctx.ecosystem,
+                    content.len(),
+                    budget
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    "Pull request section {} failed for {} ({}): {:#}",
+                    section.name(),
+                    ctx.package_group,
+                    ctx.ecosystem,
+                    e
+                ),
             }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(
-                "Pull request section {} failed for {} ({}): {:#}",
-                section.name(),
-                ctx.package_group,
-                ctx.ecosystem,
-                e
-            ),
         }
     }
 
     produced
-}
-
-fn render(partitions: &[PartitionBody]) -> String {
-    partitions
-        .iter()
-        .flat_map(|partition| partition.sections.iter().map(String::as_str))
-        .collect()
 }
 
 pub struct DefaultPullRequestGenerator {
@@ -450,33 +470,31 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
         snapshot: &dyn ProjectRepositorySnapshot,
         modifications: &[FileModification],
     ) -> Result<String> {
-        let mut partitions = Vec::new();
-        let mut length = 0;
-
+        let mut displayed = Vec::new();
         for (ecosystem, targets) in partition_by_ecosystem(targets) {
-            let display_targets = self.display_targets(&ecosystem, targets).await;
-
-            let ctx = PullRequestGenerationContext {
-                package_group,
-                ecosystem: &ecosystem,
-                targets: &display_targets,
-                is_major,
-                registry_router: &self.registry_router,
-                advisory_resolver: self.advisory_resolver.as_ref(),
-                github: Some(&self.github),
-                snapshot,
-                modifications,
-            };
-
-            let sections = run_sections(&sections_for(&ecosystem), &ctx, length).await;
-            length += sections.iter().map(String::len).sum::<usize>();
-            partitions.push(PartitionBody {
-                ecosystem,
-                sections,
-            });
+            let targets = self.display_targets(&ecosystem, targets).await;
+            displayed.push((ecosystem, targets));
         }
 
-        Ok(render(&partitions))
+        let partitions: Vec<Partition> = displayed
+            .iter()
+            .map(|(ecosystem, targets)| Partition {
+                ctx: PullRequestGenerationContext {
+                    package_group,
+                    ecosystem,
+                    targets,
+                    is_major,
+                    registry_router: &self.registry_router,
+                    advisory_resolver: self.advisory_resolver.as_ref(),
+                    github: Some(&self.github),
+                    snapshot,
+                    modifications,
+                },
+                sections: sections_for(ecosystem),
+            })
+            .collect();
+
+        Ok(run_sections(&partitions, BODY_LIMIT).await.concat())
     }
 }
 
@@ -583,7 +601,7 @@ mod tests {
     }
 
     /// A section that returns fixed content, or fails when it has none.
-    struct FakeSection(&'static str, Option<&'static str>);
+    struct FakeSection(&'static str, SectionKind, Option<&'static str>);
 
     #[async_trait]
     impl PullRequestSectionGenerator for FakeSection {
@@ -591,15 +609,41 @@ mod tests {
             self.0
         }
 
+        fn kind(&self) -> SectionKind {
+            self.1
+        }
+
         async fn generate(
             &self,
             _ctx: &PullRequestGenerationContext<'_>,
-            _current_length: usize,
+            _budget: usize,
         ) -> Result<Option<String>> {
-            match self.1 {
+            match self.2 {
                 Some(content) => Ok(Some(content.to_string())),
                 None => Err(anyhow::anyhow!("boom")),
             }
+        }
+    }
+
+    /// A section that reports the budget it was given.
+    struct BudgetEcho(&'static str, SectionKind);
+
+    #[async_trait]
+    impl PullRequestSectionGenerator for BudgetEcho {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+
+        fn kind(&self) -> SectionKind {
+            self.1
+        }
+
+        async fn generate(
+            &self,
+            ctx: &PullRequestGenerationContext<'_>,
+            budget: usize,
+        ) -> Result<Option<String>> {
+            Ok(Some(format!("{}:{};", ctx.ecosystem, budget)))
         }
     }
 
@@ -618,13 +662,15 @@ mod tests {
         }
     }
 
-    /// Runs the sections on the targets. Returns what they produced and what was logged.
+    type Sections = Vec<Box<dyn PullRequestSectionGenerator>>;
+
+    /// Runs the sections of each ecosystem on its targets, with `limit` as the length of the
+    /// description. Returns what they produced and what was logged.
     ///
-    /// The context has no GitHub client, so sections can't make requests.
+    /// The contexts have no GitHub client, so sections can't make requests.
     async fn run(
-        ecosystem: &str,
-        targets: &[UpdateTarget],
-        sections: Vec<Box<dyn PullRequestSectionGenerator>>,
+        limit: usize,
+        ecosystems: Vec<(&str, Vec<UpdateTarget>, Sections)>,
     ) -> (Vec<String>, String) {
         let log = LogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
@@ -637,33 +683,50 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let router = RegistryRouter::new(std::collections::HashMap::new());
-        let ctx = PullRequestGenerationContext {
-            package_group: "group",
-            ecosystem,
-            targets,
-            is_major: false,
-            registry_router: &router,
-            advisory_resolver: &NoAdvisories,
-            github: None,
-            snapshot: &MockSnapshot::empty(),
-            modifications: &[],
-        };
+        let snapshot = MockSnapshot::empty();
+        let partitions: Vec<Partition> = ecosystems
+            .into_iter()
+            .map(|(ecosystem, targets, sections)| Partition {
+                ctx: PullRequestGenerationContext {
+                    package_group: "group",
+                    ecosystem,
+                    targets: &*Box::leak(targets.into_boxed_slice()),
+                    is_major: false,
+                    registry_router: &router,
+                    advisory_resolver: &NoAdvisories,
+                    github: None,
+                    snapshot: &snapshot,
+                    modifications: &[],
+                },
+                sections,
+            })
+            .collect();
 
-        let produced = run_sections(&sections, &ctx, 0).await;
+        let produced = run_sections(&partitions, limit).await;
         let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
         (produced, log)
+    }
+
+    async fn run_one(ecosystem: &str, targets: Vec<UpdateTarget>) -> Vec<String> {
+        let sections = sections_for(ecosystem);
+        run(BODY_LIMIT, vec![(ecosystem, targets, sections)])
+            .await
+            .0
     }
 
     #[tokio::test]
     async fn a_failing_section_is_logged_and_left_out() {
         let (produced, log) = run(
-            "npm",
-            &[target("npm", "react", "17.0.0", "18.0.0")],
-            vec![
-                Box::new(FakeSection("first", Some("one"))),
-                Box::new(FakeSection("broken", None)),
-                Box::new(FakeSection("second", Some("two"))),
-            ],
+            BODY_LIMIT,
+            vec![(
+                "npm",
+                vec![target("npm", "react", "17.0.0", "18.0.0")],
+                vec![
+                    Box::new(FakeSection("first", SectionKind::Summary, Some("one"))),
+                    Box::new(FakeSection("broken", SectionKind::Summary, None)),
+                    Box::new(FakeSection("second", SectionKind::Summary, Some("two"))),
+                ],
+            )],
         )
         .await;
 
@@ -674,17 +737,135 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nix_flake_body_is_just_the_summary() {
+    async fn a_section_over_its_budget_is_logged_and_left_out() {
+        let (produced, log) = run(
+            10,
+            vec![(
+                "npm",
+                Vec::new(),
+                vec![
+                    Box::new(FakeSection(
+                        "long",
+                        SectionKind::Summary,
+                        Some("0123456789ab"),
+                    )),
+                    Box::new(FakeSection("short", SectionKind::Summary, Some("ok"))),
+                ],
+            )],
+        )
+        .await;
+
+        assert_eq!(produced, ["ok"]);
+        assert!(log.contains("section long exceeded its budget"), "{}", log);
+    }
+
+    #[tokio::test]
+    async fn summaries_of_all_ecosystems_come_before_the_other_sections() {
+        let echo = || -> Sections {
+            vec![
+                Box::new(BudgetEcho("summary", SectionKind::Summary)),
+                Box::new(BudgetEcho("history", SectionKind::History)),
+            ]
+        };
+
         let (produced, _) = run(
+            BODY_LIMIT,
+            vec![("npm", Vec::new(), echo()), ("cargo", Vec::new(), echo())],
+        )
+        .await;
+
+        let order: Vec<&str> = produced
+            .iter()
+            .map(|section| section.split(':').next().unwrap())
+            .collect();
+        assert_eq!(order, ["npm", "cargo", "npm", "cargo"]);
+    }
+
+    #[tokio::test]
+    async fn a_kind_shares_its_budget_and_passes_on_what_is_left() {
+        let echo = || -> Sections {
+            vec![
+                Box::new(BudgetEcho("summary", SectionKind::Summary)),
+                Box::new(BudgetEcho("history", SectionKind::History)),
+            ]
+        };
+
+        let (produced, _) = run(
+            BODY_LIMIT,
+            vec![("npm", Vec::new(), echo()), ("cargo", Vec::new(), echo())],
+        )
+        .await;
+
+        // The summaries split their 5,000 bytes; the second also gets what the first left.
+        assert_eq!(produced[0], "npm:2500;");
+        assert_eq!(produced[1], "cargo:4991;");
+        // History gets the rest of the description, split between the two ecosystems.
+        let used = produced[0].len() + produced[1].len();
+        assert_eq!(produced[2], format!("npm:{};", (BODY_LIMIT - used) / 2));
+    }
+
+    #[tokio::test]
+    async fn nix_flake_body_is_just_the_summary() {
+        let produced = run_one(
             "nix-flake",
-            &[target("nix-flake", "nixpkgs", "aaa", "bbb")],
-            sections_for("nix-flake"),
+            vec![target("nix-flake", "nixpkgs", "aaa", "bbb")],
         )
         .await;
 
         assert_eq!(
             produced,
             ["This PR updates `nixpkgs` from version aaa to bbb.\n\n"]
+        );
+    }
+
+    #[tokio::test]
+    async fn npm_summary_links_the_diff() {
+        let produced = run_one("npm", vec![target("npm", "react", "17.0.0", "18.0.0")]).await;
+
+        assert_eq!(
+            produced[0],
+            "This PR updates `react` from version [17.0.0 to 18.0.0](https://npmx.dev/diff/react/v/17.0.0...18.0.0).\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn cargo_summary_marks_major_bumps() {
+        let produced = run_one(
+            "cargo",
+            vec![
+                target("cargo", "serde", "1.0.1", "1.0.2"),
+                target("cargo", "tokio", "0.9.0", "1.0.0"),
+                target("cargo", "anyhow", "0.1.0", "0.2.0"),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            produced[0],
+            "This PR updates 3 dependencies from the **group** group.\n\n\
+             - `serde` from `1.0.1` to `1.0.2`\n\
+             - `tokio` from `0.9.0` to `1.0.0` (major)\n\
+             - `anyhow` from `0.1.0` to `0.2.0`\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_summary_list_is_cut_between_items() {
+        let targets: Vec<_> = (0..500)
+            .map(|i| target("cargo", &format!("crate-{i}"), "1.0.0", "1.1.0"))
+            .collect();
+
+        let produced = run_one("cargo", targets).await;
+        let summary = &produced[0];
+
+        assert!(summary.len() <= SectionKind::Summary.budget(BODY_LIMIT));
+        assert!(summary.ends_with("more\n\n"), "{}", summary);
+        let kept = summary.matches("\n- `crate-").count();
+        assert!(kept > 0 && kept < 500);
+        assert!(
+            summary.contains(&format!("- … and {} more\n", 500 - kept)),
+            "{}",
+            summary
         );
     }
 
