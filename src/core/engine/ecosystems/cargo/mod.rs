@@ -198,15 +198,17 @@ impl Patcher for CargoPatcher {
         }
 
         let temp_dir_owned = temp_dir.to_path_buf();
-        let status = tokio::task::spawn_blocking(move || {
+        let output = tokio::task::spawn_blocking(move || {
             Command::new("cargo")
                 .arg("generate-lockfile")
+                .stdin(std::process::Stdio::null())
                 .current_dir(&temp_dir_owned)
-                .status()
+                .output()
         })
         .await
         .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
-        if !status.success() {
+        super::log_output("cargo", &output);
+        if !output.status.success() {
             anyhow::bail!("cargo generate-lockfile failed in {:?}", temp_dir);
         }
 

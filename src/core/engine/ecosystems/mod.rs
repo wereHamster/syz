@@ -12,6 +12,21 @@ pub mod nix_flake;
 pub mod npm;
 pub mod registry_router;
 
+/// Forwards the captured output of a finished subprocess to the log.
+///
+/// Subprocesses must not inherit our stdout/stderr: in single-process mode that is the
+/// terminal the TUI draws on. Capture it with `Command::output()` and log it here instead.
+pub(crate) fn log_output(program: &str, output: &std::process::Output) {
+    for (stream, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
+        for line in String::from_utf8_lossy(bytes).lines() {
+            let line = line.trim_end();
+            if !line.is_empty() {
+                tracing::info!("{program} {stream}: {line}");
+            }
+        }
+    }
+}
+
 #[async_trait]
 pub trait Scanner: Send + Sync {
     /// Scans a project repository to discover dependencies.
