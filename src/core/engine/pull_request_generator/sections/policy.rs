@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::core::engine::pull_request_generator::budget::{fit_items, SectionKind};
 use crate::core::engine::pull_request_generator::context::PullRequestGenerationContext;
 use crate::core::engine::pull_request_generator::sections::PullRequestSectionGenerator;
 
@@ -12,13 +13,17 @@ impl PullRequestSectionGenerator for PolicySection {
         "policy"
     }
 
+    fn kind(&self) -> SectionKind {
+        SectionKind::Notices
+    }
+
     async fn generate(
         &self,
         ctx: &PullRequestGenerationContext<'_>,
-        _current_length: usize,
+        budget: usize,
     ) -> Result<Option<String>> {
         let targets = ctx.targets;
-        let mut body = String::new();
+        let mut alerts: Vec<String> = Vec::new();
 
         let all_same = !targets.is_empty()
             && targets.iter().all(|t| {
@@ -86,7 +91,7 @@ impl PullRequestSectionGenerator for PolicySection {
                         } else {
                             "now".to_string()
                         };
-                        body.push_str(&format!(
+                        alerts.push(format!(
                             "> [!IMPORTANT]\n> 1 more recent version of `{}` is released ({}). However, that version is not approved yet by policy. It will become available {}.\n\n",
                             subject, target.latest_version, availability
                         ));
@@ -110,12 +115,12 @@ impl PullRequestSectionGenerator for PolicySection {
                             .map(|v| format_availability(v.publish_time))
                             .unwrap_or_else(|| "now".to_string());
 
-                        body.push_str(&format!(
+                        alerts.push(format!(
                             "> [!IMPORTANT]\n> {} more recent versions of `{}` are released, the latest one being {}. However, these versions are not approved yet by policy. The next version ({}) becomes available {}, the latest version ({}) becomes available {}.\n\n",
                             count, subject, target.latest_version, next_version, next_availability, latest_version, latest_availability
                         ));
                     } else {
-                        body.push_str(&format!(
+                        alerts.push(format!(
                             "> [!IMPORTANT]\n> A more recent version of `{}` is released ({}). However, it is not approved yet by policy.\n\n",
                             subject, target.latest_version
                         ));
@@ -126,7 +131,7 @@ impl PullRequestSectionGenerator for PolicySection {
                     } else {
                         target.name.clone()
                     };
-                    body.push_str(&format!(
+                    alerts.push(format!(
                         "> [!IMPORTANT]\n> A more recent version of `{}` is released ({}). However, it is not approved yet by policy.\n\n",
                         subject, target.latest_version
                     ));
@@ -134,10 +139,12 @@ impl PullRequestSectionGenerator for PolicySection {
             }
         }
 
-        if body.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(body))
+        if alerts.is_empty() {
+            return Ok(None);
         }
+
+        Ok(fit_items("", &alerts, "", budget, |n| {
+            format!("*… and {} more not shown.*\n\n", n)
+        }))
     }
 }
