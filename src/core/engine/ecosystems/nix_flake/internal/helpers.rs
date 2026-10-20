@@ -43,6 +43,23 @@ fn commit_route(owner: &str, repo: &str, reference: Option<&str>) -> String {
     }
 }
 
+/// How many commits `head` is ahead of `base`. `base` and `head` have to be plain revisions.
+pub async fn get_commit_count(
+    github_client: &GitHub,
+    owner: &str,
+    repo: &str,
+    base: &str,
+    head: &str,
+) -> Option<u64> {
+    // Only the total is wanted, so ask for a page of one commit.
+    let route = format!(
+        "/repos/{}/{}/compare/{}...{}?per_page=1",
+        owner, repo, base, head
+    );
+    let res = github_client.get_json(&route).await.ok()?;
+    res.get("total_commits")?.as_u64()
+}
+
 pub async fn get_commit_date(
     github_client: &GitHub,
     owner: &str,
