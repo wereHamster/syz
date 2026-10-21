@@ -6,8 +6,10 @@
 //! `nixosConfigurations`, `darwinConfigurations` and `homeConfigurations`. `lib`, `overlays`,
 //! `nixosModules`, `templates` and the like have no derivation to compare.
 //!
-//! The same evaluation reads the tools in each of the `devShells`, which says more about what an
-//! update does to them than whether their derivation differs.
+//! The same evaluation reads the tools in each of the `devShells`, and the packages of each
+//! home-manager user, which say more about what an update does to them than whether their
+//! derivation differs. The users are those of `nixosConfigurations` and `darwinConfigurations`
+//! (through the home-manager module, where they use it) and of `homeConfigurations`.
 //!
 //! Evaluating needs the whole repository on disk, since outputs may use any file of it, and
 //! fetches the inputs of both locks. Only call it from a job.
@@ -51,6 +53,10 @@ pub struct Evaluation {
     /// The tools of each dev shell, or `None` for a shell that could not be evaluated.
     #[serde(default, rename = "devShellTools")]
     pub dev_shell_tools: dev_shells::Shells,
+    /// The packages of each home-manager user, named `host/user` (just the name, for a
+    /// standalone configuration), or `None` for one that could not be evaluated.
+    #[serde(default, rename = "homeEnvironments")]
+    pub home_environments: dev_shells::Shells,
 }
 
 /// An output the update changes, with its derivation (or program, for apps) before and after.
@@ -90,6 +96,8 @@ pub struct AffectedOutputs {
     pub unevaluated: Vec<String>,
     /// The tools of the dev shells the update changes.
     pub dev_shells: DevShellChanges,
+    /// The packages of the home-manager users the update changes. Each user counts as a "shell".
+    pub home_environments: DevShellChanges,
 }
 
 impl AffectedOutputs {
@@ -111,6 +119,7 @@ pub fn compare(
     let mut result = AffectedOutputs {
         system: new.system.clone(),
         dev_shells: dev_shells::compare(&old.dev_shell_tools, &new.dev_shell_tools),
+        home_environments: dev_shells::compare(&old.home_environments, &new.home_environments),
         ..AffectedOutputs::default()
     };
 
@@ -443,23 +452,59 @@ let
       then [{ inherit name; value = version; }]
       else [ ]
     else [ ];
+  # The tools among `inputs` (which may be nested lists) whose version passes `keep`.
+  toolsIn = keep: inputs:
+    builtins.listToAttrs (builtins.filter
+      (found: keep found.value)
+      (builtins.concatMap
+        (input:
+          let found = guardDeep (tool input);
+          in if found == null then [ ] else found)
+        (flatten inputs)));
   toolsOf = shell:
     if !(builtins.isAttrs shell) then null
-    else builtins.listToAttrs (builtins.concatMap
-      (input:
-        let found = guardDeep (tool input);
-        in if found == null then [ ] else found)
-      (flatten (map (attribute: shell.${attribute} or [ ]) [
-        "nativeBuildInputs"
-        "buildInputs"
-        "propagatedNativeBuildInputs"
-        "propagatedBuildInputs"
-      ])));
+    else toolsIn (_: true) (map (attribute: shell.${attribute} or [ ]) [
+      "nativeBuildInputs"
+      "buildInputs"
+      "propagatedNativeBuildInputs"
+      "propagatedBuildInputs"
+    ]);
+  # The packages of a home-manager user. What has no version is a wrapper or a generated file,
+  # such as a session script, and says nothing about an update.
+  packagesOf = home:
+    if !(builtins.isAttrs home) then null
+    else toolsIn (version: version != "") [ (home.packages or [ ]) ];
+  # The users home-manager manages in a NixOS or darwin configuration, if it is used at all.
+  usersOf = configuration:
+    let users = guard ((configuration.config.home-manager or { }).users or { });
+    in if builtins.isAttrs users then users else { };
+  # `host/user` to the packages of the user, for each configuration that manages users.
+  moduleEnvironments = configurations:
+    builtins.concatMap
+      (host:
+        let users = usersOf configurations.${host};
+        in map
+          (user: {
+            name = "${host}/${user}";
+            value = guardDeep (packagesOf users.${user}.home);
+          })
+          (names users))
+      (names configurations);
+  # A standalone home-manager configuration is one user, named after the configuration.
+  standaloneEnvironments = configurations:
+    map
+      (name: { inherit name; value = guardDeep (packagesOf configurations.${name}.config.home); })
+      (names configurations);
 in {
   inherit system;
   devShellTools = builtins.listToAttrs (map
     (name: { inherit name; value = guardDeep (toolsOf flake.devShells.${system}.${name}); })
     (names (flake.devShells.${system} or { })));
+  homeEnvironments = builtins.listToAttrs (
+    moduleEnvironments (flake.nixosConfigurations or { })
+    ++ moduleEnvironments (flake.darwinConfigurations or { })
+    ++ standaloneEnvironments (flake.homeConfigurations or { })
+  );
   outputs = builtins.foldl' (a: b: a // b) { } [
     (entries "devShells" (flake.devShells.${system} or { }) drvPath)
     (entries "packages" (flake.packages.${system} or { }) drvPath)
@@ -496,6 +541,7 @@ mod tests {
                 .map(|(name, drv)| (name.to_string(), drv.map(str::to_string)))
                 .collect(),
             dev_shell_tools: Default::default(),
+            home_environments: Default::default(),
         }
     }
 
@@ -682,7 +728,29 @@ mod tests {
         };
       };
       formatter.${system} = build "fmt" "echo fmt > $out";
-      nixosConfigurations.host-a.config.system.build.toplevel = build "host-a" "echo a > $out";
+      # Two users through the home-manager module. A package without a version is a wrapper
+      # or a generated file, and `broken` is a user that can't be evaluated.
+      nixosConfigurations.host-a.config = {
+        system.build.toplevel = build "host-a" "echo a > $out";
+        home-manager.users = {
+          alice.home.packages = [
+            (build "mytool-${builtins.readFile ./data.txt}" "echo tool > $out")
+            (build "steady-4.2" "echo steady > $out")
+            (build "wrapper" "echo wrapper > $out")
+            (build "session-vars.sh" "echo vars > $out")
+          ];
+          bob.home.packages = [
+            (build "mytool-${builtins.readFile ./data.txt}" "echo tool > $out")
+          ];
+          broken.home.packages = throw "this user does not evaluate";
+        };
+      };
+      # A host that doesn't use home-manager has nothing to report.
+      darwinConfigurations.host-b.config.system.build.toplevel = build "host-b" "echo b > $out";
+      homeConfigurations.carol = {
+        activationPackage = build "carol" "echo carol > $out";
+        config.home.packages = [ (build "mytool-${builtins.readFile ./data.txt}" "echo tool > $out") ];
+      };
       lib.not-a-derivation = 1;
     };
 }
@@ -724,9 +792,11 @@ mod tests {
         assert_eq!(
             result.unchanged,
             names(&[
+                "darwinConfigurations.host-b",
                 "devShells.agent",
                 "devShells.default",
                 "formatter",
+                "homeConfigurations.carol",
                 "nixosConfigurations.host-a",
                 "packages.fixed",
             ])
@@ -745,5 +815,24 @@ mod tests {
         assert_eq!(tool.before.as_deref(), Some("1.0"));
         assert_eq!(tool.after.as_deref(), Some("2.0"));
         assert_eq!(tool.shells, names(&["default", "agent"]));
+
+        // The packages of the users are read through the home-manager module and from the
+        // standalone configuration alike, and what the update changes about them is one change
+        // for all of them. Packages without a version, and hosts without users, don't show up.
+        let environments = &result.home_environments;
+        assert_eq!(
+            environments.shells,
+            names(&["carol", "host-a/alice", "host-a/bob"])
+        );
+        assert_eq!(environments.unevaluated, 1);
+        assert_eq!(environments.changes.len(), 1, "{environments:?}");
+        let package = &environments.changes[0];
+        assert_eq!(package.name, "mytool");
+        assert_eq!(package.before.as_deref(), Some("1.0"));
+        assert_eq!(package.after.as_deref(), Some("2.0"));
+        assert_eq!(
+            package.shells,
+            names(&["carol", "host-a/alice", "host-a/bob"])
+        );
     }
 }
