@@ -99,12 +99,16 @@ impl PullRequestSectionGenerator for NixFlakeAffectedOutputsSection {
             return Ok(None);
         };
 
-        // The tools are the more specific of the two, so they get half of the room and the
-        // outputs what they leave.
+        // The tools are more specific than the outputs, so the dev shells get half of the room,
+        // the users half of what that leaves, and the outputs the rest.
         let dev_shells = render_dev_shells(&affected.dev_shells, budget / 2).unwrap_or_default();
-        let outputs = render_outputs(&affected, budget - dev_shells.len()).unwrap_or_default();
+        let users =
+            render_user_environments(&affected.home_environments, (budget - dev_shells.len()) / 2)
+                .unwrap_or_default();
+        let outputs =
+            render_outputs(&affected, budget - dev_shells.len() - users.len()).unwrap_or_default();
 
-        Ok(Some(outputs + &dev_shells).filter(|section| !section.is_empty()))
+        Ok(Some(outputs + &dev_shells + &users).filter(|section| !section.is_empty()))
     }
 }
 
@@ -334,8 +338,8 @@ fn version_text(version: &str) -> String {
 }
 
 /// One bullet: the tool, what happened to it, and the dev shells it is in. Without the shells
-/// when there is only one, and as `all shells` when the tool is in every one.
-fn tool_row(change: &ToolChange, all_shells: &[String]) -> String {
+/// when there is only one, and as `everywhere` (`all shells`) when the tool is in every one.
+fn tool_row(change: &ToolChange, all_shells: &[String], everywhere: &str) -> String {
     let mut row = format!("- **{}** ", escape_markdown(&change.name));
 
     match (&change.before, &change.after) {
@@ -351,7 +355,7 @@ fn tool_row(change: &ToolChange, all_shells: &[String]) -> String {
 
     if all_shells.len() > 1 {
         let shells = if change.shells.len() == all_shells.len() {
-            "all shells".to_string()
+            everywhere.to_string()
         } else {
             change
                 .shells
@@ -367,33 +371,30 @@ fn tool_row(change: &ToolChange, all_shells: &[String]) -> String {
     row
 }
 
-/// The tools of the dev shells that the update changes, no longer than `budget`. The tools
-/// that are in the most shells come first, and the last ones give way when there are too many.
-///
-/// `None` when no dev shell was evaluated, or there is no room for even the heading.
-fn render_dev_shells(dev_shells: &DevShellChanges, budget: usize) -> Option<String> {
-    if dev_shells.shells.is_empty() {
-        return None;
-    }
-
-    let head = "# Dev shells\n\n";
-    let unevaluated = match dev_shells.unevaluated {
+/// Says that `count` of the things the tools are in could not be evaluated, e.g. `1 dev shell`
+/// or `2 dev shells`.
+fn unevaluated_note(count: usize, one: &str, many: &str) -> String {
+    match count {
         0 => String::new(),
-        1 => "1 dev shell could not be evaluated and is not listed.\n\n".to_string(),
-        n => format!("{n} dev shells could not be evaluated and are not listed.\n\n"),
-    };
-
-    if dev_shells.changes.is_empty() {
-        return Some(format!(
-            "{head}No tool in the dev shells changed.\n\n{unevaluated}"
-        ))
-        .filter(|section| section.len() <= budget);
+        1 => format!("1 {one} could not be evaluated and is not listed.\n\n"),
+        n => format!("{n} {many} could not be evaluated and are not listed.\n\n"),
     }
+}
 
-    let rows: Vec<String> = dev_shells
+/// The rows of `changes` below `head`, no longer than `budget`, followed by `unevaluated` if
+/// there is room for it. The last rows give way when there are too many. `None` when not even one
+/// fits next to the note about the rest.
+fn render_tool_rows(
+    head: &str,
+    changes: &DevShellChanges,
+    unevaluated: String,
+    everywhere: &str,
+    budget: usize,
+) -> Option<String> {
+    let rows: Vec<String> = changes
         .changes
         .iter()
-        .map(|change| tool_row(change, &dev_shells.shells))
+        .map(|change| tool_row(change, &changes.shells, everywhere))
         .collect();
     let unevaluated = if head.len() + unevaluated.len() < budget {
         unevaluated
@@ -406,6 +407,44 @@ fn render_dev_shells(dev_shells: &DevShellChanges, budget: usize) -> Option<Stri
 
     // Only the note that everything was left out says nothing.
     (list != format!("{head}{}\n{unevaluated}", omitted(rows.len()))).then_some(list)
+}
+
+/// The tools of the dev shells that the update changes, no longer than `budget`. The tools
+/// that are in the most shells come first, and the last ones give way when there are too many.
+///
+/// `None` when no dev shell was evaluated, or there is no room for even the heading.
+fn render_dev_shells(dev_shells: &DevShellChanges, budget: usize) -> Option<String> {
+    if dev_shells.shells.is_empty() {
+        return None;
+    }
+
+    let head = "# Dev shells\n\n";
+    let unevaluated = unevaluated_note(dev_shells.unevaluated, "dev shell", "dev shells");
+
+    if dev_shells.changes.is_empty() {
+        return Some(format!(
+            "{head}No tool in the dev shells changed.\n\n{unevaluated}"
+        ))
+        .filter(|section| section.len() <= budget);
+    }
+
+    render_tool_rows(head, dev_shells, unevaluated, "all shells", budget)
+}
+
+/// The packages of the home-manager users that the update changes, no longer than `budget`,
+/// the same way as the tools of the dev shells. A user is shown as `host/user`, or by the name of
+/// the configuration for a standalone one.
+///
+/// `None` when no user's packages changed (most updates), or there is no room for the heading.
+fn render_user_environments(users: &DevShellChanges, budget: usize) -> Option<String> {
+    if users.changes.is_empty() {
+        return None;
+    }
+
+    let head = "# User environments\n\nPackages of the home-manager users.\n\n";
+    let unevaluated = unevaluated_note(users.unevaluated, "user", "users");
+
+    render_tool_rows(head, users, unevaluated, "all users", budget)
 }
 
 /// The lock before and after the update.
@@ -877,6 +916,7 @@ mod tests {
             unchanged: strings(unchanged),
             unevaluated: strings(unevaluated),
             dev_shells: DevShellChanges::default(),
+            home_environments: DevShellChanges::default(),
         }
     }
 
@@ -1230,5 +1270,113 @@ mod tests {
         assert!(section.contains("… and "), "{section}");
         // Not even one tool fits next to the note: nothing is better than only a note.
         assert_eq!(render_dev_shells(&shells, 45), None);
+    }
+
+    fn user_environments_example() -> DevShellChanges {
+        DevShellChanges {
+            shells: strings(&["laptop/ann", "laptop/bo", "server/ann"]),
+            changes: vec![
+                tool(
+                    "editor",
+                    Some("1.2.0"),
+                    Some("1.3.0"),
+                    &["laptop/ann", "laptop/bo", "server/ann"],
+                ),
+                tool(
+                    "agent",
+                    Some("0.9.1"),
+                    Some("0.9.2"),
+                    &["laptop/ann", "server/ann"],
+                ),
+                tool("pager", None, Some("2.0"), &["laptop/bo"]),
+            ],
+            unevaluated: 0,
+        }
+    }
+
+    #[test]
+    fn lists_the_packages_that_changed_with_the_users_they_are_in() {
+        let section = render_user_environments(&user_environments_example(), 2_000).unwrap();
+
+        assert_eq!(
+            section,
+            "# User environments\n\nPackages of the home-manager users.\n\n\
+             - **editor** `1.2.0` → `1.3.0` · _all users_\n\
+             - **agent** `0.9.1` → `0.9.2` · _laptop/ann, server/ann_\n\
+             - **pager** (new) `2.0` · _laptop/bo_\n\n"
+        );
+    }
+
+    #[test]
+    fn is_silent_when_no_package_of_a_user_changed() {
+        let unchanged = DevShellChanges {
+            shells: strings(&["laptop/ann"]),
+            unevaluated: 1,
+            ..DevShellChanges::default()
+        };
+
+        assert_eq!(render_user_environments(&unchanged, 2_000), None);
+        assert_eq!(
+            render_user_environments(&DevShellChanges::default(), 2_000),
+            None
+        );
+    }
+
+    #[test]
+    fn counts_the_users_it_could_not_evaluate() {
+        let mut users = user_environments_example();
+        users.unevaluated = 1;
+
+        let section = render_user_environments(&users, 2_000).unwrap();
+
+        assert!(
+            section.ends_with("\n1 user could not be evaluated and is not listed.\n\n"),
+            "{section}"
+        );
+    }
+
+    #[test]
+    fn a_single_user_is_not_named() {
+        let one = DevShellChanges {
+            shells: strings(&["ann"]),
+            changes: vec![tool("editor", Some("1.2.0"), Some("1.3.0"), &["ann"])],
+            unevaluated: 0,
+        };
+
+        assert_eq!(
+            render_user_environments(&one, 2_000).unwrap(),
+            "# User environments\n\nPackages of the home-manager users.\n\n\
+             - **editor** `1.2.0` → `1.3.0`\n\n"
+        );
+    }
+
+    #[test]
+    fn the_packages_of_the_users_stay_within_the_budget() {
+        let many: Vec<ToolChange> = (0..30)
+            .map(|i| {
+                tool(
+                    &format!("pkg{i:02}"),
+                    Some("1.0"),
+                    Some("1.1"),
+                    &["laptop/ann"],
+                )
+            })
+            .collect();
+        let users = DevShellChanges {
+            shells: strings(&["laptop/ann"]),
+            changes: many,
+            unevaluated: 0,
+        };
+
+        for budget in [0, 30, 100, 200, 400, 5_000] {
+            if let Some(section) = render_user_environments(&users, budget) {
+                assert!(section.len() <= budget, "{budget}: {section}");
+            }
+        }
+
+        let section = render_user_environments(&users, 400).unwrap();
+        assert!(section.contains("**pkg00**"), "{section}");
+        assert!(!section.contains("**pkg29**"), "{section}");
+        assert!(section.contains("… and "), "{section}");
     }
 }
