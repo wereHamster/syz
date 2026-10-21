@@ -182,15 +182,13 @@ fn findings(
     items
 }
 
-/// Every repository that is locked more than once, for whoever wants to look closer.
-fn duplicates_details(health: &LockHealth, previous: Option<&LockHealth>) -> String {
+/// Every repository that is locked more than once, as a paragraph and a list.
+fn duplicates_list(health: &LockHealth, previous: Option<&LockHealth>) -> String {
     if health.duplicates.is_empty() {
         return String::new();
     }
 
-    let mut out = String::from(
-        "<details>\n<summary>Repositories locked at more than one revision</summary>\n\n",
-    );
+    let mut out = String::from("Repositories locked at more than one revision:\n\n");
 
     for duplicate in &health.duplicates {
         let paths: Vec<String> = duplicate.paths.iter().map(|path| code(path)).collect();
@@ -222,14 +220,14 @@ fn duplicates_details(health: &LockHealth, previous: Option<&LockHealth>) -> Str
         out.push('\n');
     }
 
-    out.push_str("\n</details>\n\n");
+    out.push('\n');
     out
 }
 
-/// The lock health section, and what can be expanded below it.
+/// The lock health section, and the list of duplicates that goes below its findings.
 pub struct HealthSection {
     pub body: String,
-    pub details: String,
+    pub duplicates: String,
 }
 
 impl HealthSection {
@@ -244,14 +242,14 @@ impl HealthSection {
 
         Self {
             body,
-            details: duplicates_details(health, previous),
+            duplicates: duplicates_list(health, previous),
         }
     }
 
-    /// The section with the details if they fit in `limit` bytes, else without them. Empty if
+    /// The section with the list of duplicates if it fits in `limit` bytes, else without it. Empty if
     /// not even the findings fit.
     pub fn within(&self, limit: usize) -> String {
-        let full = format!("{}{}", self.body, self.details);
+        let full = format!("{}{}", self.body, self.duplicates);
         [full, self.body.clone()]
             .into_iter()
             .find(|section| section.len() <= limit)
@@ -398,7 +396,7 @@ mod tests {
         let section = HealthSection::new(&clean, Some(&clean), &[]);
 
         assert_eq!(section.body, "**Lock health**\n\nOK\n\n");
-        assert_eq!(section.details, "");
+        assert_eq!(section.duplicates, "");
     }
 
     #[test]
@@ -459,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn the_details_say_how_the_update_changed_the_duplicates() {
+    fn the_list_says_how_the_update_changed_the_duplicates() {
         let after = lock_with_duplicates();
         let before = health(
             &[
@@ -470,28 +468,31 @@ mod tests {
             .join(", "),
             r#""nixpkgs": "nixpkgs", "tool": "tool""#,
         );
-        let details = duplicates_details(&after, Some(&before));
+        let list = duplicates_list(&after, Some(&before));
 
-        assert!(details.starts_with("<details>\n<summary>"), "{details}");
-        assert!(details.ends_with("</details>\n\n"), "{details}");
         assert!(
-            details.contains("- `NixOS/nixpkgs`: 2 revisions (`nixpkgs`, `tool/nixpkgs`)\n"),
-            "{details}"
+            list.starts_with("Repositories locked at more than one revision:\n\n- "),
+            "{list}"
+        );
+        assert!(list.ends_with(")\n\n"), "{list}");
+        assert!(
+            list.contains("- `NixOS/nixpkgs`: 2 revisions (`nixpkgs`, `tool/nixpkgs`)\n"),
+            "{list}"
         );
         assert!(
-            details.contains(
+            list.contains(
                 "- `nix-systems/default`: 2 revisions (`systems`, `tool/systems`) (+1 since before)\n"
             ),
-            "{details}"
+            "{list}"
         );
     }
 
     #[test]
-    fn the_section_drops_the_details_before_the_findings() {
+    fn the_section_drops_the_duplicates_before_the_findings() {
         let section = HealthSection::new(&lock_with_duplicates(), None, &[]);
         let full = section.within(usize::MAX);
 
-        assert!(full.ends_with("</details>\n\n"), "{full}");
+        assert!(full.ends_with(")\n\n"), "{full}");
         assert_eq!(section.within(full.len() - 1), section.body);
         assert_eq!(section.within(section.body.len() - 1), "");
     }

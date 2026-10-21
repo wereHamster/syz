@@ -53,7 +53,8 @@ impl PullRequestSectionGenerator for NixFlakeSummarySection {
         .await;
 
         // The lock health is always shown, so the lists give way to it, not the other way
-        // round. It gives up its details if they would take more than a third of the section.
+        // round. It gives up its list of duplicates if that would take more than a third of the
+        // section.
         let health = health.map_or_else(String::new, |health| health.within(budget / 3));
         let lists = render(&diff, &commits, budget - health.len()).unwrap_or_default();
 
