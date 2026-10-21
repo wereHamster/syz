@@ -13,6 +13,8 @@ use crate::core::engine::pull_request_generator::context::PullRequestGenerationC
 use crate::core::engine::pull_request_generator::sections::{summary, PullRequestSectionGenerator};
 use crate::core::engine::repository::{FileModification, FileState, ProjectRepositorySnapshot};
 
+use super::nix_flake_health;
+
 /// None of the other sections produce anything for flake inputs yet.
 pub fn sections() -> Vec<Box<dyn PullRequestSectionGenerator>> {
     vec![
@@ -43,12 +45,26 @@ impl PullRequestSectionGenerator for NixFlakeSummarySection {
         ctx: &PullRequestGenerationContext<'_>,
         budget: usize,
     ) -> Result<Option<String>> {
-        let Some(diff) = lock_diff(ctx.snapshot, ctx.modifications).await else {
+        let Some(locks) = Locks::read(ctx.snapshot, ctx.modifications).await else {
+            return summary::generate(ctx, budget, |_, _, _| None).await;
+        };
+        let Some(diff) = locks.diff() else {
             return summary::generate(ctx, budget, |_, _, _| None).await;
         };
 
-        let commits = commit_counts(ctx, &diff.direct).await;
-        Ok(render(&diff, &commits, budget))
+        let (commits, health) = futures::future::join(
+            commit_counts(ctx, &diff.direct),
+            nix_flake_health::section(ctx, &locks.old, &locks.new),
+        )
+        .await;
+
+        // The lock health is always shown, so the lists give way to it, not the other way
+        // round. It gives up its list of duplicates if that would take more than a third of the
+        // section.
+        let health = health.map_or_else(String::new, |health| health.within(budget / 3));
+        let lists = render(&diff, &commits, budget - health.len()).unwrap_or_default();
+
+        Ok(Some(lists + &health).filter(|summary| !summary.is_empty()))
     }
 }
 
@@ -244,21 +260,34 @@ fn render_outputs(affected: &AffectedOutputs, budget: usize) -> Option<String> {
     Some(head + &changes + &any_edit + &unevaluated).filter(|section| section.len() <= budget)
 }
 
-/// How the lock differs before and after the update. `None` when the update leaves the lock
-/// alone, or there is no lock to compare.
-async fn lock_diff(
-    snapshot: &dyn ProjectRepositorySnapshot,
-    modifications: &[FileModification],
-) -> Option<LockDiff> {
-    let new = modifications
-        .iter()
-        .find_map(|modification| match &modification.state {
-            FileState::Write(content) if modification.path == "flake.lock" => Some(content),
-            _ => None,
-        })?;
-    let old = snapshot.read_file("flake.lock").await.ok()?;
+/// The lock before and after the update.
+struct Locks {
+    old: String,
+    new: String,
+}
 
-    LockDiff::between(&old, new).filter(|diff| !diff.is_empty())
+impl Locks {
+    /// `None` when the update doesn't write a lock, or there is no lock to compare it to.
+    async fn read(
+        snapshot: &dyn ProjectRepositorySnapshot,
+        modifications: &[FileModification],
+    ) -> Option<Locks> {
+        let new = modifications
+            .iter()
+            .find_map(|modification| match &modification.state {
+                FileState::Write(content) if modification.path == "flake.lock" => Some(content),
+                _ => None,
+            })?
+            .clone();
+        let old = snapshot.read_file("flake.lock").await.ok()?;
+
+        Some(Locks { old, new })
+    }
+
+    /// How the lock differs before and after. `None` when the update leaves it alone.
+    fn diff(&self) -> Option<LockDiff> {
+        LockDiff::between(&self.old, &self.new).filter(|diff| !diff.is_empty())
+    }
 }
 
 /// How many commits each of the updated `changes` spans, where GitHub can tell.
@@ -287,11 +316,11 @@ fn same_repo<'a>(old: &'a Pin, new: &Pin) -> Option<(&'a str, &'a str)> {
 }
 
 /// Text that is safe between backticks.
-fn code(text: &str) -> String {
+pub(super) fn code(text: &str) -> String {
     format!("`{}`", text.replace(['`', '\n', '\r'], "'"))
 }
 
-fn plural(count: usize, one: &str, many: &str) -> String {
+pub(super) fn plural(count: usize, one: &str, many: &str) -> String {
     format!("{} {}", count, if count == 1 { one } else { many })
 }
 
@@ -510,7 +539,7 @@ mod tests {
 
     async fn summarize(old: String, new: String, budget: usize) -> Option<String> {
         let snapshot = MockSnapshot::with_file("flake.lock", &old);
-        let diff = lock_diff(&snapshot, &modification(new)).await?;
+        let diff = Locks::read(&snapshot, &modification(new)).await?.diff()?;
         let commits = vec![None; diff.direct.len()];
         render(&diff, &commits, budget)
     }
@@ -631,8 +660,12 @@ mod tests {
         let content = lock(REV_A, REV_A, None);
         let snapshot = MockSnapshot::with_file("flake.lock", &content);
 
-        assert!(lock_diff(&snapshot, &modification(content)).await.is_none());
-        assert!(lock_diff(&snapshot, &[]).await.is_none());
+        assert!(Locks::read(&snapshot, &modification(content))
+            .await
+            .unwrap()
+            .diff()
+            .is_none());
+        assert!(Locks::read(&snapshot, &[]).await.is_none());
     }
 
     #[tokio::test]
@@ -640,7 +673,7 @@ mod tests {
         let snapshot = MockSnapshot::empty();
 
         assert!(
-            lock_diff(&snapshot, &modification(lock(REV_A, REV_A, None)))
+            Locks::read(&snapshot, &modification(lock(REV_A, REV_A, None)))
                 .await
                 .is_none()
         );

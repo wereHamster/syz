@@ -25,7 +25,7 @@ pub struct Pin {
 }
 
 impl Pin {
-    fn from_ref(locked: &FlakeRef) -> Self {
+    pub(super) fn from_ref(locked: &FlakeRef) -> Self {
         Self {
             ref_type: locked.ref_type.clone(),
             owner: locked.owner.clone(),
