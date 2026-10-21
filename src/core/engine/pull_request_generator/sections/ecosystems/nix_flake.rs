@@ -104,6 +104,42 @@ fn category_of(name: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// How many characters pulling out what two names share has to save to be worth the braces.
+const MIN_SHARED_SAVING: usize = 10;
+
+/// What `before` and `after` start with, up to and including the last `-` or `.` of it, so
+/// that no version number is cut in the middle, and what follows in each. `None` if they share
+/// none, or one of them would be left empty.
+fn split_shared_prefix<'a>(before: &'a str, after: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
+    let mut cut = None;
+
+    for ((index, a), (_, b)) in before.char_indices().zip(after.char_indices()) {
+        if a != b {
+            break;
+        }
+        let end = index + a.len_utf8();
+        if matches!(a, '-' | '.') && end < before.len() && end < after.len() {
+            cut = Some(end);
+        }
+    }
+
+    let cut = cut?;
+    Some((&before[..cut], &before[cut..], &after[cut..]))
+}
+
+/// `before → after`, with what the two names share shown once when that makes it a good deal
+/// shorter: `` `nixos-system-host-25.11.` { `20261001.a1b2c3d` → `20261015.e4f5a6b` } ``.
+fn name_change(before: &str, after: &str) -> String {
+    let plain = format!("{} → {}", code(before), code(after));
+
+    split_shared_prefix(before, after)
+        .map(|(shared, before, after)| {
+            format!("{} {{ {} → {} }}", code(shared), code(before), code(after))
+        })
+        .filter(|compact| compact.chars().count() + MIN_SHARED_SAVING <= plain.chars().count())
+        .unwrap_or(plain)
+}
+
 /// What an output's change comes to, where that says something: a new or removed output, or a
 /// different name of the derivation (usually a version).
 fn change_detail(change: &ChangedOutput, with_names: bool) -> Option<String> {
@@ -112,7 +148,7 @@ fn change_detail(change: &ChangedOutput, with_names: bool) -> Option<String> {
         (_, None) => Some("(removed)".to_string()),
         (Some(before), Some(after)) if with_names => {
             let (before, after) = (store_name(before)?, store_name(after)?);
-            (before != after).then(|| format!("{} → {}", code(before), code(after)))
+            (before != after).then(|| name_change(before, after))
         }
         _ => None,
     }
@@ -766,8 +802,8 @@ mod tests {
                  Per-system outputs are evaluated for `x86_64-linux`.\n\n\
                  - `devShells`\n  - `default`\n\
                  - `nixosConfigurations`\n\
-                 \x20 - `host-a`: `nixos-system-host-a-25.11.20261001.a1b2c3d` → `nixos-system-host-a-25.11.20261015.e4f5a6b`\n\
-                 \x20 - `host-b`: `nixos-system-host-b-25.11.20261001.a1b2c3d` → `nixos-system-host-b-25.11.20261015.e4f5a6b`\n\
+                 \x20 - `host-a`: `nixos-system-host-a-25.11.` {{ `20261001.a1b2c3d` → `20261015.e4f5a6b` }}\n\
+                 \x20 - `host-b`: `nixos-system-host-b-25.11.` {{ `20261001.a1b2c3d` → `20261015.e4f5a6b` }}\n\
                  - `packages`\n  - `docs`\n  - `extras`: (new)\n  - `tool`: `tool-1.4.0` → `tool-1.5.0`\n\n\
                  {ANY_LOCK_EDIT}\n\n- `packages.default`\n\n\
                  3 outputs could not be evaluated and are not listed.\n\n"
@@ -898,5 +934,51 @@ mod tests {
         let tight = render_outputs(&affected(many[..3].to_vec(), &[], &[], &[]), 150).unwrap();
         assert!(tight.contains("`tool-2`\n"), "{tight}");
         assert!(!tight.contains('→'), "{tight}");
+    }
+    #[test]
+    fn pulls_out_what_two_names_share_when_it_saves_space() {
+        assert_eq!(
+            name_change(
+                "nixos-system-host-a-25.11.20261001.a1b2c3d",
+                "nixos-system-host-a-25.11.20261015.e4f5a6b",
+            ),
+            "`nixos-system-host-a-25.11.` { `20261001.a1b2c3d` → `20261015.e4f5a6b` }"
+        );
+    }
+
+    #[test]
+    fn keeps_short_names_whole() {
+        assert_eq!(
+            name_change("tool-1.4.0", "tool-1.5.0"),
+            "`tool-1.4.0` → `tool-1.5.0`"
+        );
+        assert_eq!(
+            name_change("alpha-1.0", "beta-1.0"),
+            "`alpha-1.0` → `beta-1.0`"
+        );
+    }
+
+    #[test]
+    fn never_cuts_a_name_inside_a_word_or_number() {
+        // The names share `20261` and more, but the cut is at the last `.` before it.
+        assert_eq!(
+            split_shared_prefix("pkg-25.11.20261001", "pkg-25.11.20261015"),
+            Some(("pkg-25.11.", "20261001", "20261015"))
+        );
+        // Nothing separates the shared start from the rest.
+        assert_eq!(split_shared_prefix("abcdef1", "abcdef2"), None);
+    }
+
+    #[test]
+    fn leaves_neither_name_empty() {
+        assert_eq!(
+            split_shared_prefix("tool-1.4", "tool-1.4.1"),
+            Some(("tool-1.", "4", "4.1"))
+        );
+        assert_eq!(
+            split_shared_prefix("tool-1.", "tool-1.4"),
+            Some(("tool-", "1.", "1.4"))
+        );
+        assert_eq!(split_shared_prefix("tool-", "tool-1"), None);
     }
 }
