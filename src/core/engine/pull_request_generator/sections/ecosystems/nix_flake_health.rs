@@ -194,7 +194,8 @@ fn duplicates_list(health: &LockHealth, previous: Option<&LockHealth>) -> String
         let paths: Vec<String> = duplicate.paths.iter().map(|path| code(path)).collect();
         out.push_str(&format!(
             "- {}: {} ({})",
-            code(&duplicate.repo),
+            // Only github repositories are grouped, and their names are checked in the lock.
+            format!("[{0}](https://github.com/{0})", duplicate.repo),
             plural(duplicate.revisions, "revision", "revisions"),
             some_of(&paths)
         ));
@@ -476,12 +477,12 @@ mod tests {
         );
         assert!(list.ends_with(")\n\n"), "{list}");
         assert!(
-            list.contains("- `NixOS/nixpkgs`: 2 revisions (`nixpkgs`, `tool/nixpkgs`)\n"),
+            list.contains("- [NixOS/nixpkgs](https://github.com/NixOS/nixpkgs): 2 revisions (`nixpkgs`, `tool/nixpkgs`)\n"),
             "{list}"
         );
         assert!(
             list.contains(
-                "- `nix-systems/default`: 2 revisions (`systems`, `tool/systems`) (+1 since before)\n"
+                "- [nix-systems/default](https://github.com/nix-systems/default): 2 revisions (`systems`, `tool/systems`) (+1 since before)\n"
             ),
             "{list}"
         );
