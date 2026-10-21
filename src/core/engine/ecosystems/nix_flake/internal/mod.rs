@@ -3,4 +3,5 @@ pub mod discover_project_dependencies;
 pub mod find_input_alias;
 pub mod flake_lock;
 pub mod helpers;
+pub mod lock_diff;
 pub mod query_dependency_update_options;
