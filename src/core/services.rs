@@ -120,6 +120,7 @@ impl Services {
             self.registry_router(),
             self.advisory_resolver(),
             self.github.clone(),
+            self.work_dir.clone(),
         ))
     }
 

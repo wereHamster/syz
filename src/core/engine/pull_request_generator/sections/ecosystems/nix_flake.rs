@@ -1,6 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::core::engine::ecosystems::nix_flake::internal::affected_outputs::{
+    self, AffectedOutputs,
+};
 use crate::core::engine::ecosystems::nix_flake::internal::helpers;
 use crate::core::engine::ecosystems::nix_flake::internal::lock_diff::{
     collapse, ChangeGroup, ChangeKind, InputChange, LockDiff, Pin,
@@ -12,7 +15,10 @@ use crate::core::engine::repository::{FileModification, FileState, ProjectReposi
 
 /// None of the other sections produce anything for flake inputs yet.
 pub fn sections() -> Vec<Box<dyn PullRequestSectionGenerator>> {
-    vec![Box::new(NixFlakeSummarySection)]
+    vec![
+        Box::new(NixFlakeSummarySection),
+        Box::new(NixFlakeAffectedOutputsSection),
+    ]
 }
 
 /// How many places a node is used by are spelled out.
@@ -44,6 +50,123 @@ impl PullRequestSectionGenerator for NixFlakeSummarySection {
         let commits = commit_counts(ctx, &diff.direct).await;
         Ok(render(&diff, &commits, budget))
     }
+}
+
+/// Says which outputs of the flake the update changes, and which it leaves alone.
+pub struct NixFlakeAffectedOutputsSection;
+
+#[async_trait]
+impl PullRequestSectionGenerator for NixFlakeAffectedOutputsSection {
+    fn name(&self) -> &'static str {
+        "nix-flake affected outputs"
+    }
+
+    fn kind(&self) -> SectionKind {
+        SectionKind::Impact
+    }
+
+    async fn generate(
+        &self,
+        ctx: &PullRequestGenerationContext<'_>,
+        budget: usize,
+    ) -> Result<Option<String>> {
+        let (Some(github), Some(work_dir)) = (ctx.github, ctx.work_dir) else {
+            return Ok(None);
+        };
+
+        let affected =
+            affected_outputs::analyze(github, ctx.snapshot, work_dir, ctx.modifications).await?;
+        Ok(affected.and_then(|affected| render_outputs(&affected, budget)))
+    }
+}
+
+/// Lines longer than this share of the budget are cut, so that the ones after them still
+/// fit.
+const SECONDARY_LINE_SHARE: usize = 4;
+
+/// One line listing `names` after `label`, no longer than `limit`.
+fn names_line(label: &str, names: &[String], limit: usize) -> Option<String> {
+    let items: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let name = code(name);
+            if i == 0 {
+                name
+            } else {
+                format!(", {name}")
+            }
+        })
+        .collect();
+
+    fit_items(&format!("- **{label}:** "), &items, "\n", limit, |n| {
+        format!(", … and {n} more")
+    })
+}
+
+/// The section for `affected`, no longer than `budget`. `None` if nothing was evaluated.
+fn render_outputs(affected: &AffectedOutputs, budget: usize) -> Option<String> {
+    if affected.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("**Affected outputs**\n\n");
+    if out.len() > budget {
+        return None;
+    }
+    let header = out.len();
+
+    let lines = [
+        ("Changes", &affected.changed, false),
+        (
+            "Changes with any lock edit",
+            &affected.changes_on_any_lock_edit,
+            false,
+        ),
+        ("No effect", &affected.unchanged, true),
+        ("Not evaluated", &affected.unevaluated, true),
+    ];
+
+    // Left for the note after the lines.
+    let note = format!(
+        "\nPer-system outputs are evaluated for {}.\n",
+        code(&affected.system)
+    );
+    let per_system = |names: &[String]| {
+        names.iter().any(|name| {
+            ["devShells.", "packages.", "checks.", "apps.", "formatter"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
+    };
+    let has_per_system = lines.iter().any(|(_, names, _)| per_system(names));
+    let reserved = if has_per_system { note.len() } else { 0 };
+
+    for (label, names, secondary) in lines {
+        if names.is_empty() {
+            continue;
+        }
+        let remaining = budget.saturating_sub(out.len() + reserved);
+        let limit = if secondary {
+            remaining.min(budget / SECONDARY_LINE_SHARE)
+        } else {
+            remaining
+        };
+        if let Some(line) = names_line(label, names, limit) {
+            out.push_str(&line);
+        }
+    }
+
+    if out.len() == header {
+        return None;
+    }
+
+    if has_per_system && out.len() + note.len() <= budget {
+        out.push_str(&note);
+    }
+    out.push('\n');
+
+    Some(out).filter(|section| section.len() <= budget)
 }
 
 /// How the lock differs before and after the update. `None` when the update leaves the lock
@@ -466,5 +589,89 @@ mod tests {
             "{tight}"
         );
         assert!(tight.contains("… and 1 more"), "{tight}");
+    }
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    fn affected(
+        changed: &[&str],
+        any_edit: &[&str],
+        unchanged: &[&str],
+        unevaluated: &[&str],
+    ) -> AffectedOutputs {
+        AffectedOutputs {
+            system: "x86_64-linux".to_string(),
+            changed: strings(changed),
+            changes_on_any_lock_edit: strings(any_edit),
+            unchanged: strings(unchanged),
+            unevaluated: strings(unevaluated),
+        }
+    }
+
+    #[test]
+    fn says_which_outputs_change_and_which_do_not() {
+        let section = render_outputs(
+            &affected(
+                &["nixosConfigurations.host-a", "nixosConfigurations.host-b"],
+                &["packages.default"],
+                &["nixosConfigurations.host-c", "devShells.default"],
+                &["nixosConfigurations.host-d"],
+            ),
+            1_500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            section,
+            "**Affected outputs**\n\n\
+             - **Changes:** `nixosConfigurations.host-a`, `nixosConfigurations.host-b`\n\
+             - **Changes with any lock edit:** `packages.default`\n\
+             - **No effect:** `nixosConfigurations.host-c`, `devShells.default`\n\
+             - **Not evaluated:** `nixosConfigurations.host-d`\n\
+             \nPer-system outputs are evaluated for `x86_64-linux`.\n\n"
+        );
+    }
+
+    #[test]
+    fn leaves_out_empty_lines_and_the_note_without_per_system_outputs() {
+        let section = render_outputs(
+            &affected(&[], &[], &["nixosConfigurations.host-a"], &[]),
+            1_500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            section,
+            "**Affected outputs**\n\n- **No effect:** `nixosConfigurations.host-a`\n\n"
+        );
+    }
+
+    #[test]
+    fn is_omitted_when_nothing_was_evaluated() {
+        assert_eq!(render_outputs(&affected(&[], &[], &[], &[]), 1_500), None);
+        assert_eq!(
+            render_outputs(&affected(&[], &[], &[], &["packages.tool"]), 1_500),
+            None
+        );
+    }
+
+    #[test]
+    fn stays_within_the_budget_and_keeps_the_changes() {
+        let many: Vec<String> = (0..200).map(|i| format!("packages.tool-{i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+
+        for budget in [0, 40, 200, 600, 1_500] {
+            let affected = affected(&["packages.fresh"], &[], &many, &many);
+            if let Some(section) = render_outputs(&affected, budget) {
+                assert!(section.len() <= budget, "{budget}: {section}");
+                assert!(section.contains("`packages.fresh`"), "{budget}: {section}");
+            }
+        }
+
+        let section =
+            render_outputs(&affected(&["packages.fresh"], &[], &many, &[]), 1_500).unwrap();
+        assert!(section.contains("… and "), "{section}");
+        assert!(section.contains("more"), "{section}");
     }
 }

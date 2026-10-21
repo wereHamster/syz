@@ -16,14 +16,18 @@ pub enum SectionKind {
     Summary,
     /// Alerts about the update: policy, advisories.
     Notices,
+    /// What the update does to the project, as far as it can be told without reading the
+    /// changes: the outputs it affects.
+    Impact,
     /// Release notes of the versions the update skips over.
     History,
 }
 
 impl SectionKind {
-    pub const IN_ORDER: [SectionKind; 3] = [
+    pub const IN_ORDER: [SectionKind; 4] = [
         SectionKind::Summary,
         SectionKind::Notices,
+        SectionKind::Impact,
         SectionKind::History,
     ];
 
@@ -33,6 +37,7 @@ impl SectionKind {
         match self {
             SectionKind::Summary => 5_000,
             SectionKind::Notices => 6_000,
+            SectionKind::Impact => 1_500,
             SectionKind::History => usize::MAX,
         }
     }
@@ -135,6 +140,7 @@ mod tests {
     fn kinds_are_capped_by_what_is_left() {
         assert_eq!(SectionKind::Summary.budget(100_000), 5_000);
         assert_eq!(SectionKind::Summary.budget(300), 300);
+        assert_eq!(SectionKind::Impact.budget(100_000), 1_500);
         assert_eq!(SectionKind::History.budget(42_000), 42_000);
     }
 }

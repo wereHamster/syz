@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::core::clients::github::GitHub;
 use crate::core::engine::advisories::AdvisoryResolver;
 use crate::core::engine::ecosystems::registry_router::RegistryRouter;
@@ -10,7 +12,8 @@ use crate::core::engine::UpdateTarget;
 /// before the update and `modifications` the files the update changes, so a section can
 /// compare the state before and after.
 ///
-/// Without a `github` client, sections skip what needs GitHub. Tests don't get one.
+/// Without a `github` client, sections skip what needs GitHub. Without a `work_dir`, a
+/// directory to put files in, they skip what needs files on disk. Tests don't get either.
 pub struct PullRequestGenerationContext<'a> {
     pub package_group: &'a str,
     pub ecosystem: &'a str,
@@ -19,6 +22,7 @@ pub struct PullRequestGenerationContext<'a> {
     pub registry_router: &'a RegistryRouter,
     pub advisory_resolver: &'a dyn AdvisoryResolver,
     pub github: Option<&'a GitHub>,
+    pub work_dir: Option<&'a Path>,
     pub snapshot: &'a dyn ProjectRepositorySnapshot,
     pub modifications: &'a [FileModification],
 }
