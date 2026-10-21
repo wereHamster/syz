@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use crate::core::engine::ecosystems::nix_flake::internal::affected_outputs::{
     self, store_name, AffectedOutputs, ChangedOutput,
 };
+use crate::core::engine::ecosystems::nix_flake::internal::dev_shells::{
+    DevShellChanges, ToolChange,
+};
 use crate::core::engine::ecosystems::nix_flake::internal::helpers;
 use crate::core::engine::ecosystems::nix_flake::internal::lock_diff::{
     collapse, ChangeGroup, ChangeKind, InputChange, LockDiff, Pin,
@@ -90,9 +93,18 @@ impl PullRequestSectionGenerator for NixFlakeAffectedOutputsSection {
             return Ok(None);
         };
 
-        let affected =
-            affected_outputs::analyze(github, ctx.snapshot, work_dir, ctx.modifications).await?;
-        Ok(affected.and_then(|affected| render_outputs(&affected, budget)))
+        let Some(affected) =
+            affected_outputs::analyze(github, ctx.snapshot, work_dir, ctx.modifications).await?
+        else {
+            return Ok(None);
+        };
+
+        // The tools are the more specific of the two, so they get half of the room and the
+        // outputs what they leave.
+        let dev_shells = render_dev_shells(&affected.dev_shells, budget / 2).unwrap_or_default();
+        let outputs = render_outputs(&affected, budget - dev_shells.len()).unwrap_or_default();
+
+        Ok(Some(outputs + &dev_shells).filter(|section| !section.is_empty()))
     }
 }
 
@@ -294,6 +306,106 @@ fn render_outputs(affected: &AffectedOutputs, budget: usize) -> Option<String> {
     };
 
     Some(head + &changes + &any_edit + &unevaluated).filter(|section| section.len() <= budget)
+}
+
+/// Text that is safe within markdown emphasis and links, which tool and shell names are put in.
+fn escape_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' | '*' | '_' | '`' | '<' | '[' | ']' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A version in code, or a word for a tool that has none.
+fn version_text(version: &str) -> String {
+    if version.is_empty() {
+        "unversioned".to_string()
+    } else {
+        code(version)
+    }
+}
+
+/// One bullet: the tool, what happened to it, and the dev shells it is in. Without the shells
+/// when there is only one, and as `all shells` when the tool is in every one.
+fn tool_row(change: &ToolChange, all_shells: &[String]) -> String {
+    let mut row = format!("- **{}** ", escape_markdown(&change.name));
+
+    match (&change.before, &change.after) {
+        (Some(before), Some(after)) => row.push_str(&format!(
+            "{} → {}",
+            version_text(before),
+            version_text(after)
+        )),
+        (None, Some(after)) => row.push_str(&format!("(new) {}", version_text(after))),
+        (Some(before), None) => row.push_str(&format!("(removed) {}", version_text(before))),
+        (None, None) => {}
+    }
+
+    if all_shells.len() > 1 {
+        let shells = if change.shells.len() == all_shells.len() {
+            "all shells".to_string()
+        } else {
+            change
+                .shells
+                .iter()
+                .map(|shell| escape_markdown(shell))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        row.push_str(&format!(" · _{shells}_"));
+    }
+
+    row.push('\n');
+    row
+}
+
+/// The tools of the dev shells that the update changes, no longer than `budget`. The tools
+/// that are in the most shells come first, and the last ones give way when there are too many.
+///
+/// `None` when no dev shell was evaluated, or there is no room for even the heading.
+fn render_dev_shells(dev_shells: &DevShellChanges, budget: usize) -> Option<String> {
+    if dev_shells.shells.is_empty() {
+        return None;
+    }
+
+    let head = "# Dev shells\n\n";
+    let unevaluated = match dev_shells.unevaluated {
+        0 => String::new(),
+        1 => "1 dev shell could not be evaluated and is not listed.\n\n".to_string(),
+        n => format!("{n} dev shells could not be evaluated and are not listed.\n\n"),
+    };
+
+    if dev_shells.changes.is_empty() {
+        return Some(format!(
+            "{head}No tool in the dev shells changed.\n\n{unevaluated}"
+        ))
+        .filter(|section| section.len() <= budget);
+    }
+
+    let rows: Vec<String> = dev_shells
+        .changes
+        .iter()
+        .map(|change| tool_row(change, &dev_shells.shells))
+        .collect();
+    let unevaluated = if head.len() + unevaluated.len() < budget {
+        unevaluated
+    } else {
+        String::new()
+    };
+    let omitted = |n: usize| format!("- … and {n} more\n");
+
+    let list = fit_items(head, &rows, &format!("\n{unevaluated}"), budget, omitted)?;
+
+    // Only the note that everything was left out says nothing.
+    (list != format!("{head}{}\n{unevaluated}", omitted(rows.len()))).then_some(list)
 }
 
 /// The lock before and after the update.
@@ -764,6 +876,7 @@ mod tests {
             changes_on_any_lock_edit: strings(any_edit),
             unchanged: strings(unchanged),
             unevaluated: strings(unevaluated),
+            dev_shells: DevShellChanges::default(),
         }
     }
 
@@ -980,5 +1093,142 @@ mod tests {
             Some(("tool-", "1.", "1.4"))
         );
         assert_eq!(split_shared_prefix("tool-", "tool-1"), None);
+    }
+
+    fn tool(name: &str, before: Option<&str>, after: Option<&str>, shells: &[&str]) -> ToolChange {
+        ToolChange {
+            name: name.to_string(),
+            before: before.map(str::to_string),
+            after: after.map(str::to_string),
+            shells: strings(shells),
+        }
+    }
+
+    fn dev_shells_example() -> DevShellChanges {
+        DevShellChanges {
+            shells: strings(&["default", "agent", "workflow"]),
+            changes: vec![
+                tool(
+                    "cargo",
+                    Some("1.90.0"),
+                    Some("1.91.0"),
+                    &["default", "agent", "workflow"],
+                ),
+                tool(
+                    "clippy",
+                    Some("1.90.0"),
+                    Some("1.91.0"),
+                    &["default", "agent"],
+                ),
+                tool("biome", None, Some("2.2.6"), &["agent"]),
+                tool("jq", Some("1.7.1"), None, &["workflow"]),
+            ],
+            unevaluated: 0,
+        }
+    }
+
+    #[test]
+    fn lists_the_tools_that_changed_with_the_shells_they_are_in() {
+        let section = render_dev_shells(&dev_shells_example(), 2_000).unwrap();
+
+        assert_eq!(
+            section,
+            "# Dev shells\n\n\
+             - **cargo** `1.90.0` → `1.91.0` · _all shells_\n\
+             - **clippy** `1.90.0` → `1.91.0` · _default, agent_\n\
+             - **biome** (new) `2.2.6` · _agent_\n\
+             - **jq** (removed) `1.7.1` · _workflow_\n\n"
+        );
+    }
+
+    #[test]
+    fn names_no_shells_when_there_is_only_one() {
+        let one = DevShellChanges {
+            shells: strings(&["default"]),
+            changes: vec![tool("cargo", Some("1.90.0"), Some("1.91.0"), &["default"])],
+            unevaluated: 0,
+        };
+
+        let section = render_dev_shells(&one, 2_000).unwrap();
+
+        assert_eq!(
+            section,
+            "# Dev shells\n\n- **cargo** `1.90.0` → `1.91.0`\n\n"
+        );
+    }
+
+    #[test]
+    fn says_so_when_no_tool_changed_but_stays_silent_without_dev_shells() {
+        let unchanged = DevShellChanges {
+            shells: strings(&["default"]),
+            ..DevShellChanges::default()
+        };
+
+        assert_eq!(
+            render_dev_shells(&unchanged, 2_000).unwrap(),
+            "# Dev shells\n\nNo tool in the dev shells changed.\n\n"
+        );
+        assert_eq!(render_dev_shells(&DevShellChanges::default(), 2_000), None);
+    }
+
+    #[test]
+    fn counts_the_dev_shells_it_could_not_evaluate() {
+        let mut shells = dev_shells_example();
+        shells.unevaluated = 2;
+
+        let section = render_dev_shells(&shells, 2_000).unwrap();
+
+        assert!(
+            section.ends_with("\n2 dev shells could not be evaluated and are not listed.\n\n"),
+            "{section}"
+        );
+    }
+
+    #[test]
+    fn a_tool_without_a_version_and_odd_names_are_still_shown_safely() {
+        let odd = DevShellChanges {
+            shells: strings(&["default", "my_shell"]),
+            changes: vec![tool("a*b_c", Some(""), Some("`1`"), &["my_shell"])],
+            unevaluated: 0,
+        };
+
+        let section = render_dev_shells(&odd, 2_000).unwrap();
+
+        assert_eq!(
+            section,
+            "# Dev shells\n\n- **a\\*b\\_c** unversioned → `'1'` · _my\\_shell_\n\n"
+        );
+    }
+
+    #[test]
+    fn drops_the_last_tools_when_there_is_no_room() {
+        let many: Vec<ToolChange> = (0..30)
+            .map(|i| {
+                tool(
+                    &format!("tool{i:02}"),
+                    Some("1.0"),
+                    Some("1.1"),
+                    &["default"],
+                )
+            })
+            .collect();
+        let shells = DevShellChanges {
+            shells: strings(&["default"]),
+            changes: many,
+            unevaluated: 0,
+        };
+
+        for budget in [0, 14, 60, 200, 400, 5_000] {
+            if let Some(section) = render_dev_shells(&shells, budget) {
+                assert!(section.len() <= budget, "{budget}: {section}");
+            }
+        }
+
+        let section = render_dev_shells(&shells, 400).unwrap();
+        assert!(section.contains("**tool00**"), "{section}");
+        assert!(!section.contains("**tool29**"), "{section}");
+        assert!(section.contains("… and "), "{section}");
+        // Not even one tool fits next to the note: nothing is better than only a note.
+        assert_eq!(render_dev_shells(&shells, 45), None);
     }
 }

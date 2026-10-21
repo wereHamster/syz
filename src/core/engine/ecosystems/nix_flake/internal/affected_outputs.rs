@@ -6,6 +6,9 @@
 //! `nixosConfigurations`, `darwinConfigurations` and `homeConfigurations`. `lib`, `overlays`,
 //! `nixosModules`, `templates` and the like have no derivation to compare.
 //!
+//! The same evaluation reads the tools in each of the `devShells`, which says more about what an
+//! update does to them than whether their derivation differs.
+//!
 //! Evaluating needs the whole repository on disk, since outputs may use any file of it, and
 //! fetches the inputs of both locks. Only call it from a job.
 
@@ -22,6 +25,7 @@ use crate::core::clients::github::GitHub;
 use crate::core::engine::repository::{FileModification, FileState, ProjectRepositorySnapshot};
 
 use super::apply_updates::{redact, NixAccess};
+use super::dev_shells::{self, DevShellChanges};
 use super::flake_lock::{self, FlakeLock};
 
 /// How many files of the repository are put on disk. A repository with more files than this
@@ -44,6 +48,9 @@ pub struct Evaluation {
     /// The system that per-system outputs (`packages`, `devShells`, ...) were evaluated for.
     pub system: String,
     pub outputs: BTreeMap<String, Option<String>>,
+    /// The tools of each dev shell, or `None` for a shell that could not be evaluated.
+    #[serde(default, rename = "devShellTools")]
+    pub dev_shell_tools: dev_shells::Shells,
 }
 
 /// An output the update changes, with its derivation (or program, for apps) before and after.
@@ -81,6 +88,8 @@ pub struct AffectedOutputs {
     pub unchanged: Vec<String>,
     /// Outputs that could not be evaluated before or after the update.
     pub unevaluated: Vec<String>,
+    /// The tools of the dev shells the update changes.
+    pub dev_shells: DevShellChanges,
 }
 
 impl AffectedOutputs {
@@ -101,6 +110,7 @@ pub fn compare(
 ) -> AffectedOutputs {
     let mut result = AffectedOutputs {
         system: new.system.clone(),
+        dev_shells: dev_shells::compare(&old.dev_shell_tools, &new.dev_shell_tools),
         ..AffectedOutputs::default()
     };
 
@@ -417,8 +427,39 @@ let
       (names set));
   single = name: value: pick:
     if guard (value == null) == true then { } else { ${name} = guard (pick value); };
+  guardDeep = value: guard (builtins.deepSeq value value);
+  flatten = x: if builtins.isList x then builtins.concatMap flatten x else [ x ];
+  # A tool is an input that is a derivation, known by its pname and version, or, for one that
+  # has neither, by its name split where the version starts.
+  tool = x:
+    if builtins.isAttrs x && (x.type or null) == "derivation" && builtins.isString (x.name or null)
+    then
+      let
+        parsed = builtins.parseDrvName x.name;
+        name = x.pname or parsed.name;
+        version = x.version or parsed.version;
+      in
+      if builtins.isString name && builtins.isString version
+      then [{ inherit name; value = version; }]
+      else [ ]
+    else [ ];
+  toolsOf = shell:
+    if !(builtins.isAttrs shell) then null
+    else builtins.listToAttrs (builtins.concatMap
+      (input:
+        let found = guardDeep (tool input);
+        in if found == null then [ ] else found)
+      (flatten (map (attribute: shell.${attribute} or [ ]) [
+        "nativeBuildInputs"
+        "buildInputs"
+        "propagatedNativeBuildInputs"
+        "propagatedBuildInputs"
+      ])));
 in {
   inherit system;
+  devShellTools = builtins.listToAttrs (map
+    (name: { inherit name; value = guardDeep (toolsOf flake.devShells.${system}.${name}); })
+    (names (flake.devShells.${system} or { })));
   outputs = builtins.foldl' (a: b: a // b) { } [
     (entries "devShells" (flake.devShells.${system} or { }) drvPath)
     (entries "packages" (flake.packages.${system} or { }) drvPath)
@@ -454,6 +495,7 @@ mod tests {
                 .iter()
                 .map(|(name, drv)| (name.to_string(), drv.map(str::to_string)))
                 .collect(),
+            dev_shell_tools: Default::default(),
         }
     }
 
@@ -626,7 +668,19 @@ mod tests {
         fixed = build "fixed" "echo fixed > $out";
         broken = throw "this one does not evaluate";
       };
-      devShells.${system}.default = build "shell" "echo shell > $out";
+      # Its tools are named after what data.txt says, which is what the update changes.
+      devShells.${system} = {
+        default = (build "shell" "echo shell > $out") // {
+          nativeBuildInputs = [ (build "mytool-${builtins.readFile ./data.txt}" "echo tool > $out") ];
+        };
+        agent = (build "agent" "echo agent > $out") // {
+          buildInputs = [
+            (build "mytool-${builtins.readFile ./data.txt}" "echo tool > $out")
+            [ (build "extra-3.1" "echo extra > $out") ]
+            null
+          ];
+        };
+      };
       formatter.${system} = build "fmt" "echo fmt > $out";
       nixosConfigurations.host-a.config.system.build.toplevel = build "host-a" "echo a > $out";
       lib.not-a-derivation = 1;
@@ -645,7 +699,7 @@ mod tests {
         let snapshot = MockSnapshot::with_files(&[
             ("flake.nix", FLAKE_NIX),
             ("flake.lock", lock),
-            ("data.txt", "one"),
+            ("data.txt", "1.0"),
         ]);
         let dir = tempfile::tempdir().unwrap();
         materialize(&snapshot, dir.path()).await.unwrap();
@@ -654,7 +708,7 @@ mod tests {
         // changes the sources an output is built from.
         let modifications = vec![FileModification {
             path: "data.txt".to_string(),
-            state: FileState::Write("two".to_string()),
+            state: FileState::Write("2.0".to_string()),
         }];
         let access = NixAccess {
             config: None,
@@ -670,6 +724,7 @@ mod tests {
         assert_eq!(
             result.unchanged,
             names(&[
+                "devShells.agent",
                 "devShells.default",
                 "formatter",
                 "nixosConfigurations.host-a",
@@ -678,5 +733,17 @@ mod tests {
         );
         assert_eq!(result.unevaluated, names(&["packages.broken"]));
         assert!(!result.system.is_empty());
+
+        // The tools are read from the inputs of the shells, however they are nested, and
+        // what the update changes about them is one change, for both shells.
+        let dev_shells = &result.dev_shells;
+        assert_eq!(dev_shells.shells, names(&["default", "agent"]));
+        assert_eq!(dev_shells.unevaluated, 0);
+        assert_eq!(dev_shells.changes.len(), 1, "{dev_shells:?}");
+        let tool = &dev_shells.changes[0];
+        assert_eq!(tool.name, "mytool");
+        assert_eq!(tool.before.as_deref(), Some("1.0"));
+        assert_eq!(tool.after.as_deref(), Some("2.0"));
+        assert_eq!(tool.shells, names(&["default", "agent"]));
     }
 }
