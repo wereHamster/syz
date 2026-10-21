@@ -425,6 +425,7 @@ pub struct DefaultPullRequestGenerator {
     registry_router: crate::core::engine::ecosystems::registry_router::RegistryRouter,
     advisory_resolver: Box<dyn crate::core::engine::advisories::AdvisoryResolver>,
     github: crate::core::clients::github::GitHub,
+    work_dir: std::path::PathBuf,
 }
 
 impl DefaultPullRequestGenerator {
@@ -432,11 +433,13 @@ impl DefaultPullRequestGenerator {
         registry_router: crate::core::engine::ecosystems::registry_router::RegistryRouter,
         advisory_resolver: Box<dyn crate::core::engine::advisories::AdvisoryResolver>,
         github: crate::core::clients::github::GitHub,
+        work_dir: std::path::PathBuf,
     ) -> Self {
         Self {
             registry_router,
             advisory_resolver,
             github,
+            work_dir,
         }
     }
 }
@@ -487,6 +490,7 @@ impl PullRequestGenerator for DefaultPullRequestGenerator {
                     registry_router: &self.registry_router,
                     advisory_resolver: self.advisory_resolver.as_ref(),
                     github: Some(&self.github),
+                    work_dir: Some(&self.work_dir),
                     snapshot,
                     modifications,
                 },
@@ -695,6 +699,7 @@ mod tests {
                     registry_router: &router,
                     advisory_resolver: &NoAdvisories,
                     github: None,
+                    work_dir: None,
                     snapshot: &snapshot,
                     modifications: &[],
                 },

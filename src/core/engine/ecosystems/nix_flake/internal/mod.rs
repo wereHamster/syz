@@ -1,3 +1,4 @@
+pub mod affected_outputs;
 pub mod apply_updates;
 pub mod discover_project_dependencies;
 pub mod find_input_alias;

@@ -1,6 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::core::engine::ecosystems::nix_flake::internal::affected_outputs::{
+    self, store_name, AffectedOutputs, ChangedOutput,
+};
 use crate::core::engine::ecosystems::nix_flake::internal::helpers;
 use crate::core::engine::ecosystems::nix_flake::internal::lock_diff::{
     collapse, ChangeGroup, ChangeKind, InputChange, LockDiff, Pin,
@@ -14,7 +17,10 @@ use super::nix_flake_health;
 
 /// None of the other sections produce anything for flake inputs yet.
 pub fn sections() -> Vec<Box<dyn PullRequestSectionGenerator>> {
-    vec![Box::new(NixFlakeSummarySection)]
+    vec![
+        Box::new(NixFlakeSummarySection),
+        Box::new(NixFlakeAffectedOutputsSection),
+    ]
 }
 
 /// How many places a node is used by are spelled out.
@@ -60,6 +66,234 @@ impl PullRequestSectionGenerator for NixFlakeSummarySection {
 
         Ok(Some(lists + &health).filter(|summary| !summary.is_empty()))
     }
+}
+
+/// Says which outputs of the flake the update changes, and which it leaves alone.
+pub struct NixFlakeAffectedOutputsSection;
+
+#[async_trait]
+impl PullRequestSectionGenerator for NixFlakeAffectedOutputsSection {
+    fn name(&self) -> &'static str {
+        "nix-flake affected outputs"
+    }
+
+    fn kind(&self) -> SectionKind {
+        SectionKind::Impact
+    }
+
+    async fn generate(
+        &self,
+        ctx: &PullRequestGenerationContext<'_>,
+        budget: usize,
+    ) -> Result<Option<String>> {
+        let (Some(github), Some(work_dir)) = (ctx.github, ctx.work_dir) else {
+            return Ok(None);
+        };
+
+        let affected =
+            affected_outputs::analyze(github, ctx.snapshot, work_dir, ctx.modifications).await?;
+        Ok(affected.and_then(|affected| render_outputs(&affected, budget)))
+    }
+}
+
+/// Output names are `category.name`, or just `formatter`.
+fn category_of(name: &str) -> (&str, Option<&str>) {
+    match name.split_once('.') {
+        Some((category, rest)) => (category, Some(rest)),
+        None => (name, None),
+    }
+}
+
+/// How many characters pulling out what two names share has to save to be worth the braces.
+const MIN_SHARED_SAVING: usize = 10;
+
+/// What `before` and `after` start with, up to and including the last `-` or `.` of it, so
+/// that no version number is cut in the middle, and what follows in each. `None` if they share
+/// none, or one of them would be left empty.
+fn split_shared_prefix<'a>(before: &'a str, after: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
+    let mut cut = None;
+
+    for ((index, a), (_, b)) in before.char_indices().zip(after.char_indices()) {
+        if a != b {
+            break;
+        }
+        let end = index + a.len_utf8();
+        if matches!(a, '-' | '.') && end < before.len() && end < after.len() {
+            cut = Some(end);
+        }
+    }
+
+    let cut = cut?;
+    Some((&before[..cut], &before[cut..], &after[cut..]))
+}
+
+/// `before → after`, with what the two names share shown once when that makes it a good deal
+/// shorter: `` `nixos-system-host-25.11.` { `20261001.a1b2c3d` → `20261015.e4f5a6b` } ``.
+fn name_change(before: &str, after: &str) -> String {
+    let plain = format!("{} → {}", code(before), code(after));
+
+    split_shared_prefix(before, after)
+        .map(|(shared, before, after)| {
+            format!("{} {{ {} → {} }}", code(shared), code(before), code(after))
+        })
+        .filter(|compact| compact.chars().count() + MIN_SHARED_SAVING <= plain.chars().count())
+        .unwrap_or(plain)
+}
+
+/// What an output's change comes to, where that says something: a new or removed output, or a
+/// different name of the derivation (usually a version).
+fn change_detail(change: &ChangedOutput, with_names: bool) -> Option<String> {
+    match (&change.before, &change.after) {
+        (None, _) => Some("(new)".to_string()),
+        (_, None) => Some("(removed)".to_string()),
+        (Some(before), Some(after)) if with_names => {
+            let (before, after) = (store_name(before)?, store_name(after)?);
+            (before != after).then(|| name_change(before, after))
+        }
+        _ => None,
+    }
+}
+
+/// The changed outputs as nested bullets: a bullet per category, a bullet per output below it.
+/// Each element is a whole number of lines, and a category's first row carries the category's
+/// bullet, so that dropping rows from the end never leaves a category empty.
+fn change_rows(changed: &[ChangedOutput], with_names: bool) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut category: Option<&str> = None;
+
+    for change in changed {
+        let (this_category, name) = category_of(&change.name);
+        let detail = change_detail(change, with_names);
+
+        let Some(name) = name else {
+            // An output without a name of its own, such as the formatter.
+            let mut row = format!("- {}", code(this_category));
+            if let Some(detail) = detail {
+                row.push_str(&format!(": {detail}"));
+            }
+            row.push('\n');
+            rows.push(row);
+            category = None;
+            continue;
+        };
+
+        let mut row = String::new();
+        if category != Some(this_category) {
+            row.push_str(&format!("- {}\n", code(this_category)));
+            category = Some(this_category);
+        }
+        row.push_str(&format!("  - {}", code(name)));
+        if let Some(detail) = detail {
+            row.push_str(&format!(": {detail}"));
+        }
+        row.push('\n');
+        rows.push(row);
+    }
+
+    rows
+}
+
+/// The changed outputs no longer than `limit`. When they don't fit, the names of the
+/// derivations go first, then the outputs at the end.
+fn render_changes(changed: &[ChangedOutput], limit: usize) -> Option<String> {
+    let omitted = |n: usize| format!("- … and {} more\n", n);
+
+    let full = change_rows(changed, true);
+    let rows = if full.iter().map(String::len).sum::<usize>() < limit {
+        full
+    } else {
+        change_rows(changed, false)
+    };
+
+    let fitted = fit_items("", &rows, "\n", limit, omitted)?;
+
+    // Only the note that everything was left out says nothing.
+    (fitted != format!("{}\n", omitted(rows.len()))).then_some(fitted)
+}
+
+/// Explains why the outputs below it can't be attributed to the update.
+const ANY_LOCK_EDIT: &str = "These outputs are built from the whole flake source, which includes `flake.lock`, so they change on any edit of the lock, and what this update does to them can't be told:";
+
+/// The outputs that change with any lock edit, with the explanation, no longer than `limit`.
+fn render_any_lock_edit(names: &[String], limit: usize) -> Option<String> {
+    let items: Vec<String> = names
+        .iter()
+        .map(|name| format!("- {}\n", code(name)))
+        .collect();
+    fit_items(&format!("{ANY_LOCK_EDIT}\n\n"), &items, "\n", limit, |n| {
+        format!("- … and {n} more\n")
+    })
+}
+
+/// Whether `name` is an output that is evaluated for one system.
+fn is_per_system(name: &str) -> bool {
+    ["devShells", "packages", "checks", "apps", "formatter"].contains(&category_of(name).0)
+}
+
+/// The section for `affected`, no longer than `budget`. `None` if nothing was evaluated, or
+/// there is no room to say what changed.
+///
+/// What the update leaves alone isn't listed. The outputs that change with any lock edit come
+/// after the ones that change, since they say less, and so do those that could not be
+/// evaluated, which are only counted.
+fn render_outputs(affected: &AffectedOutputs, budget: usize) -> Option<String> {
+    if affected.is_empty() {
+        return None;
+    }
+
+    let every_name = || {
+        affected
+            .changed
+            .iter()
+            .map(|change| &change.name)
+            .chain(&affected.changes_on_any_lock_edit)
+            .chain(&affected.unchanged)
+            .chain(&affected.unevaluated)
+    };
+    let mut head = String::from("# Affected outputs\n\n");
+    if every_name().any(|name| is_per_system(name)) {
+        head.push_str(&format!(
+            "Per-system outputs are evaluated for {}.\n\n",
+            code(&affected.system)
+        ));
+    }
+
+    let unevaluated = match affected.unevaluated.len() {
+        0 => String::new(),
+        1 => "1 output could not be evaluated and is not listed.\n\n".to_string(),
+        n => format!("{n} outputs could not be evaluated and are not listed.\n\n"),
+    };
+
+    let mut remaining = budget.checked_sub(head.len())?;
+    let unevaluated = if unevaluated.len() <= remaining {
+        remaining -= unevaluated.len();
+        unevaluated
+    } else {
+        String::new()
+    };
+
+    // What changes is what the section is about, so the rest gets a share of what is left.
+    let any_edit_limit = if affected.changed.is_empty() {
+        remaining
+    } else {
+        remaining / 3
+    };
+    let any_edit = if affected.changes_on_any_lock_edit.is_empty() {
+        String::new()
+    } else {
+        render_any_lock_edit(&affected.changes_on_any_lock_edit, any_edit_limit).unwrap_or_default()
+    };
+    remaining -= any_edit.len();
+
+    let changes = if !affected.changed.is_empty() {
+        render_changes(&affected.changed, remaining)?
+    } else if affected.changes_on_any_lock_edit.is_empty() {
+        "No output is affected by this update.\n\n".to_string()
+    } else {
+        String::new()
+    };
+
+    Some(head + &changes + &any_edit + &unevaluated).filter(|section| section.len() <= budget)
 }
 
 /// The lock before and after the update.
@@ -499,5 +733,252 @@ mod tests {
             "{tight}"
         );
         assert!(tight.contains("… and 1 more"), "{tight}");
+    }
+    fn strings(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    const HASH: &str = "c3yh3hnrjnfp3a7kb9h5q8x1ylmcr2kh";
+
+    fn drv(name: &str) -> String {
+        format!("/nix/store/{HASH}-{name}.drv")
+    }
+
+    fn changed(name: &str, before: Option<&str>, after: Option<&str>) -> ChangedOutput {
+        ChangedOutput {
+            name: name.to_string(),
+            before: before.map(drv),
+            after: after.map(drv),
+        }
+    }
+
+    fn affected(
+        changed: Vec<ChangedOutput>,
+        any_edit: &[&str],
+        unchanged: &[&str],
+        unevaluated: &[&str],
+    ) -> AffectedOutputs {
+        AffectedOutputs {
+            system: "x86_64-linux".to_string(),
+            changed,
+            changes_on_any_lock_edit: strings(any_edit),
+            unchanged: strings(unchanged),
+            unevaluated: strings(unevaluated),
+        }
+    }
+
+    fn example() -> AffectedOutputs {
+        affected(
+            vec![
+                changed("devShells.default", Some("shell"), Some("shell")),
+                changed(
+                    "nixosConfigurations.host-a",
+                    Some("nixos-system-host-a-25.11.20261001.a1b2c3d"),
+                    Some("nixos-system-host-a-25.11.20261015.e4f5a6b"),
+                ),
+                changed(
+                    "nixosConfigurations.host-b",
+                    Some("nixos-system-host-b-25.11.20261001.a1b2c3d"),
+                    Some("nixos-system-host-b-25.11.20261015.e4f5a6b"),
+                ),
+                changed("packages.docs", Some("docs"), Some("docs")),
+                changed("packages.extras", None, Some("extras")),
+                changed("packages.tool", Some("tool-1.4.0"), Some("tool-1.5.0")),
+            ],
+            &["packages.default"],
+            &["nixosConfigurations.host-c"],
+            &["nixosConfigurations.host-d", "packages.broken", "apps.run"],
+        )
+    }
+
+    #[test]
+    fn lists_the_changes_by_category_with_what_is_known_about_each() {
+        let section = render_outputs(&example(), 2_500).unwrap();
+
+        assert_eq!(
+            section,
+            format!(
+                "# Affected outputs\n\n\
+                 Per-system outputs are evaluated for `x86_64-linux`.\n\n\
+                 - `devShells`\n  - `default`\n\
+                 - `nixosConfigurations`\n\
+                 \x20 - `host-a`: `nixos-system-host-a-25.11.` {{ `20261001.a1b2c3d` → `20261015.e4f5a6b` }}\n\
+                 \x20 - `host-b`: `nixos-system-host-b-25.11.` {{ `20261001.a1b2c3d` → `20261015.e4f5a6b` }}\n\
+                 - `packages`\n  - `docs`\n  - `extras`: (new)\n  - `tool`: `tool-1.4.0` → `tool-1.5.0`\n\n\
+                 {ANY_LOCK_EDIT}\n\n- `packages.default`\n\n\
+                 3 outputs could not be evaluated and are not listed.\n\n"
+            )
+        );
+    }
+
+    #[test]
+    fn outputs_without_a_name_of_their_own_are_a_single_bullet() {
+        let section = render_outputs(
+            &affected(
+                vec![changed("formatter", Some("fmt-1"), Some("fmt-2"))],
+                &[],
+                &[],
+                &[],
+            ),
+            2_500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            section,
+            "# Affected outputs\n\n\
+             Per-system outputs are evaluated for `x86_64-linux`.\n\n\
+             - `formatter`: `fmt-1` → `fmt-2`\n\n"
+        );
+    }
+
+    #[test]
+    fn says_so_when_the_update_affects_no_output() {
+        let section = render_outputs(
+            &affected(
+                vec![],
+                &[],
+                &["nixosConfigurations.host-a", "packages.tool"],
+                &[],
+            ),
+            2_500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            section,
+            "# Affected outputs\n\n\
+             Per-system outputs are evaluated for `x86_64-linux`.\n\n\
+             No output is affected by this update.\n\n"
+        );
+    }
+
+    #[test]
+    fn leaves_out_the_system_when_no_output_depends_on_it() {
+        let section = render_outputs(
+            &affected(
+                vec![changed("nixosConfigurations.host-a", Some("a"), Some("b"))],
+                &[],
+                &[],
+                &["nixosConfigurations.host-b"],
+            ),
+            2_500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            section,
+            "# Affected outputs\n\n\
+             - `nixosConfigurations`\n  - `host-a`: `a` → `b`\n\n\
+             1 output could not be evaluated and is not listed.\n\n"
+        );
+    }
+
+    #[test]
+    fn explains_outputs_that_change_with_any_lock_edit_even_when_nothing_else_changes() {
+        let section =
+            render_outputs(&affected(vec![], &["packages.default"], &[], &[]), 2_500).unwrap();
+
+        assert_eq!(
+            section,
+            format!(
+                "# Affected outputs\n\n\
+                 Per-system outputs are evaluated for `x86_64-linux`.\n\n\
+                 {ANY_LOCK_EDIT}\n\n- `packages.default`\n\n"
+            )
+        );
+    }
+
+    #[test]
+    fn is_omitted_when_nothing_was_evaluated() {
+        assert_eq!(
+            render_outputs(&affected(vec![], &[], &[], &[]), 2_500),
+            None
+        );
+        assert_eq!(
+            render_outputs(&affected(vec![], &[], &[], &["packages.tool"]), 2_500),
+            None
+        );
+    }
+
+    #[test]
+    fn stays_within_the_budget_and_cuts_detail_before_outputs() {
+        let many: Vec<ChangedOutput> = (0..200)
+            .map(|i| {
+                changed(
+                    &format!("packages.tool-{i}"),
+                    Some(&format!("tool-{i}-1.0")),
+                    Some(&format!("tool-{i}-2.0")),
+                )
+            })
+            .collect();
+        let lock_edit: Vec<String> = (0..200).map(|i| format!("checks.test-{i}")).collect();
+        let lock_edit: Vec<&str> = lock_edit.iter().map(String::as_str).collect();
+
+        for budget in [0, 40, 100, 300, 600, 1_500, 2_500] {
+            let affected = affected(many.clone(), &lock_edit, &[], &["apps.run"]);
+            if let Some(section) = render_outputs(&affected, budget) {
+                assert!(section.len() <= budget, "{budget}: {section}");
+                assert!(section.contains("`tool-0`"), "{budget}: {section}");
+            }
+        }
+
+        let section = render_outputs(&affected(many.clone(), &[], &[], &[]), 2_500).unwrap();
+        assert!(section.contains("- … and "), "{section}");
+
+        let section = render_outputs(&affected(many[..3].to_vec(), &[], &[], &[]), 400).unwrap();
+        assert!(
+            section.contains("`tool-2`: `tool-2-1.0` → `tool-2-2.0`"),
+            "{section}"
+        );
+        let tight = render_outputs(&affected(many[..3].to_vec(), &[], &[], &[]), 150).unwrap();
+        assert!(tight.contains("`tool-2`\n"), "{tight}");
+        assert!(!tight.contains('→'), "{tight}");
+    }
+    #[test]
+    fn pulls_out_what_two_names_share_when_it_saves_space() {
+        assert_eq!(
+            name_change(
+                "nixos-system-host-a-25.11.20261001.a1b2c3d",
+                "nixos-system-host-a-25.11.20261015.e4f5a6b",
+            ),
+            "`nixos-system-host-a-25.11.` { `20261001.a1b2c3d` → `20261015.e4f5a6b` }"
+        );
+    }
+
+    #[test]
+    fn keeps_short_names_whole() {
+        assert_eq!(
+            name_change("tool-1.4.0", "tool-1.5.0"),
+            "`tool-1.4.0` → `tool-1.5.0`"
+        );
+        assert_eq!(
+            name_change("alpha-1.0", "beta-1.0"),
+            "`alpha-1.0` → `beta-1.0`"
+        );
+    }
+
+    #[test]
+    fn never_cuts_a_name_inside_a_word_or_number() {
+        // The names share `20261` and more, but the cut is at the last `.` before it.
+        assert_eq!(
+            split_shared_prefix("pkg-25.11.20261001", "pkg-25.11.20261015"),
+            Some(("pkg-25.11.", "20261001", "20261015"))
+        );
+        // Nothing separates the shared start from the rest.
+        assert_eq!(split_shared_prefix("abcdef1", "abcdef2"), None);
+    }
+
+    #[test]
+    fn leaves_neither_name_empty() {
+        assert_eq!(
+            split_shared_prefix("tool-1.4", "tool-1.4.1"),
+            Some(("tool-1.", "4", "4.1"))
+        );
+        assert_eq!(
+            split_shared_prefix("tool-1.", "tool-1.4"),
+            Some(("tool-", "1.", "1.4"))
+        );
+        assert_eq!(split_shared_prefix("tool-", "tool-1"), None);
     }
 }

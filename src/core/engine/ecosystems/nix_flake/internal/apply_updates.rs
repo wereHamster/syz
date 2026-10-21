@@ -52,20 +52,10 @@ pub async fn run(
     owners.extend(dependency_lock_owners(github, &sources).await);
     let owners: Vec<String> = owners.into_iter().collect();
 
-    let tokens = github_tokens(github, &owners).await;
-    let inherited_config = std::env::var("NIX_CONFIG").unwrap_or_default();
-    let nix_config = access_tokens_config(&tokens).map(|config| {
-        // Through the environment rather than `--option` or a config file, so the tokens are
-        // neither visible in the process list nor left on disk.
-        if inherited_config.is_empty() {
-            config
-        } else {
-            format!("{inherited_config}\n{config}")
-        }
-    });
-
-    let mut secrets = secrets_in_nix_config(&inherited_config);
-    secrets.extend(tokens.iter().map(|(_, token)| token.clone()));
+    let NixAccess {
+        config: nix_config,
+        secrets,
+    } = NixAccess::for_owners(github, &owners).await;
 
     let temp_dir_owned = temp_dir.to_path_buf();
     let overrides_owned = overrides.clone();
@@ -105,6 +95,36 @@ pub async fn run(
         }])
     } else {
         Ok(Vec::new())
+    }
+}
+
+/// How nix is made to authenticate to the owners of the inputs it fetches.
+pub(super) struct NixAccess {
+    /// The value for `NIX_CONFIG`, if there is anything to add to the host's own.
+    pub(super) config: Option<String>,
+    /// Credentials that must not reach a log.
+    pub(super) secrets: Vec<String>,
+}
+
+impl NixAccess {
+    /// Mints tokens for `owners` and builds the nix config that makes use of them.
+    pub(super) async fn for_owners(github: &GitHub, owners: &[String]) -> Self {
+        let tokens = github_tokens(github, owners).await;
+        let inherited_config = std::env::var("NIX_CONFIG").unwrap_or_default();
+        let config = access_tokens_config(&tokens).map(|config| {
+            // Through the environment rather than `--option` or a config file, so the tokens are
+            // neither visible in the process list nor left on disk.
+            if inherited_config.is_empty() {
+                config
+            } else {
+                format!("{inherited_config}\n{config}")
+            }
+        });
+
+        let mut secrets = secrets_in_nix_config(&inherited_config);
+        secrets.extend(tokens.iter().map(|(_, token)| token.clone()));
+
+        Self { config, secrets }
     }
 }
 
@@ -214,7 +234,7 @@ fn secrets_in_nix_config(config: &str) -> Vec<String> {
 /// Replaces the `secrets` in `text`, so that nix's output can be logged. The longest secrets go
 /// first: when one is a prefix of another, replacing the short one first would leave the rest of
 /// the long one behind.
-fn redact(text: &str, secrets: &[String]) -> String {
+pub(super) fn redact(text: &str, secrets: &[String]) -> String {
     let mut secrets: Vec<&str> = secrets
         .iter()
         .map(String::as_str)
