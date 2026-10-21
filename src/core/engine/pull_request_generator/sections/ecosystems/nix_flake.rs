@@ -15,11 +15,8 @@ pub fn sections() -> Vec<Box<dyn PullRequestSectionGenerator>> {
     vec![Box::new(NixFlakeSummarySection)]
 }
 
-/// How many paths of a group of changes are spelled out.
-const PATHS_SHOWN: usize = 3;
-
-/// How many other paths to a node are spelled out.
-const ALSO_VIA_SHOWN: usize = 2;
+/// How many places a node is used by are spelled out.
+const PLACES_SHOWN: usize = 3;
 
 /// Summarizes what the update did to `flake.lock`, rather than just what it was asked to do:
 /// updating one input can move others, and their inputs.
@@ -129,34 +126,20 @@ fn movement(old: &Pin, new: &Pin) -> String {
     out
 }
 
-/// What happened to one node: how it moved, or that it is new or gone.
-fn outcome(kind: &ChangeKind) -> (&'static str, String) {
-    match kind {
-        ChangeKind::Updated { old, new } => ("", movement(old, new)),
-        ChangeKind::Added(pin) => ("**new** ", with_repo(pin, code(&pin.describe()))),
+/// One bullet: what happened to a node (`~` moved, `+` new, `-` gone), shown the same way for
+/// direct and indirect inputs. The marker is code so that it is one character wide everywhere.
+fn entry(names: &[String], kind: &ChangeKind, commits: Option<u64>, used_by: &[String]) -> String {
+    let (marker, repo, detail) = match kind {
+        ChangeKind::Updated { old, new } => ("~", repo_link(new), movement(old, new)),
+        ChangeKind::Added(pin) => ("+", repo_link(pin), code(&pin.describe())),
         ChangeKind::Removed(pin) => (
-            "**removed** ",
-            with_repo(pin, format!("was {}", code(&pin.describe()))),
+            "-",
+            repo_link(pin),
+            format!("was {}", code(&pin.describe())),
         ),
-    }
-}
-
-fn with_repo(pin: &Pin, text: String) -> String {
-    match repo_link(pin) {
-        Some(repo) => format!("{repo} {text}"),
-        None => text,
-    }
-}
-
-/// One row of the direct inputs.
-fn direct_row(change: &InputChange, commits: Option<u64>) -> String {
-    let (marker, detail) = outcome(&change.kind);
-    let repo = match &change.kind {
-        ChangeKind::Updated { new, .. } => repo_link(new),
-        _ => None,
     };
 
-    let mut row = format!("- {}{}", marker, code(&change.path));
+    let mut row = format!("- `{marker}` {}", names.join(", "));
     if let Some(repo) = repo {
         row.push_str(&format!(" ({repo})"));
     }
@@ -167,44 +150,43 @@ fn direct_row(change: &InputChange, commits: Option<u64>) -> String {
             plural(commits as usize, "commit", "commits")
         ));
     }
+
+    if !used_by.is_empty() {
+        let mut places: Vec<String> = used_by.iter().take(PLACES_SHOWN).map(|p| code(p)).collect();
+        if used_by.len() > PLACES_SHOWN {
+            places.push(format!("{} more", used_by.len() - PLACES_SHOWN));
+        }
+        row.push_str(&format!("; used by {}", places.join(", ")));
+    }
+
     row.push('\n');
     row
 }
 
-/// One entry of the indirect inputs: a node, or several that moved the same way.
+/// One row of the direct inputs.
+fn direct_row(change: &InputChange, commits: Option<u64>) -> String {
+    entry(&[code(&change.path)], &change.kind, commits, &[])
+}
+
+/// One entry of the indirect inputs: a node, or several that moved the same way. It is named
+/// after the input, and says where that input is used, since the same node is usually reached
+/// from several places.
 fn indirect_entry(group: &ChangeGroup) -> String {
-    let (marker, detail) = outcome(&group.kind);
+    let mut names: Vec<String> = Vec::new();
+    let mut used_by: Vec<String> = Vec::new();
 
-    let mut names: Vec<String> = group
-        .paths
-        .iter()
-        .take(PATHS_SHOWN)
-        .map(|p| code(p))
-        .collect();
-    if group.paths.len() > PATHS_SHOWN {
-        names.push(format!("{} more", group.paths.len() - PATHS_SHOWN));
-    }
-    let mut entry = format!("- {}{}", marker, names.join(", "));
-    if group.paths.len() > 1 {
-        entry.push_str(&format!(" ×{}", group.paths.len()));
-    }
-    entry.push_str(&format!(": {detail}"));
-
-    if !group.also_via.is_empty() {
-        let mut via: Vec<String> = group
-            .also_via
-            .iter()
-            .take(ALSO_VIA_SHOWN)
-            .map(|p| code(p))
-            .collect();
-        if group.also_via.len() > ALSO_VIA_SHOWN {
-            via.push("…".to_string());
+    for path in group.paths.iter().chain(&group.also_via) {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let name = code(name);
+        if group.paths.contains(path) && !names.contains(&name) {
+            names.push(name);
         }
-        entry.push_str(&format!(" (also via {})", via.join(", ")));
+        if !parent.is_empty() && !used_by.iter().any(|p| p == parent) {
+            used_by.push(parent.to_string());
+        }
     }
 
-    entry.push('\n');
-    entry
+    entry(&names, &group.kind, None, &used_by)
 }
 
 /// The summary of `diff` no longer than `budget`. `commits` has the commit count of each of
@@ -348,15 +330,76 @@ mod tests {
         assert_eq!(
             summary,
             "**Direct inputs**\n\n\
-             - `nixpkgs` ([NixOS/nixpkgs](https://github.com/NixOS/nixpkgs)): \
+             - `~` `nixpkgs` ([NixOS/nixpkgs](https://github.com/NixOS/nixpkgs)): \
              [`aaaaaaa` → `bbbbbbb`](https://github.com/NixOS/nixpkgs/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) (2025-10-09)\n\
              \n\
              **Indirect inputs**\n\n\
              1 indirect input changed, 1 added, 0 removed.\n\n\
-             - `llm-agents/systems`: \
-             [`aaaaaaa` → `bbbbbbb`](https://github.com/nix-systems/default/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) (2023-11-14)\n\
-             - **new** `llm-agents/treefmt-nix`: [numtide/treefmt-nix](https://github.com/numtide/treefmt-nix) `ccccccc`\n\
+             - `~` `systems` ([nix-systems/default](https://github.com/nix-systems/default)): \
+             [`aaaaaaa` → `bbbbbbb`](https://github.com/nix-systems/default/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) (2023-11-14); used by `llm-agents`\n\
+             - `+` `treefmt-nix` ([numtide/treefmt-nix](https://github.com/numtide/treefmt-nix)): `ccccccc`; used by `llm-agents`\n\
              \n"
+        );
+    }
+
+    /// A `systems` that every input has its own copy of, and one that is reached from another
+    /// input too, and a removed one.
+    fn shared_lock(rev: &str, with_flake_utils: bool) -> String {
+        let systems = |rev: &str| node(github("nix-systems", "default", rev, 1_700_000_000), "");
+        let flake_utils = if with_flake_utils {
+            format!(
+                r#""flake-utils": {},"#,
+                node(github("numtide", "flake-utils", REV_C, 1_700_000_000), "")
+            )
+        } else {
+            String::new()
+        };
+        let fu_input = if with_flake_utils {
+            r#", "flake-utils": "flake-utils""#
+        } else {
+            ""
+        };
+
+        format!(
+            r#"{{ "nodes": {{
+                "a": {a}, "b": {b}, "systems": {s1}, "systems_2": {s2}, {flake_utils}
+                "root": {{ "inputs": {{ "a": "a", "b": "b" }} }}
+            }}, "root": "root" }}"#,
+            a = node(
+                github("o", "a", REV_D, 1_760_000_000),
+                &format!(r#""systems": "systems"{fu_input}"#)
+            ),
+            b = node(
+                github("o", "b", REV_D, 1_760_000_000),
+                &format!(r#""systems": "systems_2"{fu_input}"#)
+            ),
+            s1 = systems(rev),
+            s2 = systems(rev),
+        )
+    }
+
+    #[tokio::test]
+    async fn names_a_node_by_its_input_and_says_where_it_is_used() {
+        let summary = summarize(shared_lock(REV_A, true), shared_lock(REV_B, false), 5_000)
+            .await
+            .unwrap();
+
+        assert!(
+            summary.contains(
+                "- `~` `systems` ([nix-systems/default](https://github.com/nix-systems/default)): "
+            ),
+            "{summary}"
+        );
+        assert!(summary.contains("; used by `a`, `b`\n"), "{summary}");
+        assert!(
+            summary.contains(
+                "- `-` `flake-utils` ([numtide/flake-utils](https://github.com/numtide/flake-utils)): was `ccccccc`; used by `a`, `b`\n"
+            ),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("2 indirect inputs changed, 0 added, 1 removed."),
+            "{summary}"
         );
     }
 
