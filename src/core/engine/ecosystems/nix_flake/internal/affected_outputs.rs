@@ -16,32 +16,16 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use futures::{stream, StreamExt};
+use anyhow::{Context, Result};
 use serde::Deserialize;
-use tokio::process::Command;
 
 use crate::core::clients::github::GitHub;
-use crate::core::engine::repository::{FileModification, FileState, ProjectRepositorySnapshot};
+use crate::core::engine::repository::{FileModification, ProjectRepositorySnapshot};
 
-use super::apply_updates::{redact, NixAccess};
+use super::apply_updates::NixAccess;
 use super::dev_shells::{self, DevShellChanges};
-use super::flake_lock::{self, FlakeLock};
-
-/// How many files of the repository are put on disk. A repository with more files than this
-/// is not worth the requests it takes to read them.
-const MAX_FILES: usize = 400;
-
-/// How many bytes of the repository are put on disk.
-const MAX_BYTES: usize = 32 * 1024 * 1024;
-
-/// How many files are read at the same time.
-const READ_CONCURRENCY: usize = 8;
-
-/// How long one evaluation of the flake may take.
-const EVAL_TIMEOUT: Duration = Duration::from_secs(600);
+use super::flake_eval;
 
 /// What evaluating the flake yields: the derivation of each output, or `None` for the ones that
 /// could not be evaluated.
@@ -174,42 +158,21 @@ pub async fn analyze(
     work_dir: &Path,
     modifications: &[FileModification],
 ) -> Result<Option<AffectedOutputs>> {
-    let Some(new_lock) = modifications
-        .iter()
-        .find_map(|modification| match &modification.state {
-            FileState::Write(content) if modification.path == "flake.lock" => Some(content),
-            _ => None,
-        })
+    let Some(prepared) = flake_eval::prepare(github, snapshot, work_dir, modifications).await?
     else {
         return Ok(None);
     };
-    let Ok(old_lock) = snapshot.read_file("flake.lock").await else {
-        return Ok(None);
-    };
 
-    // The inputs of both locks are fetched, and those of the new one may belong to owners the
-    // old one doesn't mention.
-    let mut owners = lock_owners(&old_lock)?;
-    owners.extend(lock_owners(new_lock)?);
-    owners.sort();
-    owners.dedup();
-    let access = NixAccess::for_owners(github, &owners).await;
-
-    std::fs::create_dir_all(work_dir)
-        .with_context(|| format!("Failed to create work directory {}", work_dir.display()))?;
-    let dir = tempfile::TempDir::new_in(work_dir)
-        .with_context(|| format!("Failed to create a directory in {}", work_dir.display()))?;
-
-    materialize(snapshot, dir.path()).await?;
-    let comparison =
-        evaluate_states(snapshot, dir.path(), &old_lock, modifications, &access).await?;
+    let comparison = evaluate_states(
+        snapshot,
+        prepared.dir.path(),
+        &prepared.old_lock,
+        modifications,
+        &prepared.access,
+    )
+    .await?;
 
     Ok(Some(comparison))
-}
-
-fn lock_owners(lock: &str) -> Result<Vec<String>> {
-    let lock: FlakeLock = serde_json::from_str(lock).context("Failed to parse flake.lock")?;
-    Ok(flake_lock::github_owners(&lock))
 }
 
 /// Evaluates the repository in `dir`, which has the files of `snapshot`, before and after the
@@ -227,7 +190,7 @@ async fn evaluate_states(
     std::fs::write(dir.join("flake.lock"), old_lock)?;
     let old = evaluate(dir, access).await.context("Before the update")?;
 
-    apply(dir, modifications)?;
+    flake_eval::apply(dir, modifications)?;
     let new = evaluate(dir, access).await.context("After the update")?;
 
     let comparison = compare(&old, &new, None);
@@ -236,7 +199,7 @@ async fn evaluate_states(
     }
 
     // The old state again, with an edit that changes nothing about the inputs.
-    restore(snapshot, dir, modifications).await?;
+    flake_eval::restore(snapshot, dir, modifications).await?;
     std::fs::write(dir.join("flake.lock"), format!("{old_lock}\n"))?;
     let control = match evaluate(dir, access).await {
         Ok(control) => Some(control),
@@ -252,168 +215,16 @@ async fn evaluate_states(
     Ok(compare(&old, &new, control.as_ref()))
 }
 
-/// Puts the files of `snapshot` into `dir`.
-async fn materialize(snapshot: &dyn ProjectRepositorySnapshot, dir: &Path) -> Result<()> {
-    let files: Vec<String> = snapshot
-        .list_files()
-        .await?
-        .into_iter()
-        .filter(|path| path != "flake.lock")
-        .collect();
-    if files.len() > MAX_FILES {
-        bail!(
-            "The repository has {} files, more than the {} that are put on disk",
-            files.len(),
-            MAX_FILES
-        );
-    }
-
-    let contents: Vec<(String, Option<String>)> = stream::iter(files)
-        .map(|path| async move {
-            let content = snapshot.read_file(&path).await.ok();
-            (path, content)
-        })
-        .buffer_unordered(READ_CONCURRENCY)
-        .collect()
-        .await;
-
-    // Files that aren't text can't be read, and are left out.
-    let mut bytes = 0;
-    for (path, content) in contents {
-        let Some(content) = content else { continue };
-        bytes += content.len();
-        if bytes > MAX_BYTES {
-            bail!(
-                "The repository is larger than the {} bytes that are put on disk",
-                MAX_BYTES
-            );
-        }
-        write_file(dir, &path, &content)?;
-    }
-
-    Ok(())
-}
-
-/// A path that stays inside the directory it is joined to.
-fn is_contained(path: &str) -> bool {
-    use std::path::Component;
-    Path::new(path)
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
-}
-
-fn write_file(dir: &Path, path: &str, content: &str) -> Result<()> {
-    if !is_contained(path) {
-        bail!("Refusing to write {path} outside of the work directory");
-    }
-    let target = dir.join(path);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&target, content).with_context(|| format!("Failed to write {path}"))
-}
-
-/// Makes the files in `dir` what the `modifications` say.
-fn apply(dir: &Path, modifications: &[FileModification]) -> Result<()> {
-    for modification in modifications {
-        match &modification.state {
-            FileState::Write(content) => write_file(dir, &modification.path, content)?,
-            FileState::Delete => {
-                if !is_contained(&modification.path) {
-                    bail!(
-                        "Refusing to delete {} outside of the work directory",
-                        modification.path
-                    );
-                }
-                match std::fs::remove_file(dir.join(&modification.path)) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                    _ => {}
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Puts the files the `modifications` touch back to what `snapshot` has.
-async fn restore(
-    snapshot: &dyn ProjectRepositorySnapshot,
-    dir: &Path,
-    modifications: &[FileModification],
-) -> Result<()> {
-    let mut originals = Vec::new();
-    for modification in modifications {
-        let original = snapshot.read_file(&modification.path).await.ok();
-        originals.push(FileModification {
-            path: modification.path.clone(),
-            state: match original {
-                Some(content) => FileState::Write(content),
-                None => FileState::Delete,
-            },
-        });
-    }
-    apply(dir, &originals)
-}
-
 /// Evaluates the flake in `dir`.
 async fn evaluate(dir: &Path, access: &NixAccess) -> Result<Evaluation> {
-    let mut command = Command::new("nix");
-    command
-        .args(["--extra-experimental-features", "nix-command flakes"])
-        .args(["eval", "--impure", "--json", "--expr"])
-        .arg(expression(dir))
-        .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    if let Some(config) = &access.config {
-        command.env("NIX_CONFIG", config);
-    }
-
-    let output = tokio::time::timeout(EVAL_TIMEOUT, command.output())
-        .await
-        .context("Evaluating the flake took too long")?
-        .context("Failed to run nix")?;
-
-    if !output.status.success() {
-        let stderr = redact(&String::from_utf8_lossy(&output.stderr), &access.secrets);
-        bail!("nix eval failed ({}): {}", output.status, stderr.trim());
-    }
-
-    serde_json::from_slice(&output.stdout).context("Unexpected output of nix eval")
+    flake_eval::evaluate(dir, access, BODY).await
 }
 
-/// A nix string with `text` in it.
-fn nix_string(text: &str) -> String {
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace("${", "\\${")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!("\"{escaped}\"")
-}
-
-/// A path, as it goes into a flake reference.
-fn flake_url(dir: &Path) -> String {
-    let mut url = String::from("path:");
-    for byte in dir.to_string_lossy().bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                url.push(byte as char)
-            }
-            _ => url.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    url
-}
-
-/// The nix expression that evaluates the flake in `dir` to an [`Evaluation`].
+/// The nix expression that evaluates the flake to an [`Evaluation`].
 ///
 /// Every output is evaluated within `tryEval`, so that one that throws shows up as `null` and
 /// doesn't take the others with it.
-fn expression(dir: &Path) -> String {
-    const BODY: &str = r#"
+const BODY: &str = r#"
 let
   system = builtins.currentSystem;
   guard = value:
@@ -521,17 +332,11 @@ in {
 }
 "#;
 
-    format!(
-        "let flake = builtins.getFlake {}; in {}",
-        nix_string(&flake_url(dir)),
-        BODY.trim_start()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::engine::repository::test_support::MockSnapshot;
+    use crate::core::engine::repository::FileState;
 
     fn evaluation(outputs: &[(&str, Option<&str>)]) -> Evaluation {
         Evaluation {
@@ -666,37 +471,6 @@ mod tests {
         assert_eq!(store_name("/nix/store/short"), None);
     }
 
-    #[test]
-    fn urls_and_strings_are_escaped() {
-        assert_eq!(
-            flake_url(Path::new("/tmp/work dir/a#b")),
-            "path:/tmp/work%20dir/a%23b"
-        );
-        assert_eq!(nix_string(r#"a"b${c}\"#), r#""a\"b\${c}\\""#);
-    }
-
-    #[test]
-    fn paths_outside_the_directory_are_refused() {
-        assert!(is_contained("nix/default.nix"));
-        assert!(!is_contained("../escape"));
-        assert!(!is_contained("/etc/passwd"));
-        assert!(!is_contained("a/../../b"));
-    }
-
-    fn nix_works() -> bool {
-        std::process::Command::new("nix")
-            .args([
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "eval",
-                "--impure",
-                "--expr",
-                "builtins.currentSystem",
-            ])
-            .output()
-            .is_ok_and(|output| output.status.success())
-    }
-
     const FLAKE_NIX: &str = r#"{
   outputs = { self }:
     let
@@ -758,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn evaluates_and_compares_a_real_flake() {
-        if !nix_works() {
+        if !flake_eval::nix_works() {
             eprintln!("nix isn't usable here, skipping");
             return;
         }
@@ -770,7 +544,9 @@ mod tests {
             ("data.txt", "1.0"),
         ]);
         let dir = tempfile::tempdir().unwrap();
-        materialize(&snapshot, dir.path()).await.unwrap();
+        flake_eval::materialize(&snapshot, dir.path())
+            .await
+            .unwrap();
 
         // Stands in for an update: it changes a file that one output reads, as an update
         // changes the sources an output is built from.

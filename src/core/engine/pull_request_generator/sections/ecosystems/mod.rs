@@ -5,4 +5,5 @@ pub mod cargo;
 pub mod github_actions;
 pub mod nix_flake;
 mod nix_flake_health;
+mod nix_flake_system;
 pub mod npm;

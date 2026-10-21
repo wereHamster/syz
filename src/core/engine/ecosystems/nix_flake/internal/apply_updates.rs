@@ -99,16 +99,16 @@ pub async fn run(
 }
 
 /// How nix is made to authenticate to the owners of the inputs it fetches.
-pub(super) struct NixAccess {
+pub struct NixAccess {
     /// The value for `NIX_CONFIG`, if there is anything to add to the host's own.
-    pub(super) config: Option<String>,
+    pub config: Option<String>,
     /// Credentials that must not reach a log.
-    pub(super) secrets: Vec<String>,
+    pub secrets: Vec<String>,
 }
 
 impl NixAccess {
     /// Mints tokens for `owners` and builds the nix config that makes use of them.
-    pub(super) async fn for_owners(github: &GitHub, owners: &[String]) -> Self {
+    pub async fn for_owners(github: &GitHub, owners: &[String]) -> Self {
         let tokens = github_tokens(github, owners).await;
         let inherited_config = std::env::var("NIX_CONFIG").unwrap_or_default();
         let config = access_tokens_config(&tokens).map(|config| {

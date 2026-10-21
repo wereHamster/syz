@@ -20,15 +20,18 @@ pub enum SectionKind {
     /// changes: the outputs it affects, and the tools of the dev shells and the packages of the
     /// user environments it changes.
     Impact,
+    /// The machines the flake describes, and what the update does to them.
+    System,
     /// Release notes of the versions the update skips over.
     History,
 }
 
 impl SectionKind {
-    pub const IN_ORDER: [SectionKind; 4] = [
+    pub const IN_ORDER: [SectionKind; 5] = [
         SectionKind::Summary,
         SectionKind::Notices,
         SectionKind::Impact,
+        SectionKind::System,
         SectionKind::History,
     ];
 
@@ -39,6 +42,7 @@ impl SectionKind {
             SectionKind::Summary => 5_000,
             SectionKind::Notices => 6_000,
             SectionKind::Impact => 7_000,
+            SectionKind::System => 4_000,
             SectionKind::History => usize::MAX,
         }
     }
@@ -142,6 +146,7 @@ mod tests {
         assert_eq!(SectionKind::Summary.budget(100_000), 5_000);
         assert_eq!(SectionKind::Summary.budget(300), 300);
         assert_eq!(SectionKind::Impact.budget(100_000), 7_000);
+        assert_eq!(SectionKind::System.budget(100_000), 4_000);
         assert_eq!(SectionKind::History.budget(42_000), 42_000);
     }
 }

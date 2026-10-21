@@ -17,12 +17,14 @@ use crate::core::engine::pull_request_generator::sections::{summary, PullRequest
 use crate::core::engine::repository::{FileModification, FileState, ProjectRepositorySnapshot};
 
 use super::nix_flake_health;
+use super::nix_flake_system::NixFlakeSystemSection;
 
 /// None of the other sections produce anything for flake inputs yet.
 pub fn sections() -> Vec<Box<dyn PullRequestSectionGenerator>> {
     vec![
         Box::new(NixFlakeSummarySection),
         Box::new(NixFlakeAffectedOutputsSection),
+        Box::new(NixFlakeSystemSection),
     ]
 }
 
@@ -448,14 +450,14 @@ fn render_user_environments(users: &DevShellChanges, budget: usize) -> Option<St
 }
 
 /// The lock before and after the update.
-struct Locks {
+pub(super) struct Locks {
     old: String,
     new: String,
 }
 
 impl Locks {
     /// `None` when the update doesn't write a lock, or there is no lock to compare it to.
-    async fn read(
+    pub(super) async fn read(
         snapshot: &dyn ProjectRepositorySnapshot,
         modifications: &[FileModification],
     ) -> Option<Locks> {
@@ -472,7 +474,7 @@ impl Locks {
     }
 
     /// How the lock differs before and after. `None` when the update leaves it alone.
-    fn diff(&self) -> Option<LockDiff> {
+    pub(super) fn diff(&self) -> Option<LockDiff> {
         LockDiff::between(&self.old, &self.new).filter(|diff| !diff.is_empty())
     }
 }
