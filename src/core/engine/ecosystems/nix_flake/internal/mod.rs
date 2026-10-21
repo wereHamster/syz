@@ -1,5 +1,6 @@
 pub mod affected_outputs;
 pub mod apply_updates;
+pub mod dev_shells;
 pub mod discover_project_dependencies;
 pub mod find_input_alias;
 pub mod flake_lock;
