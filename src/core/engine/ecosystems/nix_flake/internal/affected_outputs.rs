@@ -46,13 +46,33 @@ pub struct Evaluation {
     pub outputs: BTreeMap<String, Option<String>>,
 }
 
+/// An output the update changes, with its derivation (or program, for apps) before and after.
+/// `before` is `None` for an output the update adds, `after` for one it removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedOutput {
+    pub name: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// The name a store path has, without its hash and without the `.drv` of a derivation:
+/// `tool-1.5.0` for `/nix/store/<hash>-tool-1.5.0.drv`. Taken from the first path component
+/// that looks like a store entry, so it works for a program inside a store path too.
+pub fn store_name(path: &str) -> Option<&str> {
+    let entry = path
+        .split('/')
+        .find(|part| part.len() > 33 && part.as_bytes()[32] == b'-')?;
+    let name = &entry[33..];
+    Some(name.strip_suffix(".drv").unwrap_or(name))
+}
+
 /// Which outputs the update changes. The names are `category.name`, e.g. `packages.default`,
 /// or just `formatter`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AffectedOutputs {
     pub system: String,
     /// Outputs the update changes.
-    pub changed: Vec<String>,
+    pub changed: Vec<ChangedOutput>,
     /// Outputs that change with any edit of the lock, such as a package built from the whole
     /// source, which includes `flake.lock`. Nothing can be said about what the update does to
     /// them.
@@ -96,7 +116,7 @@ pub fn compare(
             (Some(Some(before)), Some(Some(after))) if before == after => {
                 result.unchanged.push(name)
             }
-            (Some(Some(before)), Some(Some(_))) => {
+            (Some(Some(before)), Some(Some(after))) => {
                 let moves_with_any_edit = control
                     .and_then(|control| control.outputs.get(&name))
                     .is_some_and(|edited| edited.as_ref().is_some_and(|edited| edited != before));
@@ -104,11 +124,19 @@ pub fn compare(
                 if moves_with_any_edit {
                     result.changes_on_any_lock_edit.push(name);
                 } else {
-                    result.changed.push(name);
+                    result.changed.push(ChangedOutput {
+                        name,
+                        before: Some(before.clone()),
+                        after: Some(after.clone()),
+                    });
                 }
             }
             // An output the update adds or removes.
-            _ => result.changed.push(name),
+            _ => result.changed.push(ChangedOutput {
+                before: before.cloned().flatten(),
+                after: after.cloned().flatten(),
+                name,
+            }),
         }
     }
 
@@ -433,6 +461,14 @@ mod tests {
         names.iter().map(|name| name.to_string()).collect()
     }
 
+    fn changed_names(result: &AffectedOutputs) -> Vec<String> {
+        result
+            .changed
+            .iter()
+            .map(|change| change.name.clone())
+            .collect()
+    }
+
     #[test]
     fn tells_changed_from_unchanged_outputs() {
         let old = evaluation(&[
@@ -448,7 +484,7 @@ mod tests {
 
         let result = compare(&old, &new, None);
 
-        assert_eq!(result.changed, names(&["packages.tool"]));
+        assert_eq!(changed_names(&result), names(&["packages.tool"]));
         assert_eq!(
             result.unchanged,
             names(&["devShells.default", "packages.docs"])
@@ -478,7 +514,7 @@ mod tests {
             result.changes_on_any_lock_edit,
             names(&["packages.default"])
         );
-        assert_eq!(result.changed, names(&["devShells.default"]));
+        assert_eq!(changed_names(&result), names(&["devShells.default"]));
     }
 
     #[test]
@@ -508,7 +544,38 @@ mod tests {
 
         let result = compare(&old, &new, None);
 
-        assert_eq!(result.changed, names(&["packages.fresh", "packages.gone"]));
+        assert_eq!(
+            changed_names(&result),
+            names(&["packages.fresh", "packages.gone"])
+        );
+    }
+
+    #[test]
+    fn changed_outputs_keep_what_they_were_before_and_after() {
+        let old = evaluation(&[("packages.kept", Some("a")), ("packages.gone", Some("b"))]);
+        let new = evaluation(&[("packages.kept", Some("c")), ("packages.fresh", Some("d"))]);
+
+        let result = compare(&old, &new, None);
+
+        let find = |name: &str| result.changed.iter().find(|c| c.name == name).unwrap();
+        assert_eq!(find("packages.kept").before.as_deref(), Some("a"));
+        assert_eq!(find("packages.kept").after.as_deref(), Some("c"));
+        assert_eq!(find("packages.fresh").before, None);
+        assert_eq!(find("packages.gone").after, None);
+    }
+
+    #[test]
+    fn store_names_lose_their_hash_and_extension() {
+        let hash = "c3yh3hnrjnfp3a7kb9h5q8x1ylmcr2kh";
+        assert_eq!(
+            store_name(&format!("/nix/store/{hash}-tool-1.5.0.drv")),
+            Some("tool-1.5.0")
+        );
+        assert_eq!(
+            store_name(&format!("/nix/store/{hash}-tool-1.5.0/bin/tool")),
+            Some("tool-1.5.0")
+        );
+        assert_eq!(store_name("/nix/store/short"), None);
     }
 
     #[test]
@@ -598,7 +665,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.changed, names(&["packages.data"]));
+        assert_eq!(changed_names(&result), names(&["packages.data"]));
         assert_eq!(result.changes_on_any_lock_edit, names(&["packages.whole"]));
         assert_eq!(
             result.unchanged,
