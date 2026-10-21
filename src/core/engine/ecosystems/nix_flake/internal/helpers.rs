@@ -94,6 +94,103 @@ pub async fn get_latest_commit_sha(
     }
 }
 
+/// How a locked revision compares to the newest commit of the branch it is taken from.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UpstreamComparison {
+    /// The revision is the newest commit.
+    Identical,
+    /// The branch has commits the revision doesn't.
+    Ahead {
+        commits: u64,
+        /// When the oldest of those was committed.
+        since: chrono::DateTime<chrono::Utc>,
+    },
+    /// The revision is not an ancestor of the branch, or the answer is not understood.
+    Unrelated,
+}
+
+fn parse_comparison(comparison: &serde_json::Value) -> Option<UpstreamComparison> {
+    match comparison.get("status")?.as_str()? {
+        "identical" => Some(UpstreamComparison::Identical),
+        "ahead" | "diverged" => {
+            let since = comparison
+                .get("commits")?
+                .as_array()?
+                .first()?
+                .get("commit")?
+                .get("committer")?
+                .get("date")?
+                .as_str()?;
+            Some(UpstreamComparison::Ahead {
+                commits: comparison.get("ahead_by")?.as_u64()?,
+                since: chrono::DateTime::parse_from_rfc3339(since)
+                    .ok()?
+                    .with_timezone(&chrono::Utc),
+            })
+        }
+        _ => Some(UpstreamComparison::Unrelated),
+    }
+}
+
+/// Compares `rev` to the newest commit of `reference`, or of the default branch if no ref is
+/// given. `rev` has to be a plain revision.
+pub async fn compare_with_upstream(
+    github_client: &GitHub,
+    owner: &str,
+    repo: &str,
+    rev: &str,
+    reference: Option<&str>,
+) -> Option<UpstreamComparison> {
+    let head = reference.map_or("HEAD".to_string(), |r| urlencoding::encode(r).into_owned());
+    // Only the oldest commit after `rev` and the total are wanted.
+    let route = format!(
+        "/repos/{}/{}/compare/{}...{}?per_page=1",
+        owner, repo, rev, head
+    );
+    let res = github_client.get_json(&route).await.ok()?;
+    parse_comparison(&res)
+}
+
+/// The names and notes of the releases published after `after` and up to `until`, in
+/// seconds since the epoch. Drafts are not published, so they are left out.
+pub async fn get_release_notes_between(
+    github_client: &GitHub,
+    owner: &str,
+    repo: &str,
+    after: i64,
+    until: i64,
+) -> Option<Vec<String>> {
+    let route = format!("/repos/{}/{}/releases?per_page=100", owner, repo);
+    let res = github_client.get_json(&route).await.ok()?;
+    Some(release_notes_between(&res, after, until))
+}
+
+fn release_notes_between(releases: &serde_json::Value, after: i64, until: i64) -> Vec<String> {
+    let Some(releases) = releases.as_array() else {
+        return Vec::new();
+    };
+
+    releases
+        .iter()
+        .filter(|release| release.get("draft").and_then(|draft| draft.as_bool()) != Some(true))
+        .filter(|release| {
+            release
+                .get("published_at")
+                .and_then(|time| time.as_str())
+                .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+                .map(|time| time.timestamp())
+                .is_some_and(|time| time > after && time <= until)
+        })
+        .map(|release| {
+            ["name", "body"]
+                .iter()
+                .filter_map(|key| release.get(key).and_then(|text| text.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect()
+}
+
 pub struct GitRepo {
     pub url: String,
 }
@@ -263,6 +360,59 @@ fn parse_immutable_link(header_value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_comparison() {
+        assert_eq!(
+            parse_comparison(&serde_json::json!({ "status": "identical" })),
+            Some(UpstreamComparison::Identical)
+        );
+        assert_eq!(
+            parse_comparison(&serde_json::json!({
+                "status": "ahead",
+                "ahead_by": 12,
+                "commits": [{ "commit": { "committer": { "date": "2026-03-04T10:00:00Z" } } }]
+            })),
+            Some(UpstreamComparison::Ahead {
+                commits: 12,
+                since: chrono::DateTime::parse_from_rfc3339("2026-03-04T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            })
+        );
+        assert_eq!(
+            parse_comparison(&serde_json::json!({ "status": "behind" })),
+            Some(UpstreamComparison::Unrelated)
+        );
+        assert_eq!(
+            parse_comparison(&serde_json::json!({ "status": "ahead", "ahead_by": 1 })),
+            None
+        );
+    }
+
+    #[test]
+    fn test_release_notes_between_keeps_published_releases_in_range() {
+        let releases = serde_json::json!([
+            { "name": "too new", "body": "later", "published_at": "2026-05-01T00:00:00Z" },
+            { "name": "v2", "body": "fixes CVE-2026-1234", "published_at": "2026-03-01T00:00:00Z" },
+            { "name": "draft", "body": "unpublished", "draft": true, "published_at": "2026-03-01T00:00:00Z" },
+            { "name": "v1", "body": null, "published_at": "2026-02-01T00:00:00Z" },
+            { "name": "too old", "body": "earlier", "published_at": "2025-01-01T00:00:00Z" },
+            { "name": "unpublished", "body": "no date" }
+        ]);
+        let after = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let until = chrono::DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .unwrap()
+            .timestamp();
+
+        assert_eq!(
+            release_notes_between(&releases, after, until),
+            ["v2\nfixes CVE-2026-1234", "v1"]
+        );
+        assert!(release_notes_between(&serde_json::json!({}), after, until).is_empty());
+    }
 
     #[test]
     fn test_format_github_ref_with_ref() {
