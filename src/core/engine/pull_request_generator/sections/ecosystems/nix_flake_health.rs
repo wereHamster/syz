@@ -1,17 +1,13 @@
-//! The two one-liners at the end of the flake summary: whether the release notes of the
-//! updated inputs mention security, and how healthy the lock is. They are shown even when
-//! there is nothing to report, so that their absence can't be mistaken for not having looked.
-
-use std::collections::BTreeSet;
-use std::sync::LazyLock;
+//! The lock health section of the flake summary: what is wrong with the lock that someone could
+//! act on, or `OK`. It is shown even when there is nothing to report, so that its absence can't
+//! be mistaken for not having looked.
 
 use chrono::{DateTime, Duration, Utc};
-use regex::Regex;
 
-use super::nix_flake::{code, plural, same_repo};
+use super::nix_flake::code;
+use super::nix_flake::plural;
 use crate::core::clients::github::GitHub;
 use crate::core::engine::ecosystems::nix_flake::internal::helpers::{self, UpstreamComparison};
-use crate::core::engine::ecosystems::nix_flake::internal::lock_diff::{ChangeKind, LockDiff};
 use crate::core::engine::ecosystems::nix_flake::internal::lock_health::{
     tracked_inputs, LockHealth, TrackedInput,
 };
@@ -27,74 +23,10 @@ const DORMANT_AFTER: Duration = Duration::days(180);
 /// How many items of a list are spelled out.
 const ITEMS_SHOWN: usize = 3;
 
-/// How many CVE ids are spelled out.
-const CVES_SHOWN: usize = 5;
-
-static CVE_ID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bCVE-\d{4}-\d{4,}\b").expect("valid pattern"));
-static SECURITY_WORD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bsecurity\b").expect("valid pattern"));
-
-/// What was found in the release notes of the updated inputs.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Security {
-    pub cves: BTreeSet<String>,
-    pub mentions_security: bool,
-    /// How many inputs had release notes to read.
-    pub inputs_scanned: usize,
-}
-
-/// Looks through the release notes of each input (an empty one has none) for CVE ids and the
-/// word "security". A plain text search over what was fetched anyway: it finds what the notes
-/// say, not what is wrong with the code.
-pub fn scan(notes_per_input: &[Vec<String>]) -> Security {
-    let mut found = Security::default();
-
-    for notes in notes_per_input.iter().filter(|notes| !notes.is_empty()) {
-        found.inputs_scanned += 1;
-        for text in notes {
-            found.cves.extend(
-                CVE_ID
-                    .find_iter(text)
-                    .map(|cve| cve.as_str().to_uppercase()),
-            );
-            found.mentions_security |= SECURITY_WORD.is_match(text);
-        }
-    }
-
-    found
-}
-
-fn security_line(security: &Security) -> String {
-    let outcome = if !security.cves.is_empty() {
-        let mut shown: Vec<String> = security
-            .cves
-            .iter()
-            .take(CVES_SHOWN)
-            .map(|cve| code(cve))
-            .collect();
-        if security.cves.len() > CVES_SHOWN {
-            shown.push(format!("{} more", security.cves.len() - CVES_SHOWN));
-        }
-        format!("release notes mention {}.", shown.join(", "))
-    } else if security.mentions_security {
-        "release notes mention security, but no CVE ids.".to_string()
-    } else if security.inputs_scanned > 0 {
-        format!(
-            "the release notes of {} don't mention CVEs or security.",
-            plural(security.inputs_scanned, "input", "inputs")
-        )
-    } else {
-        "no release notes to read.".to_string()
-    };
-
-    format!("- **Security:** {outcome} Not a vulnerability scan.\n")
-}
-
 /// What is wrong with an input compared to its upstream.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stale {
-    /// Upstream has had `commits` more commits for `days` days.
+    /// Upstream has had `commits` more commits, the oldest for `days` days.
     Behind { commits: u64, days: i64 },
     /// The lock is at the newest commit, and that is `days` old.
     Dormant { days: i64 },
@@ -150,32 +82,6 @@ async fn stale_inputs(github: Option<&GitHub>, inputs: &[TrackedInput]) -> Vec<(
     .collect()
 }
 
-/// The release notes of the direct inputs the update moved, one list per input.
-async fn release_notes(github: Option<&GitHub>, diff: &LockDiff) -> Vec<Vec<String>> {
-    let Some(github) = github else {
-        return Vec::new();
-    };
-
-    futures::future::join_all(diff.direct.iter().map(|change| async move {
-        let ChangeKind::Updated { old, new } = &change.kind else {
-            return None;
-        };
-        let (owner, repo) = same_repo(old, new)?;
-        helpers::get_release_notes_between(
-            github,
-            owner,
-            repo,
-            old.last_modified?,
-            new.last_modified?,
-        )
-        .await
-    }))
-    .await
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
 /// The names in `items`, the first few of them.
 fn some_of(items: &[String]) -> String {
     let mut shown: Vec<String> = items.iter().take(ITEMS_SHOWN).cloned().collect();
@@ -185,47 +91,52 @@ fn some_of(items: &[String]) -> String {
     shown.join(", ")
 }
 
-/// The first line of the lock health: what is actionable, and `OK` when nothing is. What the
-/// update changed is marked, where the lock before it could be compared.
-fn health_line(
+/// `name`, marked when the update brought it.
+fn marked(name: &str, is_new: bool) -> String {
+    if is_new {
+        format!("{} (new)", code(name))
+    } else {
+        code(name)
+    }
+}
+
+/// What is actionable, one finding to an item. Empty when nothing is. What the update brought
+/// is marked, where the lock before it could be compared.
+fn findings(
     health: &LockHealth,
     previous: Option<&LockHealth>,
     stale: &[(String, Stale)],
-) -> String {
-    let mut parts: Vec<String> = Vec::new();
+) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
 
     let followable: Vec<String> = health
         .followable()
-        .map(|path| match previous {
-            Some(previous) if !previous.followable().any(|before| before == path) => {
-                format!("{} (new)", code(path))
-            }
-            _ => code(path),
+        .map(|path| {
+            let is_new = previous.is_some_and(|previous| !previous.followable().any(|p| p == path));
+            marked(path, is_new)
         })
         .collect();
     if !followable.is_empty() {
-        parts.push(format!(
-            "{} a `follows` could remove ({})",
+        items.push(format!(
+            "{} a `follows` could remove: {}",
             plural(followable.len(), "duplicate", "duplicates"),
             some_of(&followable)
         ));
     }
 
-    if !health.not_following.is_empty() {
-        let names: Vec<String> = health
-            .not_following
-            .iter()
-            .map(|name| match previous {
-                Some(previous) if !previous.not_following.contains(name) => {
-                    format!("{} (new)", code(name))
-                }
-                _ => code(name),
-            })
-            .collect();
-        parts.push(format!(
-            "{} not following the `nixpkgs` of the flake ({})",
-            plural(names.len(), "input", "inputs"),
-            some_of(&names)
+    let not_following: Vec<String> = health
+        .not_following
+        .iter()
+        .map(|name| {
+            let is_new = previous.is_some_and(|previous| !previous.not_following.contains(name));
+            marked(name, is_new)
+        })
+        .collect();
+    if !not_following.is_empty() {
+        items.push(format!(
+            "{} not following the `nixpkgs` of the flake: {}",
+            plural(not_following.len(), "input", "inputs"),
+            some_of(&not_following)
         ));
     }
 
@@ -233,7 +144,7 @@ fn health_line(
         .iter()
         .filter_map(|(name, stale)| match stale {
             Stale::Behind { commits, days } => Some(format!(
-                "{} {}, the oldest {} days old",
+                "{} ({}, the oldest {} days old)",
                 code(name),
                 plural(*commits as usize, "commit", "commits"),
                 days
@@ -242,8 +153,8 @@ fn health_line(
         })
         .collect();
     if !behind.is_empty() {
-        parts.push(format!(
-            "{} behind upstream ({})",
+        items.push(format!(
+            "{} behind upstream: {}",
             plural(behind.len(), "input", "inputs"),
             some_of(&behind)
         ));
@@ -253,7 +164,7 @@ fn health_line(
         .iter()
         .filter_map(|(name, stale)| match stale {
             Stale::Dormant { days } => Some(format!(
-                "{} {}",
+                "{} ({})",
                 code(name),
                 plural((*days / 30) as usize, "month", "months")
             )),
@@ -261,18 +172,14 @@ fn health_line(
         })
         .collect();
     if !dormant.is_empty() {
-        parts.push(format!(
-            "{} at a dormant upstream ({})",
+        items.push(format!(
+            "{} at a dormant upstream: {}",
             plural(dormant.len(), "input", "inputs"),
             some_of(&dormant)
         ));
     }
 
-    if parts.is_empty() {
-        "- **Lock health:** OK\n".to_string()
-    } else {
-        format!("- **Lock health:** {}.\n", parts.join("; "))
-    }
+    items
 }
 
 /// Every repository that is locked more than once, for whoever wants to look closer.
@@ -319,73 +226,57 @@ fn duplicates_details(health: &LockHealth, previous: Option<&LockHealth>) -> Str
     out
 }
 
-/// The one-liners, and what can be expanded below them.
-pub struct Footer {
-    pub lines: String,
+/// The lock health section, and what can be expanded below it.
+pub struct HealthSection {
+    pub body: String,
     pub details: String,
 }
 
-impl Footer {
-    fn new(
-        health: &LockHealth,
-        previous: Option<&LockHealth>,
-        stale: &[(String, Stale)],
-        security: &Security,
-    ) -> Self {
+impl HealthSection {
+    fn new(health: &LockHealth, previous: Option<&LockHealth>, stale: &[(String, Stale)]) -> Self {
+        let items = findings(health, previous, stale);
+        let body = if items.is_empty() {
+            "**Lock health**\n\nOK\n\n".to_string()
+        } else {
+            let list: String = items.iter().map(|item| format!("- {item}\n")).collect();
+            format!("**Lock health**\n\n{list}\n")
+        };
+
         Self {
-            lines: format!(
-                "{}{}\n",
-                security_line(security),
-                health_line(health, previous, stale)
-            ),
+            body,
             details: duplicates_details(health, previous),
         }
     }
 
-    /// The footer with the details if they leave `limit` bytes sufficient, else without them.
-    /// Empty if not even the lines fit.
+    /// The section with the details if they fit in `limit` bytes, else without them. Empty if
+    /// not even the findings fit.
     pub fn within(&self, limit: usize) -> String {
-        let full = format!("{}{}", self.lines, self.details);
-        [full, self.lines.clone()]
+        let full = format!("{}{}", self.body, self.details);
+        [full, self.body.clone()]
             .into_iter()
-            .find(|footer| footer.len() <= limit)
+            .find(|section| section.len() <= limit)
             .unwrap_or_default()
     }
 }
 
 /// Looks at the lock after the update, and at what GitHub says about the inputs. `None` if the
 /// lock can't be read.
-pub async fn footer(
+pub async fn section(
     ctx: &PullRequestGenerationContext<'_>,
     old: &str,
     new: &str,
-    diff: &LockDiff,
-) -> Option<Footer> {
+) -> Option<HealthSection> {
     let health = LockHealth::of(new)?;
     let previous = LockHealth::of(old);
     let tracked = tracked_inputs(new).unwrap_or_default();
+    let stale = stale_inputs(ctx.github, &tracked).await;
 
-    let (stale, notes) = futures::future::join(
-        stale_inputs(ctx.github, &tracked),
-        release_notes(ctx.github, diff),
-    )
-    .await;
-
-    Some(Footer::new(
-        &health,
-        previous.as_ref(),
-        &stale,
-        &scan(&notes),
-    ))
+    Some(HealthSection::new(&health, previous.as_ref(), &stale))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn notes(texts: &[&str]) -> Vec<String> {
-        texts.iter().map(|text| text.to_string()).collect()
-    }
 
     fn input(last_modified: Option<i64>) -> TrackedInput {
         TrackedInput {
@@ -402,86 +293,6 @@ mod tests {
         DateTime::parse_from_rfc3339(&format!("{date}T00:00:00Z"))
             .unwrap()
             .with_timezone(&Utc)
-    }
-
-    #[test]
-    fn scan_finds_cve_ids_in_any_case_once() {
-        let found = scan(&[
-            notes(&["Fixes CVE-2025-1234 and cve-2025-1234, also CVE-2024-98765."]),
-            notes(&["CVE-2025-1234 again"]),
-        ]);
-
-        assert_eq!(
-            found.cves.iter().map(String::as_str).collect::<Vec<_>>(),
-            ["CVE-2024-98765", "CVE-2025-1234"]
-        );
-        assert_eq!(found.inputs_scanned, 2);
-    }
-
-    #[test]
-    fn scan_ignores_things_that_only_look_like_cve_ids() {
-        let found = scan(&[notes(&[
-            "CVE-25-1, CVE-2025-12, XCVE-2025-1234, CVE-2025-1234x",
-        ])]);
-
-        assert!(found.cves.is_empty(), "{found:?}");
-    }
-
-    #[test]
-    fn scan_matches_the_word_security_only() {
-        assert!(scan(&[notes(&["A Security fix."])]).mentions_security);
-        assert!(!scan(&[notes(&["insecurity, securityfoo"])]).mentions_security);
-    }
-
-    #[test]
-    fn scan_counts_only_inputs_that_have_notes() {
-        let found = scan(&[notes(&["a"]), Vec::new(), notes(&["b", "c"])]);
-
-        assert_eq!(found.inputs_scanned, 2);
-    }
-
-    #[test]
-    fn the_security_line_never_calls_anything_safe_or_vulnerable() {
-        let cases = [
-            Security::default(),
-            scan(&[notes(&["nothing to see"])]),
-            scan(&[notes(&["security release"])]),
-            scan(&[notes(&["CVE-2025-1234"])]),
-        ];
-
-        for case in cases {
-            let line = security_line(&case);
-            assert!(line.ends_with("Not a vulnerability scan.\n"), "{line}");
-            assert!(
-                !line.contains("safe") && !line.contains("vulnerable"),
-                "{line}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_security_line_says_what_was_found() {
-        assert_eq!(
-            security_line(&Security::default()),
-            "- **Security:** no release notes to read. Not a vulnerability scan.\n"
-        );
-        assert_eq!(
-            security_line(&scan(&[notes(&["nothing"]), notes(&["still nothing"])])),
-            "- **Security:** the release notes of 2 inputs don't mention CVEs or security. Not a vulnerability scan.\n"
-        );
-        assert_eq!(
-            security_line(&scan(&[notes(&["fixes CVE-2025-1234"])])),
-            "- **Security:** release notes mention `CVE-2025-1234`. Not a vulnerability scan.\n"
-        );
-    }
-
-    #[test]
-    fn many_cves_are_cut_to_a_few() {
-        let text: Vec<String> = (1000..1010).map(|n| format!("CVE-2025-{n}")).collect();
-        let line = security_line(&scan(&[vec![text.join(" ")]]));
-
-        assert!(line.contains("`CVE-2025-1004`, 5 more."), "{line}");
-        assert!(!line.contains("CVE-2025-1005"), "{line}");
     }
 
     #[test]
@@ -574,51 +385,48 @@ mod tests {
         )
     }
 
+    fn clean_lock() -> LockHealth {
+        health(
+            &github_node("nixpkgs", "NixOS", "nixpkgs", 'a', ""),
+            r#""nixpkgs": "nixpkgs""#,
+        )
+    }
+
     #[test]
     fn a_lock_without_problems_reads_ok() {
-        let clean = health(
-            &github_node("nixpkgs", "NixOS", "nixpkgs", 'a', ""),
-            r#""nixpkgs": "nixpkgs""#,
-        );
+        let clean = clean_lock();
+        let section = HealthSection::new(&clean, Some(&clean), &[]);
 
-        assert_eq!(
-            health_line(&clean, Some(&clean), &[]),
-            "- **Lock health:** OK\n"
-        );
-        assert_eq!(duplicates_details(&clean, Some(&clean)), "");
+        assert_eq!(section.body, "**Lock health**\n\nOK\n\n");
+        assert_eq!(section.details, "");
     }
 
     #[test]
-    fn the_health_line_lists_what_can_be_fixed() {
-        let health = lock_with_duplicates();
+    fn lists_what_can_be_fixed() {
+        let section = HealthSection::new(&lock_with_duplicates(), None, &[]);
 
         assert_eq!(
-            health_line(&health, None, &[]),
-            "- **Lock health:** 1 duplicate a `follows` could remove (`tool/systems`); \
-             1 input not following the `nixpkgs` of the flake (`tool`).\n"
+            section.body,
+            "**Lock health**\n\n\
+             - 1 duplicate a `follows` could remove: `tool/systems`\n\
+             - 1 input not following the `nixpkgs` of the flake: `tool`\n\n"
         );
     }
 
     #[test]
-    fn the_health_line_marks_what_the_update_brought() {
+    fn marks_what_the_update_brought() {
         let after = lock_with_duplicates();
-        let before = health(
-            &github_node("nixpkgs", "NixOS", "nixpkgs", 'a', ""),
-            r#""nixpkgs": "nixpkgs""#,
-        );
-        let line = health_line(&after, Some(&before), &[]);
+        let marked = HealthSection::new(&after, Some(&clean_lock()), &[]).body;
 
-        assert!(line.contains("(`tool/systems` (new))"), "{line}");
-        assert!(line.contains("(`tool` (new))"), "{line}");
-        assert!(!health_line(&after, Some(&after), &[]).contains("(new)"));
+        assert!(marked.contains(": `tool/systems` (new)\n"), "{marked}");
+        assert!(marked.contains(": `tool` (new)\n"), "{marked}");
+        assert!(!HealthSection::new(&after, Some(&after), &[])
+            .body
+            .contains("(new)"));
     }
 
     #[test]
-    fn the_health_line_reports_stale_inputs_apart() {
-        let clean = health(
-            &github_node("nixpkgs", "NixOS", "nixpkgs", 'a', ""),
-            r#""nixpkgs": "nixpkgs""#,
-        );
+    fn reports_stale_inputs_apart() {
         let stale = vec![
             (
                 "old-tool".to_string(),
@@ -632,10 +440,22 @@ mod tests {
         ];
 
         assert_eq!(
-            health_line(&clean, None, &stale),
-            "- **Lock health:** 1 input behind upstream (`old-tool` 1 commit, the oldest 40 days old); \
-             2 inputs at a dormant upstream (`quiet` 7 months, `quieter` 13 months).\n"
+            HealthSection::new(&clean_lock(), None, &stale).body,
+            "**Lock health**\n\n\
+             - 1 input behind upstream: `old-tool` (1 commit, the oldest 40 days old)\n\
+             - 2 inputs at a dormant upstream: `quiet` (7 months), `quieter` (13 months)\n\n"
         );
+    }
+
+    #[test]
+    fn cuts_long_lists_to_a_few() {
+        let stale: Vec<(String, Stale)> = (0..5)
+            .map(|n| (format!("quiet-{n}"), Stale::Dormant { days: 200 }))
+            .collect();
+        let body = HealthSection::new(&clean_lock(), None, &stale).body;
+
+        assert!(body.contains("5 inputs at a dormant upstream: "), "{body}");
+        assert!(body.contains("`quiet-2` (6 months), 2 more\n"), "{body}");
     }
 
     #[test]
@@ -667,13 +487,12 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_drops_the_details_before_the_lines() {
-        let footer = Footer::new(&lock_with_duplicates(), None, &[], &Security::default());
-        let full = footer.within(usize::MAX);
+    fn the_section_drops_the_details_before_the_findings() {
+        let section = HealthSection::new(&lock_with_duplicates(), None, &[]);
+        let full = section.within(usize::MAX);
 
         assert!(full.ends_with("</details>\n\n"), "{full}");
-        assert_eq!(footer.within(full.len() - 1), footer.lines);
-        assert_eq!(footer.within(footer.lines.len() - 1), "");
-        assert!(footer.lines.ends_with("\n\n"));
+        assert_eq!(section.within(full.len() - 1), section.body);
+        assert_eq!(section.within(section.body.len() - 1), "");
     }
 }

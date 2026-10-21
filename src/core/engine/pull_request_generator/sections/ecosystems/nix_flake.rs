@@ -46,18 +46,18 @@ impl PullRequestSectionGenerator for NixFlakeSummarySection {
             return summary::generate(ctx, budget, |_, _, _| None).await;
         };
 
-        let (commits, footer) = futures::future::join(
+        let (commits, health) = futures::future::join(
             commit_counts(ctx, &diff.direct),
-            nix_flake_health::footer(ctx, &locks.old, &locks.new, &diff),
+            nix_flake_health::section(ctx, &locks.old, &locks.new),
         )
         .await;
 
-        // The footer is always shown, so the lists give way to it, not the other way round.
-        // It gives up its details if they would take more than a third of the section.
-        let footer = footer.map_or_else(String::new, |footer| footer.within(budget / 3));
-        let lists = render(&diff, &commits, budget - footer.len()).unwrap_or_default();
+        // The lock health is always shown, so the lists give way to it, not the other way
+        // round. It gives up its details if they would take more than a third of the section.
+        let health = health.map_or_else(String::new, |health| health.within(budget / 3));
+        let lists = render(&diff, &commits, budget - health.len()).unwrap_or_default();
 
-        Ok(Some(lists + &footer).filter(|summary| !summary.is_empty()))
+        Ok(Some(lists + &health).filter(|summary| !summary.is_empty()))
     }
 }
 
@@ -111,7 +111,7 @@ async fn commit_counts(
 }
 
 /// The repository two pins share, if they are both github pins of the same one.
-pub(super) fn same_repo<'a>(old: &'a Pin, new: &Pin) -> Option<(&'a str, &'a str)> {
+fn same_repo<'a>(old: &'a Pin, new: &Pin) -> Option<(&'a str, &'a str)> {
     old.github_repo()
         .filter(|repo| Some(*repo) == new.github_repo())
 }
