@@ -17,8 +17,8 @@ use crate::core::engine::repository::{FileModification, FileState, ProjectReposi
 use super::apply_updates::{redact, NixAccess};
 use super::flake_lock::{self, FlakeLock};
 
-/// How many files of the repository are put on disk. A repository with more files than this
-/// is not worth the requests it takes to read them.
+/// How many files of the repository are put on disk when they have to be read one by one. A
+/// repository with more files than this is not worth the requests it takes.
 const MAX_FILES: usize = 400;
 
 /// How many bytes of the repository are put on disk.
@@ -90,6 +90,16 @@ fn lock_owners(lock: &str) -> Result<Vec<String>> {
 
 /// Puts the files of `snapshot` into `dir`, but not the lock.
 pub async fn materialize(snapshot: &dyn ProjectRepositorySnapshot, dir: &Path) -> Result<()> {
+    if snapshot.export(dir, MAX_BYTES).await? {
+        if let Err(e) = std::fs::remove_file(dir.join("flake.lock")) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
+        }
+        return Ok(());
+    }
+
+    // The backend can't export, so the files are read one by one.
     let files: Vec<String> = snapshot
         .list_files()
         .await?
@@ -116,7 +126,10 @@ pub async fn materialize(snapshot: &dyn ProjectRepositorySnapshot, dir: &Path) -
     // Files that aren't text can't be read, and are left out.
     let mut bytes = 0;
     for (path, content) in contents {
-        let Some(content) = content else { continue };
+        let Some(content) = content else {
+            tracing::warn!("Leaving out {path}, which can't be read as text");
+            continue;
+        };
         bytes += content.len();
         if bytes > MAX_BYTES {
             bail!(
@@ -216,10 +229,26 @@ pub async fn evaluate<T: DeserializeOwned>(
 
     if !output.status.success() {
         let stderr = redact(&String::from_utf8_lossy(&output.stderr), &access.secrets);
-        bail!("nix eval failed ({}): {}", output.status, stderr.trim());
+        tracing::debug!("nix eval failed: {}", stderr.trim());
+        bail!(
+            "nix eval failed ({}): {}",
+            output.status,
+            root_error(&stderr)
+        );
     }
 
     serde_json::from_slice(&output.stdout).context("Unexpected output of nix eval")
+}
+
+/// The last `error:` line of what nix printed, which is the cause, below the trace that led to
+/// it. All of `stderr` if it has no such line.
+fn root_error(stderr: &str) -> &str {
+    stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with("error:"))
+        .unwrap_or_else(|| stderr.trim())
 }
 
 /// A nix string with `text` in it.
@@ -283,6 +312,16 @@ mod tests {
             "path:/tmp/work%20dir/a%23b"
         );
         assert_eq!(nix_string(r#"a"b${c}\"#), r#""a\"b\${c}\\""#);
+    }
+
+    #[test]
+    fn only_the_cause_of_an_eval_error_is_kept() {
+        let stderr = "error:\n       … while evaluating the option `x':\n       error: path '/nix/store/a' does not exist\n";
+        assert_eq!(
+            root_error(stderr),
+            "error: path '/nix/store/a' does not exist"
+        );
+        assert_eq!(root_error("something else\n"), "something else");
     }
 
     #[test]
