@@ -4,3 +4,4 @@ pub mod github_http;
 pub mod npm;
 pub mod osv;
 pub mod tangled;
+pub mod tarball;

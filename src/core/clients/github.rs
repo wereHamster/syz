@@ -1,16 +1,19 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose, Engine as _};
+use http_body_util::BodyExt;
 use octocrab::{
     models::{AppId, InstallationId},
     EncodingKey, Octocrab,
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+use super::tarball;
 use crate::core::engine::repository::{
     FileModification, FileState, ProjectRepositoryMutator, ProjectRepositorySnapshot,
     ProjectRepositoryView,
@@ -541,6 +544,36 @@ impl ProjectRepositorySnapshot for GitHubProjectRepositorySnapshot {
         } else {
             anyhow::bail!("No content in file");
         }
+    }
+
+    async fn export(&self, dir: &Path, max_bytes: usize) -> Result<bool> {
+        let response = self
+            .octocrab
+            .repos(&self.owner, &self.repo)
+            .download_tarball(self.revision.clone())
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("Downloading the repository failed: {}", response.status());
+        }
+
+        // The archive is smaller than what is in it, so the same limit holds it comfortably.
+        let mut body = response.into_body();
+        let mut archive = Vec::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame?.into_data() {
+                archive.extend_from_slice(&data);
+            }
+            if archive.len() > max_bytes {
+                anyhow::bail!(
+                    "The repository is larger than the {max_bytes} bytes that are put on disk"
+                );
+            }
+        }
+
+        let dir = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || tarball::unpack(archive.as_slice(), &dir, max_bytes))
+            .await??;
+        Ok(true)
     }
 }
 

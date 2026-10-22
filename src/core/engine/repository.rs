@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileState {
@@ -42,6 +43,15 @@ pub trait ProjectRepositorySnapshot: Send + Sync {
 
     /// Returns Err() if the file doesn't exist.
     async fn read_file(&self, path: &str) -> Result<String>;
+
+    /// Puts all files of the snapshot into `dir`, byte for byte, which `read_file` can't do for
+    /// files that aren't text. Fails if they add up to more than `max_bytes`.
+    ///
+    /// Returns false if the backend has no way to do this, in which case the files have to be
+    /// read one by one.
+    async fn export(&self, _dir: &Path, _max_bytes: usize) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// An abstracted view for mutating a project repository.
