@@ -13,8 +13,8 @@ use crate::core::engine::ecosystems::nix_flake::internal::lock_health::{
 };
 use crate::core::engine::pull_request_generator::context::PullRequestGenerationContext;
 
-/// A newer commit upstream that the lock has missed for this long means that something keeps
-/// the input from being updated. Sooner than that, an update is probably on its way.
+/// A revision this old with newer commits upstream means that something keeps the input from
+/// being updated. Sooner than that, an update is probably on its way.
 const BEHIND_AFTER: Duration = Duration::days(7);
 
 /// An upstream that has not moved for this long is a risk to keep an eye on.
@@ -26,7 +26,7 @@ const ITEMS_SHOWN: usize = 3;
 /// What is wrong with an input compared to its upstream.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stale {
-    /// Upstream has had `commits` more commits, the oldest for `days` days.
+    /// Upstream has had `commits` more commits, and the locked revision is `days` old.
     Behind { commits: u64, days: i64 },
     /// The lock is at the newest commit, and that is `days` old.
     Dormant { days: i64 },
@@ -38,21 +38,16 @@ fn classify(
     comparison: UpstreamComparison,
     now: DateTime<Utc>,
 ) -> Option<Stale> {
+    let age = now - DateTime::from_timestamp(input.last_modified?, 0)?;
+
     match comparison {
-        UpstreamComparison::Identical => {
-            let committed = DateTime::from_timestamp(input.last_modified?, 0)?;
-            let age = now - committed;
-            (age >= DORMANT_AFTER).then(|| Stale::Dormant {
-                days: age.num_days(),
-            })
-        }
-        UpstreamComparison::Ahead { commits, since } => {
-            let age = now - since;
-            (age >= BEHIND_AFTER).then(|| Stale::Behind {
-                commits,
-                days: age.num_days(),
-            })
-        }
+        UpstreamComparison::Identical => (age >= DORMANT_AFTER).then(|| Stale::Dormant {
+            days: age.num_days(),
+        }),
+        UpstreamComparison::Ahead { commits } => (age >= BEHIND_AFTER).then(|| Stale::Behind {
+            commits,
+            days: age.num_days(),
+        }),
         UpstreamComparison::Unrelated => None,
     }
 }
@@ -144,7 +139,7 @@ fn findings(
         .iter()
         .filter_map(|(name, stale)| match stale {
             Stale::Behind { commits, days } => Some(format!(
-                "{} ({}, the oldest {} days old)",
+                "{} ({}, locked revision {} days old)",
                 code(name),
                 plural(*commits as usize, "commit", "commits"),
                 days
@@ -325,20 +320,22 @@ mod tests {
     }
 
     #[test]
-    fn an_input_is_behind_when_upstream_moved_on_a_while_ago() {
-        let comparison = |since| UpstreamComparison::Ahead { commits: 4, since };
+    fn an_input_is_behind_when_its_revision_is_old() {
+        let comparison = UpstreamComparison::Ahead { commits: 4 };
+        let locked = |date| input(Some(at(date).timestamp()));
 
         assert_eq!(
-            classify(&input(None), comparison(at("2026-09-01")), at("2026-10-01")),
+            classify(&locked("2026-09-01"), comparison, at("2026-10-01")),
             Some(Stale::Behind {
                 commits: 4,
                 days: 30
             })
         );
         assert_eq!(
-            classify(&input(None), comparison(at("2026-09-30")), at("2026-10-01")),
+            classify(&locked("2026-09-30"), comparison, at("2026-10-01")),
             None
         );
+        assert_eq!(classify(&input(None), comparison, at("2026-10-01")), None);
         assert_eq!(
             classify(
                 &input(None),
@@ -441,7 +438,7 @@ mod tests {
         assert_eq!(
             HealthSection::new(&clean_lock(), None, &stale).body,
             "**Lock health**\n\n\
-             - 1 input behind upstream: `old-tool` (1 commit, the oldest 40 days old)\n\
+             - 1 input behind upstream: `old-tool` (1 commit, locked revision 40 days old)\n\
              - 2 inputs at a dormant upstream: `quiet` (7 months), `quieter` (13 months)\n\n"
         );
     }

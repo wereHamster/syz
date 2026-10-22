@@ -95,16 +95,12 @@ pub async fn get_latest_commit_sha(
 }
 
 /// How a locked revision compares to the newest commit of the branch it is taken from.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamComparison {
     /// The revision is the newest commit.
     Identical,
     /// The branch has commits the revision doesn't.
-    Ahead {
-        commits: u64,
-        /// When the oldest of those was committed.
-        since: chrono::DateTime<chrono::Utc>,
-    },
+    Ahead { commits: u64 },
     /// The revision is not an ancestor of the branch, or the answer is not understood.
     Unrelated,
 }
@@ -112,22 +108,9 @@ pub enum UpstreamComparison {
 fn parse_comparison(comparison: &serde_json::Value) -> Option<UpstreamComparison> {
     match comparison.get("status")?.as_str()? {
         "identical" => Some(UpstreamComparison::Identical),
-        "ahead" | "diverged" => {
-            let since = comparison
-                .get("commits")?
-                .as_array()?
-                .first()?
-                .get("commit")?
-                .get("committer")?
-                .get("date")?
-                .as_str()?;
-            Some(UpstreamComparison::Ahead {
-                commits: comparison.get("ahead_by")?.as_u64()?,
-                since: chrono::DateTime::parse_from_rfc3339(since)
-                    .ok()?
-                    .with_timezone(&chrono::Utc),
-            })
-        }
+        "ahead" | "diverged" => Some(UpstreamComparison::Ahead {
+            commits: comparison.get("ahead_by")?.as_u64()?,
+        }),
         _ => Some(UpstreamComparison::Unrelated),
     }
 }
@@ -142,7 +125,8 @@ pub async fn compare_with_upstream(
     reference: Option<&str>,
 ) -> Option<UpstreamComparison> {
     let head = reference.map_or("HEAD".to_string(), |r| urlencoding::encode(r).into_owned());
-    // Only the oldest commit after `rev` and the total are wanted.
+    // Only the total is wanted, not the commits. Their order follows the history, not their
+    // dates, so the first one is not the oldest.
     let route = format!(
         "/repos/{}/{}/compare/{}...{}?per_page=1",
         owner, repo, rev, head
@@ -328,24 +312,15 @@ mod tests {
             Some(UpstreamComparison::Identical)
         );
         assert_eq!(
-            parse_comparison(&serde_json::json!({
-                "status": "ahead",
-                "ahead_by": 12,
-                "commits": [{ "commit": { "committer": { "date": "2026-03-04T10:00:00Z" } } }]
-            })),
-            Some(UpstreamComparison::Ahead {
-                commits: 12,
-                since: chrono::DateTime::parse_from_rfc3339("2026-03-04T10:00:00Z")
-                    .unwrap()
-                    .with_timezone(&chrono::Utc)
-            })
+            parse_comparison(&serde_json::json!({ "status": "ahead", "ahead_by": 12 })),
+            Some(UpstreamComparison::Ahead { commits: 12 })
         );
         assert_eq!(
             parse_comparison(&serde_json::json!({ "status": "behind" })),
             Some(UpstreamComparison::Unrelated)
         );
         assert_eq!(
-            parse_comparison(&serde_json::json!({ "status": "ahead", "ahead_by": 1 })),
+            parse_comparison(&serde_json::json!({ "status": "ahead" })),
             None
         );
     }
