@@ -60,7 +60,7 @@ tempfile = "3.27.0"
 flate2 = "1.1.9"
 ipld-core = "0.4.3"
 urlencoding = "2.1.3"
-atrium-api = "0.25.8"
+atrium-api = "0.26.0"
 atrium-xrpc-client = "0.5.15"
 git2 = { version = "0.21.0", features = ["vendored-openssl", "https", "ssh"] }
 clap = { version = "4.6.1", features = ["derive", "env"] }
