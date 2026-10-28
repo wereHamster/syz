@@ -17,7 +17,7 @@ const PNPM_DEFAULT_MINIMUM_RELEASE_AGE_MINUTES: i64 = 1440;
 /// default when the setting (or the file) is missing.
 pub(crate) fn effective_minimum_release_age(workspace: Option<&str>) -> chrono::Duration {
     let minutes = workspace
-        .and_then(|w| serde_yml::from_str::<WorkspaceConfig>(w).ok())
+        .and_then(|w| noyalib::from_str::<WorkspaceConfig>(w).ok())
         .and_then(|config| config.minimum_release_age)
         .unwrap_or(PNPM_DEFAULT_MINIMUM_RELEASE_AGE_MINUTES);
     chrono::Duration::minutes(minutes)
@@ -44,8 +44,8 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
 
     let mut locked_versions = std::collections::HashMap::new();
     if let Ok(lock_str) = repo.read_file("pnpm-lock.yaml").await {
-        if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(&lock_str) {
-            let mut extract_deps = |deps: &serde_yml::Value| {
+        if let Ok(lock_val) = noyalib::from_str::<noyalib::Value>(&lock_str) {
+            let mut extract_deps = |deps: &noyalib::Value| {
                 if let Some(map) = deps.as_mapping() {
                     for (k, v) in map {
                         {

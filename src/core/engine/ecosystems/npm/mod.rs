@@ -268,7 +268,7 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
             String,
             std::collections::HashMap<String, String>,
         > = std::collections::HashMap::new();
-        if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(lockfile.as_ref().unwrap()) {
+        if let Ok(lock_val) = noyalib::from_str::<noyalib::Value>(lockfile.as_ref().unwrap()) {
             if let Some(importers) = lock_val.get("importers").and_then(|i| i.as_mapping()) {
                 for (k, v) in importers {
                     {
@@ -975,7 +975,7 @@ impl NpmPatcher {
 
         // pnpm v11 no longer reads the `pnpm` field from package.json; overrides must go in
         // pnpm-workspace.yaml under the `overrides:` key.
-        let mut new_overrides = serde_yml::Mapping::new();
+        let mut new_overrides = noyalib::Mapping::new();
         for (module, fix_versions) in fixes {
             let active_majors = if let Some(vers) = ctx.before_versions.get(module) {
                 let mut majors = std::collections::HashSet::new();
@@ -1017,7 +1017,7 @@ impl NpmPatcher {
                     };
                     new_overrides.insert(
                         format!("{}@{}", module, fix_version.major),
-                        serde_yml::Value::String(format!("{}{}", req_prefix, fix_version)),
+                        noyalib::Value::String(format!("{}{}", req_prefix, fix_version)),
                     );
                 }
             }
@@ -1214,7 +1214,7 @@ async fn prune_matured_exclusions(
 /// lockfile is regenerated) temporary overrides.
 struct WorkspaceRenderer {
     base: Option<String>,
-    overrides: Option<serde_yml::Mapping>,
+    overrides: Option<noyalib::Mapping>,
 }
 
 impl WorkspaceRenderer {
@@ -1231,11 +1231,11 @@ impl WorkspaceRenderer {
             return Ok(content);
         };
 
-        let mut workspace_value: serde_yml::Value = content
+        let mut workspace_value: noyalib::Value = content
             .as_deref()
-            .and_then(|w| serde_yml::from_str(w).ok())
-            .filter(|v: &serde_yml::Value| v.is_mapping())
-            .unwrap_or_else(|| serde_yml::Value::Mapping(serde_yml::Mapping::new()));
+            .and_then(|w| noyalib::from_str(w).ok())
+            .filter(|v: &noyalib::Value| v.is_mapping())
+            .unwrap_or_else(|| noyalib::Value::Mapping(noyalib::Mapping::new()));
 
         if let Some(ws_map) = workspace_value.as_mapping_mut() {
             if let Some(existing) = ws_map.get_mut("overrides").and_then(|v| v.as_mapping_mut()) {
@@ -1243,11 +1243,11 @@ impl WorkspaceRenderer {
                     existing.insert(k.clone(), v.clone());
                 }
             } else {
-                ws_map.insert("overrides", serde_yml::Value::Mapping(overrides.clone()));
+                ws_map.insert("overrides", noyalib::Value::Mapping(overrides.clone()));
             }
         }
 
-        Ok(Some(serde_yml::to_string(&workspace_value)?))
+        Ok(Some(noyalib::to_string(&workspace_value)?))
     }
 
     fn write(&self, dir: &std::path::Path, exclusions: &PinnedVersions) -> Result<()> {
@@ -1485,7 +1485,7 @@ pub(crate) fn extract_versions_from_lock(
     lock_content: &str,
 ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
     let mut module_versions = std::collections::HashMap::new();
-    if let Ok(lock_val) = serde_yml::from_str::<serde_yml::Value>(lock_content) {
+    if let Ok(lock_val) = noyalib::from_str::<noyalib::Value>(lock_content) {
         if let Some(packages) = lock_val.get("packages").and_then(|p| p.as_mapping()) {
             for (k, _) in packages {
                 {

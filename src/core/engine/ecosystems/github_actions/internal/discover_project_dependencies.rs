@@ -24,7 +24,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
 pub fn parse_workflow_content(content: &str) -> Vec<DiscoveredDependency> {
     let mut deps = Vec::new();
 
-    // We can't decode the content as YAML because serde_yml does not preserve comments, and we
+    // We can't decode the content as YAML because noyalib does not preserve comments, and we
     // need the comment to extract the DiscoveredDependency requirement.
     let re = Regex::new(r"uses:\s+(?P<action>[a-zA-Z0-9_.-]+/[a-zA-Z0_./-]+)@(?P<ref>[^#\s]+)(?:[ \t]+#[ \t]*(?P<comment>v?[\d\.]+.*))?").unwrap();
 
