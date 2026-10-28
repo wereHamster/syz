@@ -79,3 +79,36 @@ pub async fn get_tag_for_sha(
     }
     None
 }
+
+#[cfg(all(test, feature = "integration-tests"))]
+mod tests {
+    use super::*;
+
+    // `actions/setup-ruby` is archived, so its tags don't change.
+
+    #[tokio::test]
+    async fn test_get_tag_for_sha() {
+        let github = GitHub::for_tests().await.unwrap();
+
+        let tag = get_tag_for_sha(
+            &github,
+            "actions/setup-ruby",
+            "5f29a1cd8dfebf420691c4c9a0e832e2fae5a526",
+        )
+        .await;
+
+        assert_eq!(tag.as_deref(), Some("v1.1.2"));
+    }
+
+    #[tokio::test]
+    async fn test_get_sha_for_tag() {
+        let github = GitHub::for_tests().await.unwrap();
+
+        let sha = get_sha_for_tag(&github, "actions/setup-ruby", "v1.1.2").await;
+
+        assert_eq!(
+            sha.as_deref(),
+            Some("5f29a1cd8dfebf420691c4c9a0e832e2fae5a526")
+        );
+    }
+}

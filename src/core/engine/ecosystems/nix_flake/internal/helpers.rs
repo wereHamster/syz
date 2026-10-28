@@ -457,4 +457,22 @@ mod tests {
         let header = r#"<https://example.com/next>; rel="next""#;
         assert!(parse_immutable_link(header).is_none());
     }
+
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_get_commit_count() {
+        let github = GitHub::for_tests().await.unwrap();
+
+        // `actions/setup-ruby` is archived: v1.1.2 to v1.1.3.
+        let count = get_commit_count(
+            &github,
+            "actions",
+            "setup-ruby",
+            "5f29a1cd8dfebf420691c4c9a0e832e2fae5a526",
+            "e932e7af67fc4a8fc77bd86b744acd4e42fe3543",
+        )
+        .await;
+
+        assert_eq!(count, Some(8));
+    }
 }

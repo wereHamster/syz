@@ -47,7 +47,9 @@ type InstallationSlot = Arc<Mutex<Option<InstallationLookup>>>;
 
 #[derive(Clone)]
 pub struct GitHub {
-    octocrab: Octocrab,
+    /// Authenticated as the GitHub App. `None` for a client built from a token, which can't
+    /// look up installations, so all its requests go through `public_client`.
+    app: Option<Octocrab>,
     public_client: Octocrab,
     installations: Arc<std::sync::Mutex<HashMap<String, InstallationSlot>>>,
 }
@@ -60,41 +62,93 @@ pub struct GitHubHttpResponse {
     pub body: String,
 }
 
+/// A client authenticated as the GitHub App given by `GITHUB_APP_ID` and
+/// `GITHUB_APP_PRIVATE_KEY`.
+fn app_from_env() -> Result<Octocrab> {
+    let app_id_str = std::env::var("GITHUB_APP_ID").context("GITHUB_APP_ID must be set")?;
+    let private_key =
+        std::env::var("GITHUB_APP_PRIVATE_KEY").context("GITHUB_APP_PRIVATE_KEY must be set")?;
+
+    let app_id: u64 = app_id_str
+        .parse()
+        .context("GITHUB_APP_ID must be a number")?;
+
+    let formatted_key = private_key.replace("\\n", "\n");
+    let key = EncodingKey::from_rsa_pem(formatted_key.as_bytes())
+        .context("Failed to parse GITHUB_APP_PRIVATE_KEY as RSA PEM")?;
+
+    Octocrab::builder()
+        .app(AppId(app_id), key)
+        .build()
+        .context("Failed to build client")
+}
+
+/// A client for the first installation of the GitHub App, or `None` if it has none or they
+/// can't be listed.
+async fn first_installation_client(app: &Octocrab) -> Option<Octocrab> {
+    let installations = app.apps().installations().send().await.ok()?;
+    let installation = installations.items.first()?;
+    app.installation(installation.id).ok()
+}
+
 impl GitHub {
     pub async fn new() -> Result<GitHub> {
-        let app_id_str = std::env::var("GITHUB_APP_ID").context("GITHUB_APP_ID must be set")?;
-        let private_key = std::env::var("GITHUB_APP_PRIVATE_KEY")
-            .context("GITHUB_APP_PRIVATE_KEY must be set")?;
+        let app = app_from_env()?;
 
-        let app_id: u64 = app_id_str
-            .parse()
-            .context("GITHUB_APP_ID must be a number")?;
+        // Public queries use the first installation's token, or go out anonymously when there
+        // is none.
+        let public_client = match first_installation_client(&app).await {
+            Some(client) => client,
+            None => Octocrab::builder().build().unwrap(),
+        };
 
-        let formatted_key = private_key.replace("\\n", "\n");
-        let key = EncodingKey::from_rsa_pem(formatted_key.as_bytes())
-            .context("Failed to parse GITHUB_APP_PRIVATE_KEY as RSA PEM")?;
+        Ok(Self::with_clients(Some(app), public_client))
+    }
 
-        let octocrab = Octocrab::builder()
-            .app(AppId(app_id), key)
+    /// A client for tests that talk to GitHub. Authenticates as the GitHub App, like `syzd`,
+    /// when `GITHUB_APP_ID` is set. Otherwise it uses `GITHUB_TOKEN`, which only the CI
+    /// workflow is meant to set, and makes public reads only.
+    ///
+    /// Fails rather than going out anonymously, as GitHub's anonymous rate limit would make
+    /// the tests flaky.
+    #[cfg(test)]
+    pub async fn for_tests() -> Result<GitHub> {
+        if std::env::var_os("GITHUB_APP_ID").is_some() {
+            let app = app_from_env()?;
+            let public_client = first_installation_client(&app)
+                .await
+                .context("The GitHub App has no installation to make public requests with")?;
+            return Ok(Self::with_clients(Some(app), public_client));
+        }
+
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            return Self::from_token(token);
+        }
+
+        anyhow::bail!(
+            "Tests that talk to GitHub need the GitHub App's credentials. Set GITHUB_APP_ID \
+             and GITHUB_APP_PRIVATE_KEY as for syzd."
+        )
+    }
+
+    /// A client that authenticates with `token` instead of as the GitHub App. It finds no
+    /// installations, so it can only make public reads.
+    #[cfg(test)]
+    fn from_token(token: String) -> Result<GitHub> {
+        let public_client = Octocrab::builder()
+            .personal_token(token)
             .build()
             .context("Failed to build client")?;
 
-        let mut public_client = Octocrab::builder().build().unwrap();
+        Ok(Self::with_clients(None, public_client))
+    }
 
-        // Try to fetch installations and use the first one's token for public queries
-        if let Ok(installations) = octocrab.apps().installations().send().await {
-            if let Some(inst) = installations.items.first() {
-                if let Ok(inst_client) = octocrab.installation(inst.id) {
-                    public_client = inst_client;
-                }
-            }
-        }
-
-        Ok(GitHub {
-            octocrab,
+    fn with_clients(app: Option<Octocrab>, public_client: Octocrab) -> GitHub {
+        GitHub {
+            app,
             public_client,
             installations: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        })
+        }
     }
 
     /// Returns the ID of the GitHub App installation for the `owner` account, or `None` when
@@ -106,7 +160,7 @@ impl GitHub {
     /// A missing one is looked up again after [`INSTALLATION_MISS_RETRY`], so a new
     /// installation is found quickly but misses don't cost a request each. Failed lookups are
     /// not cached.
-    async fn installation_id(&self, owner: &str) -> Result<Option<InstallationId>> {
+    async fn installation_id(&self, app: &Octocrab, owner: &str) -> Result<Option<InstallationId>> {
         let owner = owner.to_lowercase();
 
         // The map lock is only held to find the owner's slot, never across a request.
@@ -120,7 +174,7 @@ impl GitHub {
             return Ok(lookup.id);
         }
 
-        let id = self.fetch_installation_id(&owner).await?;
+        let id = Self::fetch_installation_id(app, &owner).await?;
         *lookup = Some(InstallationLookup {
             id,
             fetched_at: Instant::now(),
@@ -131,13 +185,13 @@ impl GitHub {
 
     /// Asks GitHub for the installation of the `owner` account. The account may be a user
     /// or an organization, so the organization is tried if there is no user installation.
-    async fn fetch_installation_id(&self, owner: &str) -> Result<Option<InstallationId>> {
+    async fn fetch_installation_id(app: &Octocrab, owner: &str) -> Result<Option<InstallationId>> {
         fn not_found(e: &octocrab::Error) -> bool {
             matches!(e, octocrab::Error::GitHub { source, .. }
                 if source.status_code == reqwest::StatusCode::NOT_FOUND)
         }
 
-        let apps = self.octocrab.apps();
+        let apps = app.apps();
 
         match apps.get_user_installation(owner).await {
             Ok(installation) => return Ok(Some(installation.id)),
@@ -165,12 +219,15 @@ impl GitHub {
     }
 
     /// Returns an installation-scoped client for `owner`, or `None` when the GitHub App
-    /// isn't installed for them.
+    /// isn't installed for them or the client isn't the app's.
     async fn installation_client(&self, owner: &str) -> Result<Option<Octocrab>> {
-        match self.installation_id(owner).await? {
+        let Some(app) = &self.app else {
+            return Ok(None);
+        };
+
+        match self.installation_id(app, owner).await? {
             Some(id) => Ok(Some(
-                self.octocrab
-                    .installation(id)
+                app.installation(id)
                     .context("Failed to create installation client")?,
             )),
             None => Ok(None),
@@ -178,11 +235,15 @@ impl GitHub {
     }
 
     /// Mints a short-lived token that can read the contents of the repositories the GitHub App
-    /// may access for `owner`, or `None` when the app isn't installed for them. The token is
-    /// meant for tools that talk to GitHub themselves (e.g. `nix`), so it is limited to
-    /// `contents: read`, whatever else the installation is allowed to do.
+    /// may access for `owner`, or `None` when the app isn't installed for them or the client
+    /// isn't the app's. The token is meant for tools that talk to GitHub themselves (e.g.
+    /// `nix`), so it is limited to `contents: read`, whatever else the installation is allowed
+    /// to do.
     pub async fn contents_read_token(&self, owner: &str) -> Result<Option<String>> {
-        let Some(id) = self.installation_id(owner).await? else {
+        let Some(app) = &self.app else {
+            return Ok(None);
+        };
+        let Some(id) = self.installation_id(app, owner).await? else {
             return Ok(None);
         };
 
@@ -193,8 +254,7 @@ impl GitHub {
             )])),
             ..Default::default()
         };
-        let token = self
-            .octocrab
+        let token = app
             .apps()
             .create_installation_access_token(id, &request)
             .await
@@ -917,5 +977,40 @@ impl ProjectRepositoryMutator for GitHubProjectRepositoryMutator {
         let _ = self.delete_branch(branch_name).await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_token_client_has_no_installations() {
+        // Nothing here reaches GitHub: a token client doesn't look installations up.
+        let github = GitHub::from_token("token".to_string()).unwrap();
+
+        assert!(github.contents_read_token("NixOS").await.unwrap().is_none());
+        assert!(github
+            .project_repository_view("NixOS".to_string(), "nixpkgs".to_string())
+            .await
+            .is_err());
+    }
+
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_get_foreign_file_at_revision() {
+        let github = GitHub::for_tests().await.unwrap();
+
+        let version = github
+            .get_foreign_file(
+                "NixOS",
+                "nixpkgs",
+                ".version",
+                Some("ac62194c3917d5f474c1a844b6fd6da2db95077d"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(version.as_deref(), Some("25.05"));
     }
 }
