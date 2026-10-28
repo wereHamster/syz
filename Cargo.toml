@@ -20,10 +20,12 @@ name = "syzctl"
 path = "src/bin/syzctl.rs"
 
 [features]
-# Gates tests that require live network access (crates/release-notes/tests).
-# CI runs them with `--all-features` and the workflow's GITHUB_TOKEN. Run
-# locally with:
-#   GITHUB_TOKEN=... cargo test -p release-notes --features integration-tests
+# Gates tests that require live network access to GitHub. They get their
+# client from `GitHub::for_tests`, which authenticates as the GitHub App when
+# GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are set, as for syzd. CI runs them
+# with `--all-features` and the workflow's GITHUB_TOKEN instead. Run locally
+# with the app's credentials set:
+#   cargo test --features integration-tests
 integration-tests = []
 
 [dependencies]
