@@ -151,7 +151,7 @@ fn find_block(lines: &[String]) -> Block {
     let after_colon = &lines[line][lines[line].find(':').unwrap() + 1..];
     let (inline, _) = split_comment(after_colon);
     if !inline.is_empty() {
-        let entries = serde_yml::from_str::<Vec<String>>(inline).unwrap_or_default();
+        let entries = noyalib::from_str::<Vec<String>>(inline).unwrap_or_default();
         return Block::Inline { line, entries };
     }
 
