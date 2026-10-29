@@ -27,6 +27,9 @@ pub struct Application {
 
     /// Whether `start` also launches the daily audit of all projects.
     audit_schedule: bool,
+
+    /// Whether the application also logs to stdout.
+    stdout_logging: bool,
 }
 
 impl Application {
@@ -69,12 +72,20 @@ impl Application {
             dispatcher,
 
             audit_schedule: true,
+            stdout_logging: true,
         })
     }
 
     /// Choose whether `start` launches the daily audit of all projects (on by default).
     pub fn with_audit_schedule(mut self, enabled: bool) -> Self {
         self.audit_schedule = enabled;
+        self
+    }
+
+    /// Choose whether the application also logs to stdout (on by default). Turn it off when
+    /// something else draws on the terminal, the TUI for example.
+    pub fn with_stdout_logging(mut self, enabled: bool) -> Self {
+        self.stdout_logging = enabled;
         self
     }
 
@@ -90,7 +101,7 @@ impl Application {
         let subscriber = tracing_subscriber::registry()
             .with(filter)
             .with(log_layer)
-            .with(tracing_subscriber::fmt::layer());
+            .with(self.stdout_logging.then(tracing_subscriber::fmt::layer));
         let dispatch = tracing::Dispatch::new(subscriber);
 
         use tracing::instrument::WithSubscriber;
@@ -113,6 +124,12 @@ impl Application {
 
     pub fn handle(&self) -> Handle {
         self.context.handle.clone()
+    }
+
+    /// The dispatcher that runs the jobs. It stays usable after `start`, to wait for the jobs
+    /// to finish for example.
+    pub fn dispatcher(&self) -> Dispatcher {
+        self.dispatcher.clone()
     }
 
     pub fn store(&self) -> &Store {
@@ -181,16 +198,12 @@ impl Context {
     #[cfg(test)]
     pub fn for_tests(store: Store) -> (Self, broadcast::Receiver<Event>) {
         // Messages don't send to the mailbox, so nothing needs to receive from it.
-        let (mailbox, _) = mpsc::channel(1);
-        let (events, receiver) = broadcast::channel(1000);
+        let (handle, _) = Handle::for_tests(store.clone());
+        let receiver = handle.subscribe();
 
         let context = Self {
-            store: store.clone(),
-            handle: Handle {
-                store,
-                mailbox,
-                events,
-            },
+            store,
+            handle,
             http_agent: HttpAgent::new(),
         };
         (context, receiver)
@@ -210,6 +223,21 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle on the given store, without a main loop. The test receives what is sent to the
+    /// mailbox, and the loop counts as stopped once it drops the receiver.
+    #[cfg(test)]
+    pub fn for_tests(store: Store) -> (Self, mpsc::Receiver<Message>) {
+        let (mailbox, receiver) = mpsc::channel(100);
+        let (events, _) = broadcast::channel(1000);
+
+        let handle = Self {
+            store,
+            mailbox,
+            events,
+        };
+        (handle, receiver)
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }
@@ -236,6 +264,32 @@ impl Handle {
             .send(message)
             .await
             .map_err(|_| anyhow::anyhow!("Application mailbox unreachable"))?;
+
+        Ok(())
+    }
+
+    /// Like `send`, but waits until the main loop has executed the message. The jobs it asks
+    /// for may still be running.
+    /// Resolves once the main loop has stopped, after which it executes no more messages.
+    pub async fn closed(&self) {
+        self.mailbox.closed().await
+    }
+
+    pub async fn send_and_wait(&self, message_id: String, payload: Payload) -> Result<()> {
+        let (processed, executed) = tokio::sync::oneshot::channel();
+        let message = Message {
+            message_id,
+            payload,
+            processed: Some(processed),
+        };
+
+        self.mailbox
+            .send(message)
+            .await
+            .map_err(|_| anyhow::anyhow!("Application mailbox unreachable"))?;
+        executed
+            .await
+            .map_err(|_| anyhow::anyhow!("Application loop exited before executing the message"))?;
 
         Ok(())
     }

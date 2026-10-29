@@ -149,6 +149,9 @@ pub enum Event {
     Term(crossterm::event::Event),
     Core(crate::core::event::Event),
     Draw,
+
+    /// The TUI can't go on, `run_app` exits with this error.
+    Fatal(String),
 }
 
 impl App {
@@ -267,6 +270,9 @@ impl App {
             Event::Draw => {
                 self.dirty = true;
             }
+
+            // Handled by `run_app`, which never passes it on.
+            Event::Fatal(_) => {}
         }
         external_effects
     }

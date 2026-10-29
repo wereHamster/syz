@@ -73,6 +73,7 @@ sha2 = "0.11.1"
 hex = "0.4.3"
 tar = "0.4.46"
 http-body-util = "0.1.5"
+dirs = "7.0.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
