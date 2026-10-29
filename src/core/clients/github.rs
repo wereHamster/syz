@@ -45,11 +45,19 @@ impl InstallationLookup {
 /// The lookup result of one owner. Its lock is held while the lookup is in flight.
 type InstallationSlot = Arc<Mutex<Option<InstallationLookup>>>;
 
+/// How `syzd` authenticates to GitHub.
+#[derive(Clone)]
+enum Auth {
+    /// As the GitHub App. A repository is accessed through the installation of its owner.
+    App(Octocrab),
+    /// With a personal access token. `public_client` carries it and is used for every
+    /// repository.
+    Token(String),
+}
+
 #[derive(Clone)]
 pub struct GitHub {
-    /// Authenticated as the GitHub App. `None` for a client built from a token, which can't
-    /// look up installations, so all its requests go through `public_client`.
-    app: Option<Octocrab>,
+    auth: Auth,
     public_client: Octocrab,
     installations: Arc<std::sync::Mutex<HashMap<String, InstallationSlot>>>,
 }
@@ -91,23 +99,43 @@ async fn first_installation_client(app: &Octocrab) -> Option<Octocrab> {
     app.installation(installation.id).ok()
 }
 
+/// The value of the environment variable `name`, or `None` when it is unset or empty.
+fn non_empty_var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
 impl GitHub {
+    /// A client authenticated as the GitHub App when `GITHUB_APP_ID` is set, or else with the
+    /// personal access token in `SYZD_GITHUB_TOKEN`.
     pub async fn new() -> Result<GitHub> {
-        let app = app_from_env()?;
+        if std::env::var_os("GITHUB_APP_ID").is_some() {
+            let app = app_from_env()?;
 
-        // Public queries use the first installation's token, or go out anonymously when there
-        // is none.
-        let public_client = match first_installation_client(&app).await {
-            Some(client) => client,
-            None => Octocrab::builder().build().unwrap(),
-        };
+            // Public queries use the first installation's token, or go out anonymously when
+            // there is none.
+            let public_client = match first_installation_client(&app).await {
+                Some(client) => client,
+                None => Octocrab::builder().build().unwrap(),
+            };
 
-        Ok(Self::with_clients(Some(app), public_client))
+            tracing::info!("authenticating to GitHub as the GitHub App");
+            return Ok(Self::with_clients(Auth::App(app), public_client));
+        }
+
+        if let Some(token) = non_empty_var("SYZD_GITHUB_TOKEN") {
+            tracing::info!("authenticating to GitHub with SYZD_GITHUB_TOKEN");
+            return Self::from_token(token);
+        }
+
+        anyhow::bail!(
+            "No GitHub credentials. Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY to \
+             authenticate as a GitHub App, or SYZD_GITHUB_TOKEN to use a personal access token."
+        )
     }
 
-    /// A client for tests that talk to GitHub. Authenticates as the GitHub App, like `syzd`,
-    /// when `GITHUB_APP_ID` is set. Otherwise it uses `GITHUB_TOKEN`, which only the CI
-    /// workflow is meant to set, and makes public reads only.
+    /// A client for tests that talk to GitHub. Authenticates like `syzd` when `GITHUB_APP_ID`
+    /// or `SYZD_GITHUB_TOKEN` is set. Otherwise it uses `GITHUB_TOKEN`, which only the CI
+    /// workflow is meant to set.
     ///
     /// Fails rather than going out anonymously, as GitHub's anonymous rate limit would make
     /// the tests flaky.
@@ -118,34 +146,37 @@ impl GitHub {
             let public_client = first_installation_client(&app)
                 .await
                 .context("The GitHub App has no installation to make public requests with")?;
-            return Ok(Self::with_clients(Some(app), public_client));
+            return Ok(Self::with_clients(Auth::App(app), public_client));
         }
 
-        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        if let Some(token) = non_empty_var("SYZD_GITHUB_TOKEN") {
+            return Self::from_token(token);
+        }
+
+        if let Some(token) = non_empty_var("GITHUB_TOKEN") {
             return Self::from_token(token);
         }
 
         anyhow::bail!(
-            "Tests that talk to GitHub need the GitHub App's credentials. Set GITHUB_APP_ID \
-             and GITHUB_APP_PRIVATE_KEY as for syzd."
+            "Tests that talk to GitHub need credentials. Set GITHUB_APP_ID and \
+             GITHUB_APP_PRIVATE_KEY, or SYZD_GITHUB_TOKEN, as for syzd."
         )
     }
 
-    /// A client that authenticates with `token` instead of as the GitHub App. It finds no
-    /// installations, so it can only make public reads.
-    #[cfg(test)]
+    /// A client that authenticates with the personal access token `token` for every
+    /// repository, including by tools that talk to GitHub themselves.
     fn from_token(token: String) -> Result<GitHub> {
         let public_client = Octocrab::builder()
-            .personal_token(token)
+            .personal_token(token.clone())
             .build()
             .context("Failed to build client")?;
 
-        Ok(Self::with_clients(None, public_client))
+        Ok(Self::with_clients(Auth::Token(token), public_client))
     }
 
-    fn with_clients(app: Option<Octocrab>, public_client: Octocrab) -> GitHub {
+    fn with_clients(auth: Auth, public_client: Octocrab) -> GitHub {
         GitHub {
-            app,
+            auth,
             public_client,
             installations: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
@@ -218,11 +249,13 @@ impl GitHub {
         }
     }
 
-    /// Returns an installation-scoped client for `owner`, or `None` when the GitHub App
-    /// isn't installed for them or the client isn't the app's.
+    /// Returns a client that may access the repositories of `owner`: an installation-scoped
+    /// one, or `None` when the GitHub App isn't installed for them. With a personal access
+    /// token, it is the token's client, whatever the owner.
     async fn installation_client(&self, owner: &str) -> Result<Option<Octocrab>> {
-        let Some(app) = &self.app else {
-            return Ok(None);
+        let app = match &self.auth {
+            Auth::App(app) => app,
+            Auth::Token { .. } => return Ok(Some(self.public_client.clone())),
         };
 
         match self.installation_id(app, owner).await? {
@@ -235,13 +268,16 @@ impl GitHub {
     }
 
     /// Mints a short-lived token that can read the contents of the repositories the GitHub App
-    /// may access for `owner`, or `None` when the app isn't installed for them or the client
-    /// isn't the app's. The token is meant for tools that talk to GitHub themselves (e.g.
-    /// `nix`), so it is limited to `contents: read`, whatever else the installation is allowed
-    /// to do.
+    /// may access for `owner`, or `None` when the app isn't installed for them. The token is
+    /// meant for tools that talk to GitHub themselves (e.g. `nix`), so it is limited to
+    /// `contents: read`, whatever else the installation is allowed to do.
+    ///
+    /// A personal access token can't be narrowed down like that, so with one, this is the
+    /// personal access token itself, with all of its permissions.
     pub async fn contents_read_token(&self, owner: &str) -> Result<Option<String>> {
-        let Some(app) = &self.app else {
-            return Ok(None);
+        let app = match &self.auth {
+            Auth::App(app) => app,
+            Auth::Token(token) => return Ok(Some(token.clone())),
         };
         let Some(id) = self.installation_id(app, owner).await? else {
             return Ok(None);
@@ -265,6 +301,7 @@ impl GitHub {
 
     /// Returns a client authorized for `owner`, falling back to `public_client` when no
     /// installation covers that owner (e.g. a public repo with no app installation at all).
+    /// With a personal access token, it is always the token's client.
     async fn client_for_owner(&self, owner: &str) -> Result<Octocrab> {
         Ok(self
             .installation_client(owner)
@@ -985,15 +1022,22 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_token_client_has_no_installations() {
+    async fn test_token_client_accesses_every_owner() {
         // Nothing here reaches GitHub: a token client doesn't look installations up.
         let github = GitHub::from_token("token".to_string()).unwrap();
 
-        assert!(github.contents_read_token("NixOS").await.unwrap().is_none());
+        assert_eq!(
+            github
+                .contents_read_token("NixOS")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("token")
+        );
         assert!(github
             .project_repository_view("NixOS".to_string(), "nixpkgs".to_string())
             .await
-            .is_err());
+            .is_ok());
     }
 
     #[cfg(feature = "integration-tests")]
