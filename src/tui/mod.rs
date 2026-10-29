@@ -8,19 +8,29 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use ratatui::{backend::CrosstermBackend, prelude::*};
 use std::{io, time::Duration};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{broadcast::error::RecvError, mpsc},
+    task::JoinHandle,
+};
 
+use crate::core::application::Handle;
+use crate::core::database::pk;
+use crate::core::message::Payload;
 use crate::tui::app::Event;
 
 mod app;
 pub mod views;
 
-pub struct Options {
-    pub url: String,
-    pub token: String,
+/// Where the TUI gets its state from and sends its messages to.
+pub enum Connection {
+    /// A syzd server, reached over HTTP.
+    Remote { url: String, token: String },
+
+    /// An application running in this process.
+    Local(Handle),
 }
 
-pub async fn run(options: Options) -> Result<()> {
+pub async fn run(connection: Connection) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -29,7 +39,7 @@ pub async fn run(options: Options) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Main loop
-    let res = run_app(options, &mut terminal).await;
+    let res = run_app(connection, &mut terminal).await;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -43,7 +53,7 @@ pub async fn run(options: Options) -> Result<()> {
     Ok(())
 }
 
-async fn run_app<B: Backend>(options: Options, terminal: &mut Terminal<B>) -> Result<()>
+async fn run_app<B: Backend>(connection: Connection, terminal: &mut Terminal<B>) -> Result<()>
 where
     <B as Backend>::Error: Send + Sync + 'static,
 {
@@ -55,12 +65,10 @@ where
     pump_term_events(tx.clone());
 
     let (payload_tx, payload_rx) = mpsc::channel(100);
-    pump_core_events(
-        tx.clone(),
-        options.url.clone(),
-        options.token.clone(),
-        payload_rx,
-    );
+    match connection {
+        Connection::Remote { url, token } => pump_remote_events(tx.clone(), url, token, payload_rx),
+        Connection::Local(handle) => pump_local_events(tx.clone(), handle, payload_rx),
+    }
 
     let mut redraw_timer_handle: Option<JoinHandle<()>> = None;
 
@@ -111,11 +119,11 @@ fn pump_term_events(tx: mpsc::Sender<app::Event>) {
     });
 }
 
-fn pump_core_events(
+fn pump_remote_events(
     tx: mpsc::Sender<app::Event>,
     url: String,
     token: String,
-    mut payload_rx: mpsc::Receiver<crate::core::message::Payload>,
+    mut payload_rx: mpsc::Receiver<Payload>,
 ) {
     tokio::spawn(async move {
         let client = reqwest::Client::new();
@@ -263,6 +271,79 @@ fn pump_core_events(
             }
 
             tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+}
+
+fn pump_local_events(
+    tx: mpsc::Sender<app::Event>,
+    handle: Handle,
+    mut payload_rx: mpsc::Receiver<Payload>,
+) {
+    tokio::spawn(async move {
+        // Subscribe before asking for the state, so that no change in between is missed.
+        let mut events = handle.subscribe();
+        if let Err(e) = handle.send(pk(), Payload::Bootstrap).await {
+            let _ = tx
+                .send(Event::Core(crate::core::event::Event::Trace {
+                    level: tracing::Level::ERROR,
+                    message: format!("Failed to send Bootstrap: {:#}", e),
+                }))
+                .await;
+            return;
+        }
+
+        loop {
+            tokio::select! {
+                res = events.recv() => {
+                    match res {
+                        Ok(ev) => {
+                            if tx.send(Event::Core(ev)).await.is_err() {
+                                return;
+                            }
+                        }
+                        // The TUI fell behind and missed changes, ask for the whole state again.
+                        Err(RecvError::Lagged(missed)) => {
+                            let _ = tx
+                                .send(Event::Core(crate::core::event::Event::Trace {
+                                    level: tracing::Level::WARN,
+                                    message: format!("Missed {} events, reloading the state", missed),
+                                }))
+                                .await;
+                            if let Err(e) = handle.send(pk(), Payload::Bootstrap).await {
+                                let _ = tx
+                                    .send(Event::Core(crate::core::event::Event::Trace {
+                                        level: tracing::Level::ERROR,
+                                        message: format!("Failed to send Bootstrap: {:#}", e),
+                                    }))
+                                    .await;
+                            }
+                        }
+                        Err(RecvError::Closed) => {
+                            let _ = tx
+                                .send(Event::Core(crate::core::event::Event::Trace {
+                                    level: tracing::Level::ERROR,
+                                    message: "The application stopped broadcasting events".into(),
+                                }))
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                res = payload_rx.recv() => {
+                    match res {
+                        Some(payload) => {
+                            if let Err(e) = handle.send(pk(), payload).await {
+                                let _ = tx.send(Event::Core(crate::core::event::Event::Trace {
+                                    level: tracing::Level::ERROR,
+                                    message: format!("Failed to send payload: {:#}", e),
+                                })).await;
+                            }
+                        }
+                        None => return,
+                    }
+                }
+            }
         }
     });
 }

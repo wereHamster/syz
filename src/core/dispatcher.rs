@@ -144,6 +144,14 @@ impl Dispatcher {
             .collect()
     }
 
+    /// Wait until no lane has work. A lane keeps its work until the main loop has applied the
+    /// outcome of its last job, so the jobs that outcome asks for are waited for as well.
+    pub async fn idle(&self) {
+        while !self.inner.lanes.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Run the lane's jobs one after the other, until it has none left.
     async fn drain(self, key: LaneKey) {
         loop {
@@ -299,9 +307,7 @@ mod tests {
 
         /// Wait until every lane ran out of jobs.
         async fn settle(&self) {
-            while !self.dispatcher.lanes().is_empty() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
+            self.dispatcher.idle().await;
         }
     }
 
