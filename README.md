@@ -34,8 +34,6 @@ Use this when you can't or don't want to create a GitHub App.
 It is used only when `GITHUB_APP_ID` is not set.
 
 - `SYZD_GITHUB_TOKEN`: A personal access token that `syzd` uses for every repository.
-- `SYZD_GITHUB_NIX_TOKEN` (optional): A read-only token handed to `nix` when it fetches flake inputs.
-  Without it, `nix` gets `SYZD_GITHUB_TOKEN`.
 
 A fine-grained token needs these repository permissions:
 
@@ -52,6 +50,8 @@ Compared to a GitHub App, keep in mind:
 - Branches, commits, and pull requests are created as the token's user.
   A dedicated machine account keeps them apart from your own.
 - All repositories share the token's rate limit of 5,000 requests per hour.
+- Tools that talk to GitHub themselves, such as `nix` when it fetches flake inputs, get the token with all of its permissions.
+  With a GitHub App, they get a short-lived token that can only read repository contents.
 - The token expires and must be replaced by hand.
 - Each repository, or its organization, needs a webhook that sends `push` events to `/github/webhook` with the `GITHUB_WEBHOOK_SECRET`.
 

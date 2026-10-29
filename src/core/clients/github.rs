@@ -52,10 +52,7 @@ enum Auth {
     App(Octocrab),
     /// With a personal access token. `public_client` carries it and is used for every
     /// repository.
-    Token {
-        /// The token handed to tools that talk to GitHub themselves (e.g. `nix`).
-        contents_read_token: String,
-    },
+    Token(String),
 }
 
 #[derive(Clone)]
@@ -127,7 +124,7 @@ impl GitHub {
 
         if let Some(token) = non_empty_var("SYZD_GITHUB_TOKEN") {
             tracing::info!("authenticating to GitHub with SYZD_GITHUB_TOKEN");
-            return Self::from_token(token, non_empty_var("SYZD_GITHUB_NIX_TOKEN"));
+            return Self::from_token(token);
         }
 
         anyhow::bail!(
@@ -153,11 +150,11 @@ impl GitHub {
         }
 
         if let Some(token) = non_empty_var("SYZD_GITHUB_TOKEN") {
-            return Self::from_token(token, None);
+            return Self::from_token(token);
         }
 
         if let Some(token) = non_empty_var("GITHUB_TOKEN") {
-            return Self::from_token(token, None);
+            return Self::from_token(token);
         }
 
         anyhow::bail!(
@@ -167,18 +164,14 @@ impl GitHub {
     }
 
     /// A client that authenticates with the personal access token `token` for every
-    /// repository. Tools that talk to GitHub themselves get `contents_read_token` when there
-    /// is one, and `token` otherwise.
-    fn from_token(token: String, contents_read_token: Option<String>) -> Result<GitHub> {
+    /// repository, including by tools that talk to GitHub themselves.
+    fn from_token(token: String) -> Result<GitHub> {
         let public_client = Octocrab::builder()
             .personal_token(token.clone())
             .build()
             .context("Failed to build client")?;
 
-        let auth = Auth::Token {
-            contents_read_token: contents_read_token.unwrap_or(token),
-        };
-        Ok(Self::with_clients(auth, public_client))
+        Ok(Self::with_clients(Auth::Token(token), public_client))
     }
 
     fn with_clients(auth: Auth, public_client: Octocrab) -> GitHub {
@@ -279,14 +272,12 @@ impl GitHub {
     /// meant for tools that talk to GitHub themselves (e.g. `nix`), so it is limited to
     /// `contents: read`, whatever else the installation is allowed to do.
     ///
-    /// A personal access token can't be narrowed down like that, so with one, this is
-    /// `SYZD_GITHUB_NIX_TOKEN` when set, and the personal access token itself otherwise.
+    /// A personal access token can't be narrowed down like that, so with one, this is the
+    /// personal access token itself, with all of its permissions.
     pub async fn contents_read_token(&self, owner: &str) -> Result<Option<String>> {
         let app = match &self.auth {
             Auth::App(app) => app,
-            Auth::Token {
-                contents_read_token,
-            } => return Ok(Some(contents_read_token.clone())),
+            Auth::Token(token) => return Ok(Some(token.clone())),
         };
         let Some(id) = self.installation_id(app, owner).await? else {
             return Ok(None);
@@ -1033,7 +1024,7 @@ mod tests {
     #[tokio::test]
     async fn test_token_client_accesses_every_owner() {
         // Nothing here reaches GitHub: a token client doesn't look installations up.
-        let github = GitHub::from_token("token".to_string(), None).unwrap();
+        let github = GitHub::from_token("token".to_string()).unwrap();
 
         assert_eq!(
             github
@@ -1047,21 +1038,6 @@ mod tests {
             .project_repository_view("NixOS".to_string(), "nixpkgs".to_string())
             .await
             .is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_token_client_hands_out_the_contents_read_token() {
-        let github =
-            GitHub::from_token("token".to_string(), Some("read-token".to_string())).unwrap();
-
-        assert_eq!(
-            github
-                .contents_read_token("NixOS")
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("read-token")
-        );
     }
 
     #[cfg(feature = "integration-tests")]
