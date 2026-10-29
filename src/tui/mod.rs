@@ -31,6 +31,8 @@ pub enum Connection {
 }
 
 pub async fn run(connection: Connection) -> Result<()> {
+    install_panic_hook();
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -41,16 +43,45 @@ pub async fn run(connection: Connection) -> Result<()> {
     // Main loop
     let res = run_app(connection, &mut terminal).await;
 
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    restore_terminal()?;
 
     if let Err(err) = &res {
         eprintln!("{:?}", err);
     }
 
     Ok(())
+}
+
+fn restore_terminal() -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show)
+}
+
+/// Make panics leave the terminal usable, for the rest of the process.
+///
+/// A panic of the TUI itself unwinds past the code that restores the terminal, and would leave
+/// it in raw mode on the alternate screen, so the hook restores it before the message is
+/// printed. Other threads panic in tasks whose panics are caught, jobs for example, and the TUI
+/// keeps running. Their message goes to the log if they log somewhere, instead of over the
+/// screen.
+fn install_panic_hook() {
+    let tui_thread = std::thread::current().id();
+    let previous = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |info| {
+        let logs = tracing::dispatcher::get_default(|dispatch| {
+            !dispatch.is::<tracing::subscriber::NoSubscriber>()
+        });
+
+        if std::thread::current().id() == tui_thread {
+            let _ = restore_terminal();
+            previous(info);
+        } else if logs {
+            tracing::error!("{}", info);
+        } else {
+            previous(info);
+        }
+    }));
 }
 
 async fn run_app<B: Backend>(connection: Connection, terminal: &mut Terminal<B>) -> Result<()>
@@ -73,6 +104,10 @@ where
     let mut redraw_timer_handle: Option<JoinHandle<()>> = None;
 
     while let Some(event) = rx.recv().await {
+        if let Event::Fatal(message) = event {
+            anyhow::bail!(message);
+        }
+
         let effects = app.update(event);
 
         for effect in effects {
@@ -285,19 +320,29 @@ fn pump_local_events(
         let mut events = handle.subscribe();
         if let Err(e) = handle.send(pk(), Payload::Bootstrap).await {
             let _ = tx
-                .send(Event::Core(crate::core::event::Event::Trace {
-                    level: tracing::Level::ERROR,
-                    message: format!("Failed to send Bootstrap: {:#}", e),
-                }))
+                .send(Event::Fatal(format!("Failed to send Bootstrap: {:#}", e)))
                 .await;
             return;
         }
 
+        // The last error the application logged, which likely explains why it stopped.
+        let mut last_error = None;
+
         loop {
             tokio::select! {
+                // Events first, so that the error logged by a stopping loop is seen.
+                biased;
+
                 res = events.recv() => {
                     match res {
                         Ok(ev) => {
+                            if let crate::core::event::Event::Trace {
+                                level: tracing::Level::ERROR,
+                                message,
+                            } = &ev
+                            {
+                                last_error = Some(message.clone());
+                            }
                             if tx.send(Event::Core(ev)).await.is_err() {
                                 return;
                             }
@@ -343,7 +388,99 @@ fn pump_local_events(
                         None => return,
                     }
                 }
+                // Its state would go stale from here on, so the TUI can't go on.
+                () = handle.closed() => {
+                    let message = match last_error {
+                        Some(error) => format!("The application loop stopped, the last error it logged: {}", error),
+                        None => "The application loop stopped".to_string(),
+                    };
+                    let _ = tx.send(Event::Fatal(message)).await;
+                    return;
+                }
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::database::Database;
+    use crate::core::event::Event as CoreEvent;
+    use crate::core::message::Message;
+    use crate::core::store::Store;
+
+    /// The local pump, on a handle without a main loop.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        handle: Handle,
+
+        /// What the pump sends to the application. Dropping it stops the "loop".
+        mailbox: mpsc::Receiver<Message>,
+
+        /// What the pump sends to the TUI.
+        events: mpsc::Receiver<Event>,
+
+        /// Kept open, so that only the stop of the loop ends the pump.
+        _payloads: mpsc::Sender<Payload>,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(Database::open(dir.path()).await.unwrap());
+            let (handle, mailbox) = Handle::for_tests(store);
+
+            let (tx, events) = mpsc::channel(100);
+            let (payloads, payload_rx) = mpsc::channel(100);
+            pump_local_events(tx, handle.clone(), payload_rx);
+
+            Self {
+                _dir: dir,
+                handle,
+                mailbox,
+                events,
+                _payloads: payloads,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn asks_for_the_state_first() {
+        let mut f = Fixture::new().await;
+
+        let message = f.mailbox.recv().await.unwrap();
+        assert!(matches!(message.payload, Payload::Bootstrap));
+    }
+
+    #[tokio::test]
+    async fn fails_with_the_last_error_once_the_loop_stops() {
+        let mut f = Fixture::new().await;
+        f.mailbox.recv().await.unwrap();
+
+        f.handle
+            .broadcast(CoreEvent::Trace {
+                level: tracing::Level::ERROR,
+                message: "boom".into(),
+            })
+            .unwrap();
+        drop(f.mailbox);
+
+        assert!(matches!(
+            f.events.recv().await,
+            Some(Event::Core(CoreEvent::Trace { .. }))
+        ));
+        match f.events.recv().await {
+            Some(Event::Fatal(message)) => assert!(message.ends_with(": boom"), "{}", message),
+            _ => panic!("expected the TUI to fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fails_if_the_loop_is_gone_from_the_start() {
+        let mut f = Fixture::new().await;
+        drop(f.mailbox);
+
+        assert!(matches!(f.events.recv().await, Some(Event::Fatal(_))));
+    }
 }

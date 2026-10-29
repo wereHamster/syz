@@ -198,16 +198,12 @@ impl Context {
     #[cfg(test)]
     pub fn for_tests(store: Store) -> (Self, broadcast::Receiver<Event>) {
         // Messages don't send to the mailbox, so nothing needs to receive from it.
-        let (mailbox, _) = mpsc::channel(1);
-        let (events, receiver) = broadcast::channel(1000);
+        let (handle, _) = Handle::for_tests(store.clone());
+        let receiver = handle.subscribe();
 
         let context = Self {
-            store: store.clone(),
-            handle: Handle {
-                store,
-                mailbox,
-                events,
-            },
+            store,
+            handle,
             http_agent: HttpAgent::new(),
         };
         (context, receiver)
@@ -227,6 +223,21 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle on the given store, without a main loop. The test receives what is sent to the
+    /// mailbox, and the loop counts as stopped once it drops the receiver.
+    #[cfg(test)]
+    pub fn for_tests(store: Store) -> (Self, mpsc::Receiver<Message>) {
+        let (mailbox, receiver) = mpsc::channel(100);
+        let (events, _) = broadcast::channel(1000);
+
+        let handle = Self {
+            store,
+            mailbox,
+            events,
+        };
+        (handle, receiver)
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }
@@ -259,6 +270,11 @@ impl Handle {
 
     /// Like `send`, but waits until the main loop has executed the message. The jobs it asks
     /// for may still be running.
+    /// Resolves once the main loop has stopped, after which it executes no more messages.
+    pub async fn closed(&self) {
+        self.mailbox.closed().await
+    }
+
     pub async fn send_and_wait(&self, message_id: String, payload: Payload) -> Result<()> {
         let (processed, executed) = tokio::sync::oneshot::channel();
         let message = Message {
