@@ -131,9 +131,9 @@ impl NixAccess {
 /// How many tokens are minted at the same time.
 const TOKEN_CONCURRENCY: usize = 4;
 
-/// Mints a read-only token for each of `owners` the GitHub App is installed for, as
-/// `(owner, token)` pairs. Public inputs need none, so owners without an installation, or whose
-/// token can't be created, are skipped and nix is left to fetch their inputs anonymously.
+/// Gets a read-only token for each of `owners` (see [`GitHub::contents_read_token`]), as
+/// `(owner, token)` pairs. Public inputs need none, so owners without one, or whose token can't
+/// be created, are skipped and nix is left to fetch their inputs anonymously.
 ///
 /// GitHub treats owners case-insensitively, so spellings of the same owner share one token. Nix
 /// still matches its keys case-sensitively, so each spelling gets its own pair.
