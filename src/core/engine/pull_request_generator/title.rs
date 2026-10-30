@@ -11,8 +11,6 @@ pub async fn generate_title(
 ) -> String {
     let mut title = if targets.len() == 1 && ecosystem == "nix-flake" {
         let target = &targets[0];
-        let sha = &target.target_version.version;
-        let short_sha = &sha[..sha.len().min(7)];
 
         let display_name =
             crate::core::engine::ecosystems::nix_flake::internal::find_input_alias::run(
@@ -22,23 +20,7 @@ pub async fn generate_title(
             .await
             .unwrap_or_else(|| package_group.to_string());
 
-        let date_suffix = match github {
-            Some(gh) => match crate::core::engine::ecosystems::nix_flake::internal::helpers::parse_github_repo(&target.name) {
-                Some(repo) => crate::core::engine::ecosystems::nix_flake::internal::helpers::get_commit_date(
-                    gh, &repo.owner, &repo.repo, sha,
-                )
-                .await
-                .map(|d| format!(" ({})", d.format("%Y-%m-%d")))
-                .unwrap_or_default(),
-                None => String::new(),
-            },
-            None => String::new(),
-        };
-
-        format!(
-            "Update Nix Flake input `{}` to {}{}",
-            display_name, short_sha, date_suffix
-        )
+        format!("Update nix flake input `{}`", display_name)
     } else if targets.len() == 1 {
         let target = &targets[0];
         let mut clean_new = target.target_version.version.clone();
@@ -203,7 +185,7 @@ mod tests {
             &repo,
         )
         .await;
-        assert_eq!(title, "Update Nix Flake input `nixpkgs` to 104240a");
+        assert_eq!(title, "Update nix flake input `nixpkgs`");
 
         let title_major = generate_title(
             "github:NixOS/nixpkgs/nixpkgs-unstable",
@@ -214,10 +196,7 @@ mod tests {
             &repo,
         )
         .await;
-        assert_eq!(
-            title_major,
-            "Update Nix Flake input `nixpkgs` to 104240a (major)"
-        );
+        assert_eq!(title_major, "Update nix flake input `nixpkgs` (major)");
     }
 
     #[tokio::test]
@@ -240,7 +219,7 @@ mod tests {
         .await;
         assert_eq!(
             title,
-            "Update Nix Flake input `github:NixOS/nixpkgs/nixpkgs-unstable` to 104240a"
+            "Update nix flake input `github:NixOS/nixpkgs/nixpkgs-unstable`"
         );
     }
 
