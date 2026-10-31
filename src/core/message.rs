@@ -82,6 +82,12 @@ pub enum Payload {
         project_id: String,
     },
 
+    /// Create (or update) the pull request that applies all of the project's bumps that stay
+    /// within the current major versions of their dependencies.
+    UpdateCompatibleDependencies {
+        project_id: String,
+    },
+
     /// Re-run every sweep of the project that has an open pull request, so that it follows
     /// the default branch. Sweeps without one are only run on demand.
     #[serde(skip)]
@@ -161,6 +167,9 @@ impl std::fmt::Display for Payload {
             }
             Payload::UpdateVulnerableDependencies { .. } => {
                 write!(f, "UpdateVulnerableDependencies")
+            }
+            Payload::UpdateCompatibleDependencies { .. } => {
+                write!(f, "UpdateCompatibleDependencies")
             }
             Payload::UpdateSweeps { .. } => write!(f, "UpdateSweeps"),
             Payload::SweepPublished { .. } => write!(f, "SweepPublished"),
@@ -362,6 +371,10 @@ impl Payload {
 
             Payload::UpdateVulnerableDependencies { project_id } => {
                 publish_sweep(store, project_id, SweepKind::Audit).await
+            }
+
+            Payload::UpdateCompatibleDependencies { project_id } => {
+                publish_sweep(store, project_id, SweepKind::Compatible).await
             }
 
             Payload::UpdateSweeps { project_id } => {
@@ -763,6 +776,26 @@ mod tests {
             })
             .await;
         assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn updating_compatible_dependencies_publishes_its_sweep() {
+        let f = Fixture::new().await;
+
+        let jobs = f
+            .execute(Payload::UpdateCompatibleDependencies {
+                project_id: f.project.id.clone(),
+            })
+            .await;
+
+        assert_eq!(
+            jobs,
+            vec![Job::PublishSweep {
+                lane: f.lane(),
+                project_id: f.project.id.clone(),
+                kind: SweepKind::Compatible,
+            }]
+        );
     }
 
     #[tokio::test]

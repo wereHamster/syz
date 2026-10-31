@@ -121,19 +121,29 @@ pub enum SweepKind {
 
     /// Update all transitive dependencies.
     Transitive,
+
+    /// Apply all bumps that stay within the dependencies' current major versions.
+    Compatible,
 }
 
 impl SweepKind {
+    pub const ALL: [SweepKind; 3] = [
+        SweepKind::Audit,
+        SweepKind::Transitive,
+        SweepKind::Compatible,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             SweepKind::Audit => "audit",
             SweepKind::Transitive => "transitive",
+            SweepKind::Compatible => "compatible",
         }
     }
 
     /// The kind of sweep whose pull request is opened from the given branch, if any.
     pub fn from_branch_name(branch_name: &str) -> Option<Self> {
-        [SweepKind::Audit, SweepKind::Transitive]
+        SweepKind::ALL
             .into_iter()
             .find(|kind| kind.branch_name() == branch_name)
     }
@@ -143,6 +153,7 @@ impl SweepKind {
         match self {
             SweepKind::Audit => "syz/audit",
             SweepKind::Transitive => "syz/transitive",
+            SweepKind::Compatible => "syz/compatible",
         }
     }
 }
@@ -154,6 +165,7 @@ impl std::str::FromStr for SweepKind {
         match s {
             "audit" => Ok(SweepKind::Audit),
             "transitive" => Ok(SweepKind::Transitive),
+            "compatible" => Ok(SweepKind::Compatible),
             other => anyhow::bail!("Unsupported pull request kind: {}", other),
         }
     }
@@ -185,8 +197,15 @@ mod tests {
 
     #[test]
     fn sweep_kind_round_trips_through_its_branch_name() {
-        for kind in [SweepKind::Audit, SweepKind::Transitive] {
+        for kind in SweepKind::ALL {
             assert_eq!(SweepKind::from_branch_name(kind.branch_name()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn sweep_kind_round_trips_through_its_name() {
+        for kind in SweepKind::ALL {
+            assert_eq!(kind.as_str().parse::<SweepKind>().unwrap(), kind);
         }
     }
 

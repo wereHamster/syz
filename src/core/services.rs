@@ -174,6 +174,11 @@ impl Runner for Services {
                 project_id,
                 kind: SweepKind::Transitive,
             } => actions::update_transitive_dependencies::run(self, lane, project_id).await,
+            Job::PublishSweep {
+                lane,
+                project_id,
+                kind: SweepKind::Compatible,
+            } => actions::update_compatible_dependencies::run(self, lane, project_id).await,
             Job::PruneBranches { lane, project_id } => {
                 actions::prune_branches::run(self, lane, project_id).await?;
                 Ok(None)

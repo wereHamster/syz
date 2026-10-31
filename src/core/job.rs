@@ -270,6 +270,10 @@ mod tests {
             publish_sweep("a", SweepKind::Transitive).class(),
             JobClass::General
         );
+        assert_eq!(
+            publish_sweep("a", SweepKind::Compatible).class(),
+            JobClass::General
+        );
         assert_eq!(scan("a").class(), JobClass::General);
         assert_eq!(publish_bump("x").class(), JobClass::General);
         assert_eq!(prune("a").class(), JobClass::General);

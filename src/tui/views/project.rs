@@ -1,3 +1,4 @@
+use crate::core::actions::update_compatible_dependencies;
 use crate::core::database::{Bump, BumpDep, Dependency, Package, Project, Sweep, SweepKind};
 use crate::core::message::Payload;
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
@@ -7,7 +8,7 @@ use ratatui::{
     prelude::*,
     widgets::{Cell, Paragraph, Row, Table, TableState},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 struct ProjectBumpRow {
     bump: Bump,
@@ -39,6 +40,7 @@ impl ProjectView {
         let label = match kind {
             SweepKind::Audit => "Audit",
             SweepKind::Transitive => "Transitive",
+            SweepKind::Compatible => "Compatible",
         };
 
         let url = backend
@@ -52,13 +54,65 @@ impl ProjectView {
             None => Span::styled("-", Style::default().fg(Color::DarkGray)),
         };
 
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 format!("{:<12}", label),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             value,
-        ])
+        ];
+
+        if kind == SweepKind::Compatible {
+            let count = Self::compatible_update_count(backend, project_id);
+            if count > 0 {
+                spans.push(Span::styled(
+                    format!(
+                        "  {} {}",
+                        count,
+                        if count == 1 { "update" } else { "updates" }
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+
+        Line::from(spans)
+    }
+
+    /// How many packages the compatible sweep would update, going by the latest scan.
+    fn compatible_update_count(backend: &Backend, project_id: &str) -> usize {
+        let bump_ids: HashSet<String> = backend
+            .db
+            .iter()
+            .filter(|(path, _)| path.starts_with("bump/"))
+            .filter_map(|(_, value)| serde_json::from_value::<Bump>(value.clone()).ok())
+            .filter(|b| b.project_id == project_id && !b.major)
+            .map(|b| b.id)
+            .collect();
+
+        let packages: HashSet<(String, Option<String>, String, Option<String>)> = backend
+            .db
+            .iter()
+            .filter(|(path, _)| path.starts_with("bumpdep/"))
+            .filter_map(|(_, value)| serde_json::from_value::<BumpDep>(value.clone()).ok())
+            .filter(|bd| bump_ids.contains(&bd.bump_id))
+            .filter_map(|bd| {
+                backend
+                    .db
+                    .get(&format!("dependency/{}", bd.dependency_id))
+                    .and_then(|v| serde_json::from_value::<Dependency>(v.clone()).ok())
+            })
+            .filter_map(|dep| {
+                backend
+                    .db
+                    .get(&format!("package/{}", dep.package_id))
+                    .and_then(|v| serde_json::from_value::<Package>(v.clone()).ok())
+            })
+            .filter(|pkg| update_compatible_dependencies::ECOSYSTEMS.contains(&pkg.r#type.as_str()))
+            .map(|pkg| (pkg.r#type, pkg.namespace, pkg.name, pkg.subpath))
+            .collect();
+
+        packages.len()
     }
 
     /// This project's bumps, grouped by ecosystem and sorted so that the ecosystem
@@ -281,6 +335,13 @@ impl View for ProjectView {
                         },
                     )];
                 }
+                KeyCode::Char('m') | KeyCode::Char('M') => {
+                    return vec![ViewAction::SendPayload(
+                        Payload::UpdateCompatibleDependencies {
+                            project_id: self.project_id.clone(),
+                        },
+                    )];
+                }
                 _ => {}
             }
         }
@@ -293,7 +354,7 @@ impl View for ProjectView {
             .constraints([
                 Constraint::Length(1), // Header
                 Constraint::Length(1), // Blank
-                Constraint::Length(2), // Audit, transitive
+                Constraint::Length(3), // Audit, transitive, compatible
                 Constraint::Length(1), // Blank
                 Constraint::Min(0),    // Table
             ])
@@ -312,12 +373,14 @@ impl View for ProjectView {
                     project_chunks[0],
                 );
 
-                // Open pull requests of the audit and transitive sweeps
+                // Open pull requests of the sweeps
                 frame.render_widget(
-                    Paragraph::new(vec![
-                        Self::sweep_line(backend, &self.project_id, SweepKind::Audit),
-                        Self::sweep_line(backend, &self.project_id, SweepKind::Transitive),
-                    ]),
+                    Paragraph::new(
+                        SweepKind::ALL
+                            .into_iter()
+                            .map(|kind| Self::sweep_line(backend, &self.project_id, kind))
+                            .collect::<Vec<_>>(),
+                    ),
                     project_chunks[2],
                 );
 
@@ -417,6 +480,10 @@ impl View for ProjectView {
             HotkeyDescriptor {
                 key: "T".to_string(),
                 description: "Transitive".to_string(),
+            },
+            HotkeyDescriptor {
+                key: "M".to_string(),
+                description: "Compatible".to_string(),
             },
         ]
     }
