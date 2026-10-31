@@ -44,7 +44,7 @@ Config -> default rustfmt. No `rustfmt.toml`.
 
 ## Code Rules
 
-Write DB -> only inside main loop (`message.rs` `execute()`).
-Network I/O -> only inside a job (`actions/` or `engine/`).
+Main loop -> may mutate process-local state: DB, in-memory caches (`message.rs` `execute()`). Write DB -> only there.
+Job (`actions/` or `engine/`) -> anything crossing process boundary: network, git, package managers, platform APIs.
 Mutate state -> emit `Event::Commit` with `Op::Upsert` to sync clients.
 Add new ecosystem -> implement `Ecosystem` trait.
