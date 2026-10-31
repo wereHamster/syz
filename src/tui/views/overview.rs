@@ -250,6 +250,8 @@ impl View for OverviewView {
                     sweep_span("A", SweepKind::Audit),
                     Span::styled(" / ", Style::default().fg(Color::DarkGray)),
                     sweep_span("T", SweepKind::Transitive),
+                    Span::styled(" / ", Style::default().fg(Color::DarkGray)),
+                    sweep_span("C", SweepKind::Compatible),
                 ]);
 
                 Row::new(vec![
@@ -267,7 +269,7 @@ impl View for OverviewView {
             [
                 Constraint::Length(platform_width as u16),
                 Constraint::Min(0),
-                Constraint::Length(9),
+                Constraint::Length(13),
                 Constraint::Length(25),
             ],
         )

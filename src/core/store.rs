@@ -666,26 +666,27 @@ impl Store {
             )
             .await?;
 
-        let mut rows = stmt.query((bump_id,)).await?;
-        let mut targets = Vec::new();
+        read_bump_targets(stmt.query((bump_id,)).await?).await
+    }
 
-        while let Some(row) = rows.next().await? {
-            let minimum_release_age_secs: Option<i64> = row.get(9).unwrap_or_default();
-            targets.push(BumpTargetData {
-                name: row.get(0).unwrap_or_default(),
-                specifier: row.get(1).unwrap_or_default(),
-                current_version: row.get(2).unwrap_or_default(),
-                eco_type: row.get(3).unwrap_or_default(),
-                target_version: row.get(4).unwrap_or_default(),
-                head_version: row.get(5).unwrap_or_default(),
-                repo_url: row.get(6).unwrap_or_default(),
-                namespace: row.get(7).unwrap_or_default(),
-                subpath: row.get(8).unwrap_or_default(),
-                minimum_release_age: minimum_release_age_secs.map(chrono::Duration::seconds),
-            });
-        }
+    /// The targets of all of the project's bumps that stay within the current major versions
+    /// of their dependencies, ordered by ecosystem and package.
+    pub async fn non_major_bump_targets(&self, project_id: &str) -> Result<Vec<BumpTargetData>> {
+        let conn = self.database.conn()?;
 
-        Ok(targets)
+        let mut stmt = conn
+            .prepare(
+                "SELECT p.name, d.specifier, p.version, p.type, bd.target_version, bd.head_version, NULL as repo_url, p.namespace, p.subpath, bd.minimum_release_age
+                 FROM bump b
+                 JOIN bumpdep bd ON bd.bump_id = b.id
+                 JOIN dependency d ON bd.dependency_id = d.id
+                 JOIN package p ON d.package_id = p.id
+                 WHERE b.project_id = ?1 AND b.major = 0
+                 ORDER BY p.type, p.namespace, p.name, p.subpath"
+            )
+            .await?;
+
+        read_bump_targets(stmt.query((project_id,)).await?).await
     }
 
     /// Record the bump's open pull request, or that it has none. Returns `None` if the bump no
@@ -982,6 +983,29 @@ pub struct BumpTargetData {
     pub minimum_release_age: Option<chrono::Duration>,
 }
 
+/// Reads the rows of a query that selects the columns of [`BumpTargetData`] in order.
+async fn read_bump_targets(mut rows: turso::Rows) -> Result<Vec<BumpTargetData>> {
+    let mut targets = Vec::new();
+
+    while let Some(row) = rows.next().await? {
+        let minimum_release_age_secs: Option<i64> = row.get(9).unwrap_or_default();
+        targets.push(BumpTargetData {
+            name: row.get(0).unwrap_or_default(),
+            specifier: row.get(1).unwrap_or_default(),
+            current_version: row.get(2).unwrap_or_default(),
+            eco_type: row.get(3).unwrap_or_default(),
+            target_version: row.get(4).unwrap_or_default(),
+            head_version: row.get(5).unwrap_or_default(),
+            repo_url: row.get(6).unwrap_or_default(),
+            namespace: row.get(7).unwrap_or_default(),
+            subpath: row.get(8).unwrap_or_default(),
+            minimum_release_age: minimum_release_age_secs.map(chrono::Duration::seconds),
+        });
+    }
+
+    Ok(targets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1127,5 +1151,104 @@ mod tests {
             Some("https://github.com/owner/repo/pull/1")
         );
         assert!(store.list_bumps().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_major_bump_targets_are_the_project_s_compatible_updates() {
+        use crate::core::engine::{
+            DependencyUpdateOption, DiscoveredDependency, PackageInfo, ProposedBump, UpdateType,
+            PURL,
+        };
+
+        let analyzed = |ecosystem: &str, name: &str, minor: &str, major: Option<&str>| {
+            let bump = |target: &str, is_major: bool| ProposedBump {
+                target_version: target.to_string(),
+                head_version: target.to_string(),
+                is_major,
+                update_type: if is_major {
+                    UpdateType::Major
+                } else {
+                    UpdateType::Minor
+                },
+            };
+            AnalyzedProjectDependency {
+                discovered_dependency: DiscoveredDependency {
+                    purl: PURL {
+                        ecosystem: ecosystem.to_string(),
+                        namespace: None,
+                        name: name.to_string(),
+                        subpath: None,
+                        version: Some("1.0.0".to_string()),
+                    },
+                    requirement: "1.0.0".to_string(),
+                    minimum_release_age: None,
+                },
+                dependency_update_options: DependencyUpdateOption {
+                    package_info: PackageInfo { repo_url: None },
+                    bumps: std::iter::once(bump(minor, false))
+                        .chain(major.map(|major| bump(major, true)))
+                        .collect(),
+                },
+            }
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+        let project = store
+            .add_project(Platform::GitHub, "owner/repo".to_string())
+            .await
+            .unwrap();
+        let other = store
+            .add_project(Platform::GitHub, "owner/other".to_string())
+            .await
+            .unwrap();
+
+        store
+            .persist_analyzed_project_dependencies(
+                &project.id,
+                AnalyzedProjectDependencies {
+                    analyzed_project_dependencies: vec![
+                        analyzed("npm", "react", "1.2.0", None),
+                        analyzed("cargo", "tokio", "1.5.0", None),
+                        analyzed("cargo", "serde", "1.1.0", Some("2.0.0")),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .persist_analyzed_project_dependencies(
+                &other.id,
+                AnalyzedProjectDependencies {
+                    analyzed_project_dependencies: vec![analyzed("cargo", "rand", "1.9.0", None)],
+                },
+            )
+            .await
+            .unwrap();
+
+        let targets: Vec<(String, String, String)> = store
+            .non_major_bump_targets(&project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.eco_type, t.name, t.target_version))
+            .collect();
+
+        assert_eq!(
+            targets,
+            vec![
+                (
+                    "cargo".to_string(),
+                    "serde".to_string(),
+                    "1.1.0".to_string()
+                ),
+                (
+                    "cargo".to_string(),
+                    "tokio".to_string(),
+                    "1.5.0".to_string()
+                ),
+                ("npm".to_string(), "react".to_string(), "1.2.0".to_string()),
+            ]
+        );
     }
 }

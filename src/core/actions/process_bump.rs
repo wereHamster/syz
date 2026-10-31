@@ -121,7 +121,12 @@ pub fn generate_branch_name(bump_name: &str, is_major: bool) -> String {
     format!("syz/update-{}", safe_branch_name)
 }
 
-fn build_update_targets(patcher: &dyn Patcher, rows: Vec<BumpTargetData>) -> Vec<UpdateTarget> {
+/// The updates to apply for the bump targets, leaving out those whose requirement already
+/// allows the target version.
+pub(super) fn build_update_targets(
+    patcher: &dyn Patcher,
+    rows: Vec<BumpTargetData>,
+) -> Vec<UpdateTarget> {
     let mut targets = Vec::new();
 
     for row in rows {

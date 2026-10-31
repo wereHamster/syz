@@ -221,7 +221,7 @@ async fn handle_pull_request(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Audit and transitive pull requests are dropped whether they were merged or just
+    // Sweep pull requests are dropped whether they were merged or just
     // closed; the next run opens a new one if there is still something to do. Whether the
     // closed pull request is the one the sweep currently tracks is decided by the
     // application, so that it is ordered with the sweep updates that are already queued.
