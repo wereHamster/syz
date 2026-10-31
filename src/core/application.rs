@@ -173,8 +173,10 @@ impl Application {
     }
 }
 
-/// What messages work with while the main loop executes them. Side effects are not part of it:
-/// messages return them as jobs instead.
+/// What messages work with while the main loop executes them. Messages may mutate process-local
+/// state through it: the database and in-memory caches. Anything that crosses the process boundary
+/// (network, git, package managers, platform APIs) is not part of it: messages return it as jobs
+/// instead.
 pub struct Context {
     store: Store,
     handle: Handle,
