@@ -3,7 +3,7 @@ use crate::core::database::{Bump, BumpDep, Dependency, Package, Project, Sweep, 
 use crate::core::message::Payload;
 use crate::tui::app::{Backend, Event, HotkeyDescriptor, View, ViewAction, ViewType};
 use crate::tui::views::bumps::{affected_projects_by_bump_group, ecosystem_label};
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{
     prelude::*,
     widgets::{Cell, Paragraph, Row, Table, TableState},
@@ -335,7 +335,10 @@ impl View for ProjectView {
                         },
                     )];
                 }
-                KeyCode::Char('m') | KeyCode::Char('M') => {
+                // Ctrl+C arrives as 'c' as well, and must not open a pull request.
+                KeyCode::Char('c') | KeyCode::Char('C')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     return vec![ViewAction::SendPayload(
                         Payload::UpdateCompatibleDependencies {
                             project_id: self.project_id.clone(),
@@ -482,7 +485,7 @@ impl View for ProjectView {
                 description: "Transitive".to_string(),
             },
             HotkeyDescriptor {
-                key: "M".to_string(),
+                key: "C".to_string(),
                 description: "Compatible".to_string(),
             },
         ]
