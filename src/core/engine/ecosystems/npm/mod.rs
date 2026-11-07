@@ -1598,10 +1598,11 @@ fn update_manifest(pkg_json: &serde_json::Value, targets: &[UpdateTarget]) -> Up
 
 /// The range a published package declares so that it allows `version`.
 ///
-/// A range that already allows `version` is kept. Otherwise the range for the release line of
-/// `version` is appended in its most compact form, e.g. `^19` becomes `^19 || ^20` and `^1.2.3`
-/// becomes `^1.2.3 || ^2`: dropping the lines the package
-/// supported so far would be a breaking change for its consumers.
+/// A range that already allows `version` is kept. Otherwise the most compact caret range that
+/// allows `version` is appended, e.g. `^19` becomes `^19 || ^20` and `^1.2.3` becomes
+/// `^1.2.3 || ^2`: dropping the lines the package supported so far would be a breaking change for
+/// its consumers. The appended range only widens upward, so it never allows versions below the
+/// lowest one `range` allows, e.g. `~1.2` becomes `~1.2 || ^1.3`, not `~1.2 || ^1`.
 ///
 /// Returns `None` if `range` or `version` isn't valid semver, e.g. `workspace:*` or `npm:` aliases.
 fn published_range(range: &str, version: &str) -> Option<String> {
@@ -1612,16 +1613,25 @@ fn published_range(range: &str, version: &str) -> Option<String> {
         return Some(range.to_string());
     }
 
-    let alternative = match (version.major(), version.minor()) {
-        (0, 0) => format!("^0.0.{}", version.patch()),
-        (0, minor) => format!("^0.{minor}"),
-        (major, _) => format!("^{major}"),
+    let (major, minor, patch) = (version.major(), version.minor(), version.patch());
+    let candidates = match (major, minor) {
+        (0, 0) => vec![format!("^0.0.{patch}")],
+        (0, _) => vec![format!("^0.{minor}"), format!("^0.{minor}.{patch}")],
+        _ => vec![
+            format!("^{major}"),
+            format!("^{major}.{minor}"),
+            format!("^{major}.{minor}.{patch}"),
+        ],
     };
-
-    let alternative = match nodejs_semver::Range::parse(&alternative) {
-        Ok(alternative_range) if alternative_range.satisfies(&version) => alternative,
-        _ => format!("^{version}"),
-    };
+    let floor = parsed.min_version();
+    let alternative = candidates
+        .into_iter()
+        .find(|candidate| {
+            nodejs_semver::Range::parse(candidate).is_ok_and(|candidate| {
+                candidate.satisfies(&version) && candidate.min_version() >= floor
+            })
+        })
+        .unwrap_or_else(|| format!("^{version}"));
 
     Some(format!("{range} || {alternative}"))
 }
@@ -1669,8 +1679,25 @@ mod tests {
         );
         assert_eq!(
             published_range("~1.2", "1.3.0").as_deref(),
-            Some("~1.2 || ^1")
+            Some("~1.2 || ^1.3")
         );
+        assert_eq!(
+            published_range("1.2.3", "1.2.4").as_deref(),
+            Some("1.2.3 || ^1.2.4")
+        );
+    }
+
+    #[test]
+    fn published_range_never_allows_versions_below_the_range() {
+        for (range, version) in [("~1.2", "1.3.0"), ("1.2.3", "1.2.4"), ("^0.19.1", "0.20.3")] {
+            let widened = published_range(range, version).unwrap();
+            let widened = nodejs_semver::Range::parse(&widened).unwrap();
+            assert_eq!(
+                widened.min_version(),
+                nodejs_semver::Range::parse(range).unwrap().min_version(),
+                "{range} widened for {version}"
+            );
+        }
     }
 
     #[test]
