@@ -1599,7 +1599,8 @@ fn update_manifest(pkg_json: &serde_json::Value, targets: &[UpdateTarget]) -> Up
 /// The range a published package declares so that it allows `version`.
 ///
 /// A range that already allows `version` is kept. Otherwise the range for the release line of
-/// `version` is appended, e.g. `^19` becomes `^19 || ^20`: dropping the lines the package
+/// `version` is appended in its most compact form, e.g. `^19` becomes `^19 || ^20` and `^1.2.3`
+/// becomes `^1.2.3 || ^2`: dropping the lines the package
 /// supported so far would be a breaking change for its consumers.
 ///
 /// Returns `None` if `range` or `version` isn't valid semver, e.g. `workspace:*` or `npm:` aliases.
@@ -1611,19 +1612,11 @@ fn published_range(range: &str, version: &str) -> Option<String> {
         return Some(range.to_string());
     }
 
-    let last = range.rsplit("||").next().unwrap_or(range).trim();
-    let line = match (version.major(), version.minor()) {
-        (0, 0) => format!("0.0.{}", version.patch()),
-        (0, minor) => format!("0.{minor}"),
-        (major, _) => format!("{major}"),
+    let alternative = match (version.major(), version.minor()) {
+        (0, 0) => format!("^0.0.{}", version.patch()),
+        (0, minor) => format!("^0.{minor}"),
+        (major, _) => format!("^{major}"),
     };
-    // Follow the precision of the last alternative: `^2` next to `^1`, `^2.0.0` next to `^1.2.3`.
-    let padding = if last.matches('.').count() >= 2 {
-        ".0".repeat(2 - line.matches('.').count())
-    } else {
-        String::new()
-    };
-    let alternative = format!("^{line}{padding}");
 
     let alternative = match nodejs_semver::Range::parse(&alternative) {
         Ok(alternative_range) if alternative_range.satisfies(&version) => alternative,
@@ -1660,7 +1653,7 @@ mod tests {
         );
         assert_eq!(
             published_range("^1.2.3", "2.1.0").as_deref(),
-            Some("^1.2.3 || ^2.0.0")
+            Some("^1.2.3 || ^2")
         );
         assert_eq!(
             published_range("^0.19", "0.20.3").as_deref(),
@@ -1668,7 +1661,7 @@ mod tests {
         );
         assert_eq!(
             published_range("^0.19.1", "0.20.3").as_deref(),
-            Some("^0.19.1 || ^0.20.0")
+            Some("^0.19.1 || ^0.20")
         );
         assert_eq!(
             published_range("^0.0.3", "0.0.4").as_deref(),
