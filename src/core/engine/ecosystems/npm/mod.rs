@@ -128,48 +128,40 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         }
 
         let mut tree_items = Vec::new();
+        // Manifests whose committed content differs from what the first install resolves.
+        let mut restored_manifests = Vec::new();
 
         for path in &pkg_jsons_to_fetch {
             if let Ok(content) = snapshot.read_file(path).await {
-                let mut pkg_json: serde_json::Value = match serde_json::from_str(&content) {
+                let pkg_json: serde_json::Value = match serde_json::from_str(&content) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
 
-                let mut was_updated = false;
-
-                for target in targets {
-                    for key in ["dependencies", "devDependencies", "peerDependencies"] {
-                        if let Some(deps) = pkg_json.get_mut(key).and_then(|d| d.as_object_mut()) {
-                            if deps.contains_key(&target.name) {
-                                deps.insert(
-                                    target.name.to_string(),
-                                    serde_json::Value::String(
-                                        target.target_version.requirement.clone(),
-                                    ),
-                                );
-                                was_updated = true;
-                            }
-                        }
-                    }
-                }
+                let manifest = update_manifest(&pkg_json, targets);
 
                 let full_path = temp_dir.join(path);
                 if let Some(parent) = full_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
 
-                if was_updated {
-                    let updated_pkg_json_str = serde_json::to_string_pretty(&pkg_json)? + "\n";
-                    fs::write(&full_path, &updated_pkg_json_str)?;
+                let committed = if manifest.committed != pkg_json {
+                    let committed = serde_json::to_string_pretty(&manifest.committed)? + "\n";
                     tree_items.push(FileModification {
                         path: path.clone(),
-                        state: crate::core::engine::repository::FileState::Write(
-                            updated_pkg_json_str,
-                        ),
+                        state: crate::core::engine::repository::FileState::Write(committed.clone()),
                     });
+                    committed
                 } else {
-                    fs::write(&full_path, content)?;
+                    content
+                };
+
+                if manifest.resolved != manifest.committed {
+                    let resolved = serde_json::to_string_pretty(&manifest.resolved)? + "\n";
+                    fs::write(&full_path, resolved)?;
+                    restored_manifests.push((full_path, committed));
+                } else {
+                    fs::write(&full_path, committed)?;
                 }
             }
         }
@@ -191,6 +183,19 @@ impl crate::core::engine::ecosystems::Patcher for NpmPatcher {
         if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), true, false).await? {
             tracing::info!("Fallback: Running without --lockfile-only...");
             if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), false, false).await? {
+                anyhow::bail!("pnpm install failed");
+            }
+        }
+
+        // pnpm keeps a locked version as long as the range in the manifest allows it. The first
+        // install raised the ranges of published packages to the target to move the lockfile;
+        // this one puts their original ranges back, which still allow the now locked target.
+        if !restored_manifests.is_empty() {
+            for (full_path, committed) in &restored_manifests {
+                fs::write(full_path, committed)?;
+            }
+            tracing::info!("Running pnpm install to restore the ranges of published packages...");
+            if !run_pnpm_install(temp_dir.to_path_buf(), workspace.is_some(), true, false).await? {
                 anyhow::bail!("pnpm install failed");
             }
         }
@@ -1537,9 +1542,227 @@ pub(crate) fn extract_versions_from_lock(
     module_versions
 }
 
+/// A `package.json` with the update targets applied.
+#[derive(Debug, PartialEq)]
+struct UpdatedManifest {
+    /// The content to commit.
+    committed: serde_json::Value,
+    /// The content to resolve the lockfile with, which requires every updated dependency at its
+    /// target version.
+    resolved: serde_json::Value,
+}
+
+/// The sections of a published package that constrain what its consumers install.
+const CONSUMER_SECTIONS: [&str; 2] = ["dependencies", "peerDependencies"];
+
+/// Applies `targets` to a `package.json`.
+///
+/// Every package not marked `"private": true` is assumed to be published, and keeps the ranges
+/// it offers its consumers as loose as they are: see [`published_range`].
+fn update_manifest(pkg_json: &serde_json::Value, targets: &[UpdateTarget]) -> UpdatedManifest {
+    let published = pkg_json.get("private").and_then(serde_json::Value::as_bool) != Some(true);
+
+    let mut committed = pkg_json.clone();
+    let mut resolved = pkg_json.clone();
+
+    for target in targets {
+        for key in ["dependencies", "devDependencies", "peerDependencies"] {
+            let Some(current) = pkg_json.get(key).and_then(|deps| deps.get(&target.name)) else {
+                continue;
+            };
+
+            let requirement = if published && CONSUMER_SECTIONS.contains(&key) {
+                match current
+                    .as_str()
+                    .and_then(|range| published_range(range, &target.target_version.version))
+                {
+                    Some(range) => range,
+                    None => continue,
+                }
+            } else {
+                target.target_version.requirement.clone()
+            };
+
+            let name = target.name.as_str();
+            committed[key][name] = serde_json::Value::String(requirement);
+            resolved[key][name] =
+                serde_json::Value::String(target.target_version.requirement.clone());
+        }
+    }
+
+    UpdatedManifest {
+        committed,
+        resolved,
+    }
+}
+
+/// The range a published package declares so that it allows `version`.
+///
+/// A range that already allows `version` is kept. Otherwise the range for the release line of
+/// `version` is appended, e.g. `^19` becomes `^19 || ^20`: dropping the lines the package
+/// supported so far would be a breaking change for its consumers.
+///
+/// Returns `None` if `range` or `version` isn't valid semver, e.g. `workspace:*` or `npm:` aliases.
+fn published_range(range: &str, version: &str) -> Option<String> {
+    let parsed = nodejs_semver::Range::parse(range).ok()?;
+    let version = nodejs_semver::Version::parse(version).ok()?;
+
+    if parsed.satisfies(&version) {
+        return Some(range.to_string());
+    }
+
+    let last = range.rsplit("||").next().unwrap_or(range).trim();
+    let line = match (version.major(), version.minor()) {
+        (0, 0) => format!("0.0.{}", version.patch()),
+        (0, minor) => format!("0.{minor}"),
+        (major, _) => format!("{major}"),
+    };
+    // Follow the precision of the last alternative: `^2` next to `^1`, `^2.0.0` next to `^1.2.3`.
+    let padding = if last.matches('.').count() >= 2 {
+        ".0".repeat(2 - line.matches('.').count())
+    } else {
+        String::new()
+    };
+    let alternative = format!("^{line}{padding}");
+
+    let alternative = match nodejs_semver::Range::parse(&alternative) {
+        Ok(alternative_range) if alternative_range.satisfies(&version) => alternative,
+        _ => format!("^{version}"),
+    };
+
+    Some(format!("{range} || {alternative}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn published_range_keeps_ranges_that_allow_the_version() {
+        assert_eq!(published_range("^19", "19.3.1").as_deref(), Some("^19"));
+        assert_eq!(published_range("^5", "5.1.0").as_deref(), Some("^5"));
+        assert_eq!(
+            published_range("^1 || ^2 || ^3 || ^4", "4.5.0").as_deref(),
+            Some("^1 || ^2 || ^3 || ^4")
+        );
+        assert_eq!(published_range(">=18", "20.0.0").as_deref(), Some(">=18"));
+    }
+
+    #[test]
+    fn published_range_appends_the_release_line_of_a_new_version() {
+        assert_eq!(
+            published_range("^19", "20.0.1").as_deref(),
+            Some("^19 || ^20")
+        );
+        assert_eq!(
+            published_range("^1 || ^2 || ^3 || ^4", "5.0.0").as_deref(),
+            Some("^1 || ^2 || ^3 || ^4 || ^5")
+        );
+        assert_eq!(
+            published_range("^1.2.3", "2.1.0").as_deref(),
+            Some("^1.2.3 || ^2.0.0")
+        );
+        assert_eq!(
+            published_range("^0.19", "0.20.3").as_deref(),
+            Some("^0.19 || ^0.20")
+        );
+        assert_eq!(
+            published_range("^0.19.1", "0.20.3").as_deref(),
+            Some("^0.19.1 || ^0.20.0")
+        );
+        assert_eq!(
+            published_range("^0.0.3", "0.0.4").as_deref(),
+            Some("^0.0.3 || ^0.0.4")
+        );
+        assert_eq!(
+            published_range("~1.2", "1.3.0").as_deref(),
+            Some("~1.2 || ^1")
+        );
+    }
+
+    #[test]
+    fn published_range_skips_specifiers_that_are_not_semver() {
+        assert_eq!(published_range("workspace:*", "1.0.0"), None);
+        assert_eq!(published_range("npm:react@^19", "20.0.0"), None);
+    }
+
+    fn update_target(name: &str, requirement: &str, version: &str) -> UpdateTarget {
+        UpdateTarget {
+            ecosystem: "npm".to_string(),
+            name: name.to_string(),
+            current_version: crate::core::engine::RequirementVersion {
+                requirement: String::new(),
+                version: String::new(),
+            },
+            target_version: crate::core::engine::RequirementVersion {
+                requirement: requirement.to_string(),
+                version: version.to_string(),
+            },
+            latest_version: version.to_string(),
+            package_info: crate::core::engine::PackageInfo { repo_url: None },
+            minimum_release_age: None,
+        }
+    }
+
+    #[test]
+    fn update_manifest_raises_every_range_of_a_private_package() {
+        let pkg_json = serde_json::json!({
+            "private": true,
+            "dependencies": { "react": "^19.0.0" },
+            "devDependencies": { "typescript": "^6.0.0" },
+        });
+        let targets = [
+            update_target("react", "^19.3.1", "19.3.1"),
+            update_target("typescript", "^7.0.2", "7.0.2"),
+        ];
+
+        let expected = serde_json::json!({
+            "private": true,
+            "dependencies": { "react": "^19.3.1" },
+            "devDependencies": { "typescript": "^7.0.2" },
+        });
+        assert_eq!(
+            update_manifest(&pkg_json, &targets),
+            UpdatedManifest {
+                committed: expected.clone(),
+                resolved: expected,
+            }
+        );
+    }
+
+    #[test]
+    fn update_manifest_keeps_the_consumer_ranges_of_a_published_package_loose() {
+        let pkg_json = serde_json::json!({
+            "name": "timvir",
+            "dependencies": { "shiki": "^1 || ^2 || ^3 || ^4", "wonka": "^6" },
+            "devDependencies": { "typescript": "^6.0.0" },
+            "peerDependencies": { "react": "^19" },
+        });
+        let targets = [
+            update_target("shiki", "^5.0.0", "5.0.0"),
+            update_target("wonka", "^6.3.5", "6.3.5"),
+            update_target("typescript", "^7.0.2", "7.0.2"),
+            update_target("react", "^19.3.1", "19.3.1"),
+        ];
+
+        assert_eq!(
+            update_manifest(&pkg_json, &targets),
+            UpdatedManifest {
+                committed: serde_json::json!({
+                    "name": "timvir",
+                    "dependencies": { "shiki": "^1 || ^2 || ^3 || ^4 || ^5", "wonka": "^6" },
+                    "devDependencies": { "typescript": "^7.0.2" },
+                    "peerDependencies": { "react": "^19" },
+                }),
+                resolved: serde_json::json!({
+                    "name": "timvir",
+                    "dependencies": { "shiki": "^5.0.0", "wonka": "^6.3.5" },
+                    "devDependencies": { "typescript": "^7.0.2" },
+                    "peerDependencies": { "react": "^19.3.1" },
+                }),
+            }
+        );
+    }
 
     #[test]
     fn parses_release_age_violations() {
