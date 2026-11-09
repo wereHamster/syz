@@ -44,7 +44,12 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
 
     let mut locked_versions = std::collections::HashMap::new();
     if let Ok(lock_str) = repo.read_file("pnpm-lock.yaml").await {
-        if let Ok(lock_val) = noyalib::from_str::<noyalib::Value>(&lock_str) {
+        // Since pnpm 11 the lockfile can hold several YAML documents: one for pnpm's own
+        // environment (`packageManagerDependencies`), then the project's lockfile.
+        let documents = noyalib::load_all(&lock_str)
+            .map(|docs| docs.filter_map(Result::ok).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for lock_val in documents {
             let mut extract_deps = |deps: &noyalib::Value| {
                 if let Some(map) = deps.as_mapping() {
                     for (k, v) in map {
@@ -167,4 +172,117 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
     }
 
     Ok(all_deps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::engine::repository::test_support::MockSnapshot;
+
+    const PACKAGE_JSON: &str = r#"{
+  "dependencies": { "react": "^19.0.0" },
+  "devDependencies": { "@types/react": "^19.0.0" }
+}"#;
+
+    fn locked_versions(deps: &[DiscoveredDependency]) -> Vec<(String, Option<String>)> {
+        let mut versions: Vec<_> = deps
+            .iter()
+            .map(|d| {
+                let name = match &d.purl.namespace {
+                    Some(ns) => format!("{}/{}", ns, d.purl.name),
+                    None => d.purl.name.clone(),
+                };
+                (name, d.purl.version.clone())
+            })
+            .collect();
+        versions.sort();
+        versions
+    }
+
+    #[tokio::test]
+    async fn reads_locked_versions_from_single_document_lockfile() {
+        let lockfile = "lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      react:
+        specifier: ^19.0.0
+        version: 19.3.0
+    devDependencies:
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.3.0
+";
+        let repo = MockSnapshot::with_files(&[
+            ("package.json", PACKAGE_JSON),
+            ("pnpm-lock.yaml", lockfile),
+        ]);
+
+        let deps = run(&repo).await.unwrap();
+
+        assert_eq!(
+            locked_versions(&deps),
+            vec![
+                ("@types/react".to_string(), Some("19.3.0".to_string())),
+                ("react".to_string(), Some("19.3.0".to_string())),
+            ]
+        );
+    }
+
+    /// pnpm 11+ prepends a document for its own environment to the lockfile.
+    #[tokio::test]
+    async fn reads_locked_versions_from_multi_document_lockfile() {
+        let lockfile = "---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.0.0
+        version: 12.0.0
+
+packages:
+
+  pnpm@12.0.0:
+    resolution: {integrity: sha512-AAAA}
+
+---
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      react:
+        specifier: ^19.0.0
+        version: 19.3.0
+    devDependencies:
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.3.0(react@19.3.0)
+";
+        let repo = MockSnapshot::with_files(&[
+            ("package.json", PACKAGE_JSON),
+            ("pnpm-lock.yaml", lockfile),
+        ]);
+
+        let deps = run(&repo).await.unwrap();
+
+        assert_eq!(
+            locked_versions(&deps),
+            vec![
+                ("@types/react".to_string(), Some("19.3.0".to_string())),
+                ("react".to_string(), Some("19.3.0".to_string())),
+            ]
+        );
+    }
 }
