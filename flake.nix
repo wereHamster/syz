@@ -32,6 +32,16 @@
             perl
             gnumake
             makeWrapper
+            pkg-config
+          ];
+
+          buildInputs = with pkgs; [
+            openssl
+            aws-lc
+            libgit2
+            libssh2
+            zlib
+            zstd
           ];
 
           doCheck = false;
