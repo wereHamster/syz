@@ -3,7 +3,7 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::core::engine::{repository::ProjectRepositorySnapshot, DiscoveredDependency, PURL};
 
-use super::workspace;
+use super::{config, workspace};
 
 pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredDependency>> {
     let toml_str = match repo.read_file("Cargo.toml").await {
@@ -32,7 +32,9 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
         }
     }
 
-    collect_deps(&doc, &locked_versions, &mut deps);
+    let minimum_release_age = config::minimum_publish_age(repo).await;
+
+    collect_deps(&doc, &locked_versions, minimum_release_age, &mut deps);
 
     for member in workspace::resolve_members(&doc, repo).await? {
         let member_toml = match repo.read_file(&member.manifest_path).await {
@@ -55,7 +57,12 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
                 continue;
             }
         };
-        collect_deps(&member_doc, &locked_versions, &mut deps);
+        collect_deps(
+            &member_doc,
+            &locked_versions,
+            minimum_release_age,
+            &mut deps,
+        );
     }
 
     Ok(deps)
@@ -68,6 +75,7 @@ pub async fn run(repo: &dyn ProjectRepositorySnapshot) -> Result<Vec<DiscoveredD
 fn collect_deps(
     doc: &DocumentMut,
     locked_versions: &std::collections::HashMap<String, String>,
+    minimum_release_age: Option<chrono::Duration>,
     deps: &mut Vec<DiscoveredDependency>,
 ) {
     for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
@@ -100,7 +108,7 @@ fn collect_deps(
                         version,
                     },
                     requirement: req,
-                    minimum_release_age: None,
+                    minimum_release_age,
                 });
             }
         }
@@ -137,5 +145,21 @@ mod tests {
         ]);
         let deps = run(&repo).await.unwrap();
         assert!(deps.iter().any(|d| d.purl.name == "sqlparser"));
+    }
+
+    #[tokio::test]
+    async fn minimum_publish_age_is_read_from_the_project_cargo_config() {
+        let repo = MockSnapshot::with_files(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"foo\"\n\n[dependencies]\nserde = \"1.0.0\"\n",
+            ),
+            (
+                ".cargo/config.toml",
+                "[registry]\nglobal-min-publish-age = \"3 days\"\n",
+            ),
+        ]);
+        let deps = run(&repo).await.unwrap();
+        assert_eq!(deps[0].minimum_release_age, Some(chrono::Duration::days(3)));
     }
 }

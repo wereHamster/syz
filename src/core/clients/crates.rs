@@ -1,6 +1,6 @@
 use crate::core::engine::VersionData;
 use crate::core::http_agent::HttpAgent;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use semver::{Version, VersionReq};
 use serde::Deserialize;
 
@@ -8,6 +8,7 @@ use serde::Deserialize;
 struct CrateIndexLine {
     vers: String,
     yanked: bool,
+    pubtime: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone)]
@@ -58,29 +59,13 @@ impl Crates {
         }
     }
 
-    async fn get_index_versions(&self, package: &str) -> Result<Vec<Version>> {
+    async fn get_index_versions(&self, package: &str) -> Result<Vec<IndexVersion>> {
         let url = Self::get_crates_io_url(package);
-
         let body = self.http_agent.text(&url).await?;
-        let mut versions = Vec::new();
-
-        for line in body.lines() {
-            if let Ok(entry) = serde_json::from_str::<CrateIndexLine>(line) {
-                if !entry.yanked {
-                    if let Ok(v) = Version::parse(&entry.vers) {
-                        if v.pre.is_empty() {
-                            versions.push(v);
-                        }
-                    }
-                }
-            }
-        }
-
+        let versions = parse_index(&body);
         if versions.is_empty() {
             anyhow::bail!("No non-yanked versions found for {}", package);
         }
-
-        versions.sort();
         Ok(versions)
     }
 
@@ -124,52 +109,159 @@ impl Crates {
         })
     }
 
-    pub async fn get_versions(&self, name: &str, req: &str) -> Result<VersionData> {
+    /// Picks the update targets for `req`. Versions published less than `minimum_release_age`
+    /// ago are not proposed as targets but still count as the head.
+    pub async fn get_versions(
+        &self,
+        name: &str,
+        req: &str,
+        minimum_release_age: Option<chrono::Duration>,
+    ) -> Result<VersionData> {
         let versions = self.get_index_versions(name).await?;
-        let head_version = versions
-            .last()
-            .unwrap()
-            .to_string()
-            .split('+')
-            .next()
-            .unwrap()
-            .to_string();
+        select_versions(&versions, req, minimum_release_age, chrono::Utc::now())
+    }
+}
 
-        let current_req = VersionReq::parse(req)?;
+struct IndexVersion {
+    version: Version,
+    /// Absent for versions published before crates.io recorded publish times.
+    pubtime: Option<chrono::DateTime<chrono::Utc>>,
+}
 
-        let mut target_minor = None;
-        let mut target_major = None;
+/// The non-yanked stable versions in a sparse index file, in ascending order.
+fn parse_index(body: &str) -> Vec<IndexVersion> {
+    let mut versions: Vec<IndexVersion> = body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<CrateIndexLine>(line).ok())
+        .filter(|entry| !entry.yanked)
+        .filter_map(|entry| {
+            let version = Version::parse(&entry.vers).ok()?;
+            version.pre.is_empty().then_some(IndexVersion {
+                version,
+                pubtime: entry.pubtime,
+            })
+        })
+        .collect();
+    versions.sort_by(|a, b| a.version.cmp(&b.version));
+    versions
+}
 
-        let max_satisfying = versions.iter().filter(|v| current_req.matches(v)).max();
+fn select_versions(
+    versions: &[IndexVersion],
+    req: &str,
+    minimum_release_age: Option<chrono::Duration>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<VersionData> {
+    let format = |v: &Version| v.to_string().split('+').next().unwrap().to_string();
 
-        if let Some(max_sat) = max_satisfying {
-            let sat_req =
-                VersionReq::parse(&format!("^{}", max_sat)).unwrap_or(current_req.clone());
-            let max_compatible = versions.iter().filter(|v| sat_req.matches(v)).max();
+    let head_version = versions
+        .last()
+        .map(|v| format(&v.version))
+        .context("No versions available")?;
 
-            if let Some(mc) = max_compatible {
-                if mc > max_sat {
-                    target_minor = Some(mc.to_string().split('+').next().unwrap().to_string());
-                }
+    // Like Cargo, versions without a publish time are never held back.
+    let is_mature = |v: &IndexVersion| match (minimum_release_age, v.pubtime) {
+        (Some(min_age), Some(pubtime)) => now - pubtime >= min_age,
+        _ => true,
+    };
+    let mature: Vec<&Version> = versions
+        .iter()
+        .filter(|v| is_mature(v))
+        .map(|v| &v.version)
+        .collect();
+
+    let current_req = VersionReq::parse(req)?;
+
+    let mut target_minor = None;
+    let mut target_major = None;
+
+    let max_satisfying = versions
+        .iter()
+        .map(|v| &v.version)
+        .filter(|v| current_req.matches(v))
+        .max();
+
+    if let Some(max_sat) = max_satisfying {
+        let sat_req = VersionReq::parse(&format!("^{}", max_sat)).unwrap_or(current_req.clone());
+
+        if let Some(mc) = mature.iter().filter(|v| sat_req.matches(v)).max() {
+            if *mc > max_sat {
+                target_minor = Some(format(mc));
             }
-
-            let major_candidates: Vec<_> = versions
-                .iter()
-                .filter(|v| !sat_req.matches(v) && *v > max_sat)
-                .collect();
-            if let Some(mc) = major_candidates.last() {
-                target_major = Some(mc.to_string().split('+').next().unwrap().to_string());
-            }
-        } else {
-            target_major = Some(head_version.clone());
         }
 
-        Ok(VersionData {
-            repo_url: None,
-            head_major: Some(head_version.clone()),
-            head_minor: Some(head_version.clone()),
-            target_major,
-            target_minor,
-        })
+        if let Some(mc) = mature
+            .iter()
+            .filter(|v| !sat_req.matches(v) && **v > max_sat)
+            .max()
+        {
+            target_major = Some(format(mc));
+        }
+    } else {
+        target_major = mature.last().map(|v| format(v));
+    }
+
+    Ok(VersionData {
+        repo_url: None,
+        head_major: Some(head_version.clone()),
+        head_minor: Some(head_version),
+        target_major,
+        target_minor,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index(entries: &[(&str, Option<&str>)]) -> Vec<IndexVersion> {
+        let body: Vec<String> = entries
+            .iter()
+            .map(|(vers, pubtime)| {
+                serde_json::json!({ "name": "foo", "vers": vers, "yanked": false, "pubtime": pubtime })
+                    .to_string()
+            })
+            .collect();
+        parse_index(&body.join("\n"))
+    }
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        "2026-11-13T12:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn young_versions_are_not_targets_but_are_the_head() {
+        let versions = index(&[
+            ("1.0.0", Some("2026-01-01T00:00:00Z")),
+            ("1.1.0", Some("2026-11-01T00:00:00Z")),
+            ("1.2.0", Some("2026-11-12T00:00:00Z")),
+            ("2.0.0", Some("2026-11-01T00:00:00Z")),
+            ("3.0.0", Some("2026-11-13T00:00:00Z")),
+        ]);
+        let data =
+            select_versions(&versions, "=1.0.0", Some(chrono::Duration::days(3)), now()).unwrap();
+        assert_eq!(data.target_minor.as_deref(), Some("1.1.0"));
+        assert_eq!(data.target_major.as_deref(), Some("2.0.0"));
+        assert_eq!(data.head_major.as_deref(), Some("3.0.0"));
+    }
+
+    #[test]
+    fn without_minimum_the_newest_versions_are_targets() {
+        let versions = index(&[
+            ("1.0.0", Some("2026-01-01T00:00:00Z")),
+            ("1.2.0", Some("2026-11-13T00:00:00Z")),
+            ("3.0.0", Some("2026-11-13T00:00:00Z")),
+        ]);
+        let data = select_versions(&versions, "=1.0.0", None, now()).unwrap();
+        assert_eq!(data.target_minor.as_deref(), Some("1.2.0"));
+        assert_eq!(data.target_major.as_deref(), Some("3.0.0"));
+    }
+
+    #[test]
+    fn versions_without_pubtime_are_never_held_back() {
+        let versions = index(&[("1.0.0", None), ("1.1.0", None)]);
+        let data =
+            select_versions(&versions, "=1.0.0", Some(chrono::Duration::days(3)), now()).unwrap();
+        assert_eq!(data.target_minor.as_deref(), Some("1.1.0"));
     }
 }

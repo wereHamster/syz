@@ -197,10 +197,15 @@ impl Patcher for CargoPatcher {
             fs::write(temp_dir.join("Cargo.lock"), l)?;
         }
 
+        let min_publish_age_env = internal::config::min_publish_age_env(
+            internal::config::minimum_publish_age(repo).await,
+        );
+
         let temp_dir_owned = temp_dir.to_path_buf();
         let output = tokio::task::spawn_blocking(move || {
             Command::new("cargo")
                 .arg("generate-lockfile")
+                .envs(min_publish_age_env)
                 .stdin(std::process::Stdio::null())
                 .current_dir(&temp_dir_owned)
                 .output()

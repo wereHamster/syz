@@ -16,7 +16,11 @@ pub async fn run(
         .unwrap_or_else(|| dependency.requirement.clone());
 
     let versions = crates_client
-        .get_versions(&dependency.purl.name, &req_to_pass)
+        .get_versions(
+            &dependency.purl.name,
+            &req_to_pass,
+            dependency.minimum_release_age,
+        )
         .await?;
 
     let mut bumps = Vec::new();
