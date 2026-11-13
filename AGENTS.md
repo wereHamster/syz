@@ -22,6 +22,7 @@ Slow task (I/O, network) -> `Job` (`src/core/job.rs`). Never spawn or send to ow
 Dispatcher (`src/core/dispatcher.rs`) -> per-repository lane, FIFO, one job at a time. Per-class caps (audit, general). Timeout. Coalesce duplicate queued jobs.
 Job run (`src/core/actions/`) -> read-only store. Finish -> `Ok(Some(outcome Payload))` to mailbox. Fail -> `Err`, lane logs it (log = failure channel to clients).
 Late outcome (record gone) -> loop returns `ClosePullRequests` job.
+Jobs an outcome asks for -> `enqueue_next`, ahead of queued work. Other jobs -> `enqueue`, back of lane.
 
 ## File Map
 

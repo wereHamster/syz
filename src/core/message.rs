@@ -186,6 +186,17 @@ impl std::fmt::Display for Payload {
 }
 
 impl Payload {
+    /// Whether a job reports its outcome with this message, as opposed to a client or a
+    /// webhook sending it. The jobs that an outcome asks for run ahead of the queued work.
+    pub fn is_outcome(&self) -> bool {
+        matches!(
+            self,
+            Payload::SweepPublished { .. }
+                | Payload::BumpPublished { .. }
+                | Payload::PersistAnalyzedProjectDependencies { .. }
+        )
+    }
+
     /// Apply the message to the database and broadcast the change. Returns the jobs that the
     /// message asks for, which the caller dispatches; nothing here talks to the outside world.
     pub async fn execute(self, ctx: &Context) -> Result<Vec<Job>> {
