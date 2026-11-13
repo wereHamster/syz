@@ -21,6 +21,8 @@ pub struct Tangled {
 
 impl Tangled {
     pub async fn new(work_dir: PathBuf) -> Result<Self> {
+        set_git_timeouts();
+
         let handle = env::var("ATPROTO_HANDLE").unwrap_or_default();
         let password = env::var("ATPROTO_PASSWORD").unwrap_or_default();
         let pds_url = env::var("ATPROTO_PDS").unwrap_or_else(|_| "https://bsky.social".to_string());
@@ -502,7 +504,51 @@ pub struct TangledProjectRepositoryMutator {
     knot_url: String,
 }
 
-impl TangledProjectRepositoryMutator {
+/// How long to wait for a connection to a git server, and for it to answer a read or a write.
+/// libgit2 applies these to its SSH transport, so that a stalled connection fails instead of
+/// holding its thread, and eventually completing a push that has long been obsolete.
+const GIT_CONNECT_TIMEOUT_MS: std::ffi::c_int = 30_000;
+const GIT_IO_TIMEOUT_MS: std::ffi::c_int = 60_000;
+
+/// Set the network timeouts of libgit2. They are global, so this happens once, before the first
+/// git operation.
+fn set_git_timeouts() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+
+    ONCE.call_once(|| {
+        // SAFETY: libgit2 reads these options only when it opens a connection, and nothing
+        // connects before the first `Tangled` is created, which is where this runs.
+        let result = unsafe {
+            git2::opts::set_server_connect_timeout_in_milliseconds(GIT_CONNECT_TIMEOUT_MS).and(
+                git2::opts::set_server_timeout_in_milliseconds(GIT_IO_TIMEOUT_MS),
+            )
+        };
+        if let Err(e) = result {
+            tracing::warn!("Failed to set the git network timeouts: {}", e);
+        }
+    });
+}
+
+/// Run blocking git work on the threads meant for it. The git operations clone and push over
+/// the network, which would otherwise occupy the threads that run the main loop.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .context("The git task panicked")?
+}
+
+/// The git side of a Tangled repository. Everything here blocks, so callers run it with
+/// [`blocking`].
+#[derive(Clone)]
+struct GitRemote {
+    work_dir: PathBuf,
+    knot_url: String,
+    repo_did: String,
+}
+
+impl GitRemote {
     fn temp_dir(&self, prefix: &str) -> Result<TempDir> {
         std::fs::create_dir_all(&self.work_dir).with_context(|| {
             format!(
@@ -535,11 +581,8 @@ impl TangledProjectRepositoryMutator {
             .clone(&clone_url, temp_dir.path())
             .map_err(|e| anyhow::anyhow!("Failed to clone Tangled repo via SSH: {}", e))
     }
-}
 
-#[async_trait]
-impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
-    async fn commit_changes(
+    fn commit_changes(
         &self,
         base_revision: &str,
         new_branch: &str,
@@ -617,6 +660,117 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
         remote.push(&[&refspec], Some(&mut push_options))?;
 
         Ok(Some(commit_id.to_string()))
+    }
+
+    /// Delete the branch from the remote. A failure is logged and not returned.
+    fn delete_branch(&self, branch: &str) -> Result<()> {
+        let temp_dir = self.temp_dir("syz-tangled-del-")?;
+        let repo = self.clone_repo(&temp_dir)?;
+
+        let mut remote = repo.find_remote("origin")?;
+        let mut push_options = git2::PushOptions::new();
+        let mut callbacks = git2::RemoteCallbacks::new();
+        callbacks.credentials(|_url, username_from_url, _allowed_types| {
+            git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+        });
+        push_options.remote_callbacks(callbacks);
+
+        let refspec = format!(":refs/heads/{}", branch);
+        if let Err(e) = remote.push(&[&refspec], Some(&mut push_options)) {
+            tracing::warn!("Failed to delete branch '{}' on Tangled: {}", branch, e);
+        }
+
+        Ok(())
+    }
+
+    /// The patch (in the format of `git format-patch`) of the head branch against the base
+    /// branch.
+    fn patch(&self, base_branch: &str, head_branch: &str) -> Result<String> {
+        let temp_dir = self.temp_dir("syz-tangled-diff-")?;
+        let repo = self.clone_repo(&temp_dir)?;
+
+        let base_obj = repo.revparse_single(&format!("origin/{}", base_branch))?;
+        let head_obj = repo.revparse_single(&format!("origin/{}", head_branch))?;
+        let base_commit = base_obj.peel_to_commit()?;
+        let head_commit = head_obj.peel_to_commit()?;
+
+        let base_tree = base_commit.tree()?;
+        let head_tree = head_commit.tree()?;
+        let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)?;
+
+        let mut diff_text = Vec::new();
+        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+            let origin = line.origin();
+            if origin == '+' || origin == '-' || origin == ' ' {
+                diff_text.push(origin as u8);
+            }
+            diff_text.extend_from_slice(line.content());
+            true
+        })?;
+
+        diff_text.extend_from_slice(b"--\n2.39.2\n");
+
+        let author = head_commit.author();
+        let author_name = author.name().unwrap_or("syz");
+        let author_email = author.email().unwrap_or("bot@syz.app");
+        let commit_msg = head_commit.message().unwrap_or("");
+
+        let rfc2822_date = chrono::DateTime::from_timestamp(head_commit.time().seconds(), 0)
+            .unwrap_or_default()
+            .to_rfc2822();
+
+        let mut commit_msg_lines = commit_msg.lines().collect::<Vec<_>>();
+        let subject = if commit_msg_lines.is_empty() {
+            ""
+        } else {
+            commit_msg_lines.remove(0)
+        };
+        let msg_body = commit_msg_lines.join("\n");
+
+        let change_id = format!("Change-Id: I{}", head_commit.id());
+
+        Ok(format!(
+            "From {} Mon Sep 17 00:00:00 2001\nFrom: {} <{}>\nDate: {}\nSubject: [PATCH] {}\n\n{}\n\n{}\n---\n{}",
+            head_commit.id(),
+            author_name,
+            author_email,
+            rfc2822_date,
+            subject,
+            msg_body.trim(),
+            change_id,
+            String::from_utf8_lossy(&diff_text)
+        ))
+    }
+}
+
+impl TangledProjectRepositoryMutator {
+    fn git(&self) -> GitRemote {
+        GitRemote {
+            work_dir: self.work_dir.clone(),
+            knot_url: self.knot_url.clone(),
+            repo_did: self.repo_did.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
+    async fn commit_changes(
+        &self,
+        base_revision: &str,
+        new_branch: &str,
+        commit_message: &str,
+        modifications: Vec<FileModification>,
+    ) -> Result<Option<String>> {
+        let git = self.git();
+        let base_revision = base_revision.to_string();
+        let new_branch = new_branch.to_string();
+        let commit_message = commit_message.to_string();
+
+        blocking(move || {
+            git.commit_changes(&base_revision, &new_branch, &commit_message, modifications)
+        })
+        .await
     }
 
     async fn create_pull_request(
@@ -711,62 +865,11 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
             }
         }
 
-        let patch_content = {
-            let temp_dir = self.temp_dir("syz-tangled-diff-")?;
-            let repo = self.clone_repo(&temp_dir)?;
-
-            let base_obj = repo.revparse_single(&format!("origin/{}", base_branch))?;
-            let head_obj = repo.revparse_single(&format!("origin/{}", head_branch))?;
-            let base_commit = base_obj.peel_to_commit()?;
-            let head_commit = head_obj.peel_to_commit()?;
-
-            let base_tree = base_commit.tree()?;
-            let head_tree = head_commit.tree()?;
-            let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)?;
-
-            let mut diff_text = Vec::new();
-            diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-                let origin = line.origin();
-                if origin == '+' || origin == '-' || origin == ' ' {
-                    diff_text.push(origin as u8);
-                }
-                diff_text.extend_from_slice(line.content());
-                true
-            })?;
-
-            diff_text.extend_from_slice(b"--\n2.39.2\n");
-
-            let author = head_commit.author();
-            let author_name = author.name().unwrap_or("syz");
-            let author_email = author.email().unwrap_or("bot@syz.app");
-            let commit_msg = head_commit.message().unwrap_or("");
-
-            let rfc2822_date = chrono::DateTime::from_timestamp(head_commit.time().seconds(), 0)
-                .unwrap_or_default()
-                .to_rfc2822();
-
-            let mut commit_msg_lines = commit_msg.lines().collect::<Vec<_>>();
-            let subject = if commit_msg_lines.is_empty() {
-                ""
-            } else {
-                commit_msg_lines.remove(0)
-            };
-            let msg_body = commit_msg_lines.join("\n");
-
-            let change_id = format!("Change-Id: I{}", head_commit.id());
-
-            format!(
-                "From {} Mon Sep 17 00:00:00 2001\nFrom: {} <{}>\nDate: {}\nSubject: [PATCH] {}\n\n{}\n\n{}\n---\n{}",
-                head_commit.id(),
-                author_name,
-                author_email,
-                rfc2822_date,
-                subject,
-                msg_body.trim(),
-                change_id,
-                String::from_utf8_lossy(&diff_text)
-            )
-        };
+        let git = self.git();
+        let base_branch_name = base_branch.to_string();
+        let head_branch_name = head_branch.to_string();
+        let patch_content =
+            blocking(move || git.patch(&base_branch_name, &head_branch_name)).await?;
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         use std::io::Write;
@@ -874,28 +977,58 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
     }
 
     async fn close_pull_request(&self, head_branch: &str, _base_branch: &str) -> Result<()> {
-        let temp_dir = self.temp_dir("syz-tangled-del-")?;
-        let repo = self.clone_repo(&temp_dir)?;
+        let git = self.git();
+        let head_branch = head_branch.to_string();
 
-        let mut remote = repo.find_remote("origin")?;
-        let mut push_options = git2::PushOptions::new();
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed_types| {
-            git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+        blocking(move || git.delete_branch(&head_branch)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn sets_the_network_timeouts_of_libgit2() {
+        set_git_timeouts();
+
+        // SAFETY: only reads the options.
+        let (connect, io) = unsafe {
+            (
+                git2::opts::get_server_connect_timeout_in_milliseconds().unwrap(),
+                git2::opts::get_server_timeout_in_milliseconds().unwrap(),
+            )
+        };
+        assert_eq!(connect, GIT_CONNECT_TIMEOUT_MS);
+        assert_eq!(io, GIT_IO_TIMEOUT_MS);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_git_work_leaves_the_runtime_free() {
+        let work = blocking(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(())
         });
-        push_options.remote_callbacks(callbacks);
+        let started = std::time::Instant::now();
+        let ticker = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            started.elapsed()
+        };
 
-        let refspec = format!(":refs/heads/{}", head_branch);
-        match remote.push(&[&refspec], Some(&mut push_options)) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to delete branch '{}' on Tangled: {}",
-                    head_branch,
-                    e
-                );
-                Ok(())
-            }
-        }
+        let (result, ticked_after) = tokio::join!(work, ticker);
+        result.unwrap();
+
+        // On the only runtime thread, the ticker could not have run before the work was done.
+        assert!(
+            ticked_after < Duration::from_millis(200),
+            "{ticked_after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_the_git_work_is_an_error() {
+        let result: Result<()> = blocking(|| panic!("boom")).await;
+        assert!(result.is_err());
     }
 }
