@@ -148,8 +148,11 @@ impl Application {
             async {
                 tracing::info!("Processing {:}", payload);
 
+                let is_outcome = payload.is_outcome();
+
                 match payload.execute(&self.context).await {
                     // Enqueued within the message's span, which the jobs then run under.
+                    Ok(jobs) if is_outcome => self.dispatcher.enqueue_next(jobs),
                     Ok(jobs) => {
                         for job in jobs {
                             self.dispatcher.enqueue(job);

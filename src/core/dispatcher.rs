@@ -104,6 +104,25 @@ impl Dispatcher {
     /// Queue the job on its lane, unless a queued job of the lane already covers it. A running
     /// job doesn't: the request queues a follow-up, which resolves a fresh base when it starts.
     pub fn enqueue(&self, job: Job) {
+        self.queue(job, None);
+    }
+
+    /// Queue the jobs that an outcome asked for, ahead of the work that is already queued on
+    /// their lanes and in their own order. They follow up on the job that just ended, so they
+    /// must not wait behind work that was queued while it ran, which may have changed what
+    /// they act on. Otherwise a late cleanup could hit the records that a newer request made.
+    pub fn enqueue_next(&self, jobs: Vec<Job>) {
+        let mut positions: HashMap<LaneKey, usize> = HashMap::new();
+
+        for job in jobs {
+            let position = positions.entry(job.lane().clone()).or_default();
+            self.queue(job, Some(position));
+        }
+    }
+
+    /// Queue the job at the back of its lane, or at `position` if given, which then moves
+    /// past the job.
+    fn queue(&self, job: Job, position: Option<&mut usize>) {
         let key = job.lane().clone();
 
         let mut lanes = self.inner.lanes.lock().unwrap();
@@ -115,11 +134,18 @@ impl Dispatcher {
             return;
         }
 
-        lane.queue.push_back(Queued {
+        let queued = Queued {
             job,
             span: Span::current(),
             dispatch: tracing::dispatcher::get_default(Dispatch::clone),
-        });
+        };
+        match position {
+            Some(position) => {
+                lane.queue.insert(*position, queued);
+                *position += 1;
+            }
+            None => lane.queue.push_back(queued),
+        }
         drop(lanes);
 
         if idle {
@@ -517,6 +543,37 @@ mod tests {
             &[
                 "start publish of bump 1 in github:a",
                 "end publish of bump 1 in github:a"
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_jobs_of_an_outcome_run_ahead_of_the_queued_work_in_their_order() {
+        let mut h = Harness::new(Limits::default(), |job| match job {
+            Job::Scan { .. } => async { Ok(Some(Payload::Purge)) }.boxed(),
+            _ => sleep(0),
+        });
+
+        h.dispatcher.enqueue(scan("a"));
+        // Queued while the scan runs.
+        h.dispatcher.enqueue(publish_bump("a", "1"));
+
+        let message = h.outcomes.recv().await.unwrap();
+        h.dispatcher
+            .enqueue_next(vec![close("a", "syz/x"), close("a", "syz/y")]);
+        message.processed.unwrap().send(()).unwrap();
+        h.settle().await;
+
+        assert_eq!(
+            h.log()
+                .into_iter()
+                .filter(|entry| entry.starts_with("start "))
+                .collect::<Vec<_>>(),
+            vec![
+                "start scan of github:a",
+                "start close of syz/x in github:a",
+                "start close of syz/y in github:a",
+                "start publish of bump 1 in github:a",
             ]
         );
     }
