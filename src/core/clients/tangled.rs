@@ -529,14 +529,69 @@ fn set_git_timeouts() {
     });
 }
 
+/// Tells blocking git work that nobody waits for it anymore, because the job that asked for it
+/// timed out or was dropped. The work stops at its next checkpoint, so that it doesn't push a
+/// result that the lane has moved on from.
+#[derive(Clone, Default)]
+struct Cancel(Arc<std::sync::atomic::AtomicBool>);
+
+impl Cancel {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Fails if the work was cancelled.
+    fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            anyhow::bail!("The git work was cancelled");
+        }
+        Ok(())
+    }
+}
+
+/// Cancels when dropped, which is what happens to the future of a job that is aborted.
+struct CancelOnDrop(Cancel);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        (self.0).0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Run blocking git work on the threads meant for it. The git operations clone and push over
 /// the network, which would otherwise occupy the threads that run the main loop.
+///
+/// A thread can't be stopped from the outside. Dropping the returned future cancels the work
+/// instead, which then stops at its next checkpoint.
 async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T> + Send + 'static,
+    work: impl FnOnce(&Cancel) -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    tokio::task::spawn_blocking(work)
+    let cancel = Cancel::default();
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+
+    tokio::task::spawn_blocking(move || work(&cancel))
         .await
         .context("The git task panicked")?
+}
+
+/// The callbacks of a clone or a push: the credentials, and the checkpoints at which the
+/// transfer stops if the work was cancelled. The last of them, before a push sends its data,
+/// keeps a cancelled push from updating the remote.
+fn remote_callbacks(cancel: &Cancel) -> git2::RemoteCallbacks<'_> {
+    let mut callbacks = git2::RemoteCallbacks::new();
+
+    callbacks.credentials(|_url, username_from_url, _allowed_types| {
+        git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
+    });
+    callbacks.transfer_progress(|_progress| !cancel.is_cancelled());
+    callbacks.push_negotiation(|_updates| {
+        if cancel.is_cancelled() {
+            return Err(git2::Error::from_str("The git work was cancelled"));
+        }
+        Ok(())
+    });
+
+    callbacks
 }
 
 /// The git side of a Tangled repository. Everything here blocks, so callers run it with
@@ -561,15 +616,11 @@ impl GitRemote {
             .tempdir_in(&self.work_dir)?)
     }
 
-    fn clone_repo(&self, temp_dir: &TempDir) -> Result<git2::Repository> {
+    fn clone_repo(&self, temp_dir: &TempDir, cancel: &Cancel) -> Result<git2::Repository> {
+        cancel.check()?;
+
         let mut fetch_options = git2::FetchOptions::new();
-        let mut callbacks = git2::RemoteCallbacks::new();
-
-        callbacks.credentials(|_url, username_from_url, _allowed_types| {
-            git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-        });
-
-        fetch_options.remote_callbacks(callbacks);
+        fetch_options.remote_callbacks(remote_callbacks(cancel));
 
         let mut builder = git2::build::RepoBuilder::new();
         builder.fetch_options(fetch_options);
@@ -588,9 +639,10 @@ impl GitRemote {
         new_branch: &str,
         commit_message: &str,
         modifications: Vec<FileModification>,
+        cancel: &Cancel,
     ) -> Result<Option<String>> {
         let temp_dir = self.temp_dir("syz-tangled-")?;
-        let repo = self.clone_repo(&temp_dir)?;
+        let repo = self.clone_repo(&temp_dir, cancel)?;
 
         let obj = repo.revparse_single(base_revision)?;
         repo.checkout_tree(&obj, None)?;
@@ -648,13 +700,11 @@ impl GitRemote {
             &[&parent_commit],
         )?;
 
+        cancel.check()?;
+
         let mut remote = repo.find_remote("origin")?;
         let mut push_options = git2::PushOptions::new();
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed_types| {
-            git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-        });
-        push_options.remote_callbacks(callbacks);
+        push_options.remote_callbacks(remote_callbacks(cancel));
 
         let refspec = format!("+refs/heads/{}:refs/heads/{}", new_branch, new_branch);
         remote.push(&[&refspec], Some(&mut push_options))?;
@@ -663,17 +713,15 @@ impl GitRemote {
     }
 
     /// Delete the branch from the remote. A failure is logged and not returned.
-    fn delete_branch(&self, branch: &str) -> Result<()> {
+    fn delete_branch(&self, branch: &str, cancel: &Cancel) -> Result<()> {
         let temp_dir = self.temp_dir("syz-tangled-del-")?;
-        let repo = self.clone_repo(&temp_dir)?;
+        let repo = self.clone_repo(&temp_dir, cancel)?;
+
+        cancel.check()?;
 
         let mut remote = repo.find_remote("origin")?;
         let mut push_options = git2::PushOptions::new();
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(|_url, username_from_url, _allowed_types| {
-            git2::Cred::ssh_key_from_agent(username_from_url.unwrap_or("git"))
-        });
-        push_options.remote_callbacks(callbacks);
+        push_options.remote_callbacks(remote_callbacks(cancel));
 
         let refspec = format!(":refs/heads/{}", branch);
         if let Err(e) = remote.push(&[&refspec], Some(&mut push_options)) {
@@ -685,9 +733,9 @@ impl GitRemote {
 
     /// The patch (in the format of `git format-patch`) of the head branch against the base
     /// branch.
-    fn patch(&self, base_branch: &str, head_branch: &str) -> Result<String> {
+    fn patch(&self, base_branch: &str, head_branch: &str, cancel: &Cancel) -> Result<String> {
         let temp_dir = self.temp_dir("syz-tangled-diff-")?;
-        let repo = self.clone_repo(&temp_dir)?;
+        let repo = self.clone_repo(&temp_dir, cancel)?;
 
         let base_obj = repo.revparse_single(&format!("origin/{}", base_branch))?;
         let head_obj = repo.revparse_single(&format!("origin/{}", head_branch))?;
@@ -767,8 +815,14 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
         let new_branch = new_branch.to_string();
         let commit_message = commit_message.to_string();
 
-        blocking(move || {
-            git.commit_changes(&base_revision, &new_branch, &commit_message, modifications)
+        blocking(move |cancel| {
+            git.commit_changes(
+                &base_revision,
+                &new_branch,
+                &commit_message,
+                modifications,
+                cancel,
+            )
         })
         .await
     }
@@ -869,7 +923,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
         let base_branch_name = base_branch.to_string();
         let head_branch_name = head_branch.to_string();
         let patch_content =
-            blocking(move || git.patch(&base_branch_name, &head_branch_name)).await?;
+            blocking(move |cancel| git.patch(&base_branch_name, &head_branch_name, cancel)).await?;
 
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         use std::io::Write;
@@ -980,7 +1034,7 @@ impl ProjectRepositoryMutator for TangledProjectRepositoryMutator {
         let git = self.git();
         let head_branch = head_branch.to_string();
 
-        blocking(move || git.delete_branch(&head_branch)).await
+        blocking(move |cancel| git.delete_branch(&head_branch, cancel)).await
     }
 }
 
@@ -1006,7 +1060,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_git_work_leaves_the_runtime_free() {
-        let work = blocking(|| {
+        let work = blocking(|_| {
             std::thread::sleep(Duration::from_millis(300));
             Ok(())
         });
@@ -1028,7 +1082,35 @@ mod tests {
 
     #[tokio::test]
     async fn a_panic_in_the_git_work_is_an_error() {
-        let result: Result<()> = blocking(|| panic!("boom")).await;
+        let result: Result<()> = blocking(|_| panic!("boom")).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_git_work_cancels_it() {
+        let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
+        let work = blocking(move |cancel| {
+            while !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            stopped_tx.send(()).unwrap();
+            Ok(())
+        });
+
+        // Gives up on the work, as the dispatcher does when a job times out.
+        assert!(tokio::time::timeout(Duration::from_millis(50), work)
+            .await
+            .is_err());
+
+        stopped_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn cancelled_work_fails_its_checkpoints() {
+        let cancel = Cancel::default();
+        assert!(cancel.check().is_ok());
+
+        drop(CancelOnDrop(cancel.clone()));
+        assert!(cancel.check().is_err());
     }
 }
