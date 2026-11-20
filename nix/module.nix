@@ -53,7 +53,9 @@ in
       serviceConfig = {
         ExecStart = lib.getExe' package "syzd";
         EnvironmentFile = cfg.environmentFile;
+
         Restart = "on-failure";
+        RestartSec = "5s";
 
         User = "syz";
         Group = "syz";
