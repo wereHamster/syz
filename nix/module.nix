@@ -53,10 +53,7 @@ in
       serviceConfig = {
         ExecStart = lib.getExe' package "syzd";
         EnvironmentFile = cfg.environmentFile;
-        # syzd exits when GitHub or atproto is unreachable at startup, which is
-        # common right after boot even with network-online.target. Without a
-        # delay, the near-instant restarts trip the start limit and systemd
-        # stops retrying for good.
+
         Restart = "on-failure";
         RestartSec = "5s";
 
