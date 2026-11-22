@@ -57,6 +57,7 @@ impl BumpDetailView {
                 let mut currents = Vec::new();
                 let mut targets = Vec::new();
                 let mut heads = Vec::new();
+                let mut has_newer_head = false;
                 for (path, value) in backend.db.iter() {
                     if path.starts_with("bumpdep/") {
                         if let Ok(bd) = serde_json::from_value::<BumpDep>(value.clone()) {
@@ -80,6 +81,7 @@ impl BumpDetailView {
                                 }
                                 targets.push(bd.target_version.clone());
                                 heads.push(bd.head_version.clone());
+                                has_newer_head |= bd.head_version != bd.target_version;
                             }
                         }
                     }
@@ -106,7 +108,9 @@ impl BumpDetailView {
                 } else {
                     "multiple".to_string()
                 };
-                let head = if !target.is_empty() && target != "multiple" && head == target {
+                // Compare per dependency: when every package's head equals its own
+                // target there is nothing newer, even if the targets differ.
+                let head = if !heads.is_empty() && !has_newer_head {
                     "-".to_string()
                 } else {
                     head

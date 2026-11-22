@@ -112,6 +112,7 @@ impl BumpsView {
         let mut ecosystems_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
         let mut targets_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
         let mut heads_by_group: HashMap<(String, bool), Vec<String>> = HashMap::new();
+        let mut newer_head_by_group: HashSet<(String, bool)> = HashSet::new();
 
         for (path, value) in backend.db.iter() {
             if path.starts_with("bumpdep/") {
@@ -146,6 +147,9 @@ impl BumpsView {
                             .entry(key.clone())
                             .or_default()
                             .push(bd.head_version.clone());
+                        if bd.head_version != bd.target_version {
+                            newer_head_by_group.insert(key.clone());
+                        }
                     }
                 }
             }
@@ -191,7 +195,9 @@ impl BumpsView {
                 } else {
                     "multiple".to_string()
                 };
-                let head = if !target.is_empty() && target != "multiple" && head == target {
+                // Compare per dependency: when every package's head equals its own
+                // target there is nothing newer, even if the targets differ.
+                let head = if !heads.is_empty() && !newer_head_by_group.contains(&key) {
                     "-".to_string()
                 } else {
                     head
