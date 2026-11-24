@@ -1063,7 +1063,7 @@ mod tests {
                 minimum_release_age: None,
             },
             dependency_update_options: DependencyUpdateOption {
-                package_info: PackageInfo { repo_url: None },
+                package_info: PackageInfo::default(),
                 bumps: vec![ProposedBump {
                     target_version: "1.1.0".to_string(),
                     head_version: "1.1.0".to_string(),

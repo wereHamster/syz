@@ -19,7 +19,8 @@ Two sources are tried, in order:
    versions older than the fetched pages.
 2. **Changelog files** — the version's section is extracted from ranked
    changelog files (`CHANGELOG.md`, `packages/foo/CHANGELOG.md`, …) in the
-   repository's default branch.
+   repository's default branch. Files in the package's directory come first
+   when the request names it (npm's `repository.directory`).
 
 Resolved notes are post-processed: headings are re-leveled to a target depth,
 version headings stripped, and the markdown sanitized for embedding.

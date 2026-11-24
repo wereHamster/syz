@@ -29,6 +29,7 @@ fn batch(pkg_name: &PackageName, versions: &[&str]) -> Vec<release_notes::Reques
         .map(|v| release_notes::Request {
             package: pkg_name.clone(),
             version: v.to_string(),
+            directory: None,
         })
         .collect()
 }
@@ -125,10 +126,12 @@ async fn changelog_first_keeps_matched_tag_for_later_versions() {
         release_notes::Request {
             package: pkg("knip"),
             version: "1.0.0".to_string(),
+            directory: None,
         },
         release_notes::Request {
             package: pkg("knip"),
             version: "2.0.0".to_string(),
+            directory: None,
         },
     ];
     let results = resolver.resolve_batch(&requests).await;
@@ -203,6 +206,7 @@ async fn releases_list_fetched_once_across_versions() {
         .map(|v| release_notes::Request {
             package: pkg("knip"),
             version: v.to_string(),
+            directory: None,
         })
         .collect();
     let results = resolver.resolve_batch(&requests).await;
@@ -405,6 +409,47 @@ async fn changelog_candidate_cap() {
     assert!(forge.file_calls() <= 3);
 }
 
+#[tokio::test]
+async fn changelog_in_package_directory_is_found() {
+    // Monorepo where the package's directory doesn't contain its short name
+    // (`@radix-ui/react-tooltip` lives in `packages/react/tooltip`), and
+    // shorter sibling changelogs would fill the candidate cap.
+    let forge = MockForge::new()
+        .with_releases(vec![])
+        .with_file("packages/react/id/CHANGELOG.md", Some("## 1.0.0\n\n- id\n"))
+        .with_file(
+            "packages/core/rect/CHANGELOG.md",
+            Some("## 1.0.0\n\n- rect\n"),
+        )
+        .with_file(
+            "packages/react/form/CHANGELOG.md",
+            Some("## 1.0.0\n\n- form\n"),
+        )
+        .with_file(
+            "packages/react/tooltip/CHANGELOG.md",
+            Some("## 1.0.0\n\n- tooltip\n"),
+        );
+    let resolver = Resolver::new(Arc::new(forge.clone()), Options::default());
+
+    let results = resolver
+        .resolve_batch(&[release_notes::Request {
+            package: pkg("@radix-ui/react-tooltip"),
+            version: "1.0.0".to_string(),
+            directory: Some("packages/react/tooltip".to_string()),
+        }])
+        .await;
+    let notes = results[0].as_ref().unwrap().as_ref().unwrap();
+
+    assert!(notes.markdown.contains("tooltip"));
+    match &notes.source {
+        Source::ChangelogFile { path, .. } => {
+            assert_eq!(path, "packages/react/tooltip/CHANGELOG.md")
+        }
+        _ => panic!("expected changelog file"),
+    }
+    assert_eq!(forge.file_calls(), 1);
+}
+
 // ---------------------------------------------------------------------------
 // Strategy memory
 // ---------------------------------------------------------------------------
@@ -524,10 +569,12 @@ async fn resolve_batch_sequential_learning() {
         release_notes::Request {
             package: pkg("a"),
             version: "1.0.0".to_string(),
+            directory: None,
         },
         release_notes::Request {
             package: pkg("b"),
             version: "1.0.0".to_string(),
+            directory: None,
         },
     ];
     let results = resolver.resolve_batch(&requests).await;

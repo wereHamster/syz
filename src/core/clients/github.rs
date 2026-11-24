@@ -366,7 +366,7 @@ impl GitHub {
     pub async fn get_package_info(&self, name: &str) -> Result<crate::core::engine::PackageInfo> {
         let parts: Vec<&str> = name.split('/').collect();
         if parts.len() < 2 {
-            return Ok(crate::core::engine::PackageInfo { repo_url: None });
+            return Ok(crate::core::engine::PackageInfo::default());
         }
         let owner = parts[0];
         let repo = parts[1];
@@ -374,6 +374,7 @@ impl GitHub {
         let url = format!("https://github.com/{}/{}", owner, repo);
         Ok(crate::core::engine::PackageInfo {
             repo_url: Some(url),
+            repo_directory: None,
         })
     }
 

@@ -1719,7 +1719,7 @@ mod tests {
                 version: version.to_string(),
             },
             latest_version: version.to_string(),
-            package_info: crate::core::engine::PackageInfo { repo_url: None },
+            package_info: crate::core::engine::PackageInfo::default(),
             minimum_release_age: None,
         }
     }

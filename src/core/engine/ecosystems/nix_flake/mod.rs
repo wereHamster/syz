@@ -45,7 +45,10 @@ impl Registry for NixFlakeRegistry {
             .or_else(|| internal::helpers::parse_git_url(name).map(|repo| repo.url))
             .or_else(|| internal::helpers::parse_tarball_url(name).map(|location| location.url));
 
-        Ok(crate::core::engine::PackageInfo { repo_url })
+        Ok(crate::core::engine::PackageInfo {
+            repo_url,
+            repo_directory: None,
+        })
     }
 }
 

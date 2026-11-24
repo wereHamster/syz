@@ -135,7 +135,7 @@ mod tests {
                 version: target.to_string(),
             },
             latest_version: target.to_string(),
-            package_info: PackageInfo { repo_url: None },
+            package_info: PackageInfo::default(),
             minimum_release_age: None,
         }
     }

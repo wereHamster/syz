@@ -135,7 +135,11 @@ impl Forge for GitHubForge {
         Ok(Some(release.into()))
     }
 
-    async fn changelog_candidates(&self, pkg: &PackageName) -> Result<Vec<String>> {
+    async fn changelog_candidates(
+        &self,
+        pkg: &PackageName,
+        directory: Option<&str>,
+    ) -> Result<Vec<String>> {
         let url = format!("{}/git/trees/HEAD?recursive=1", self.repo_api());
         let Some(json) = self.get_json(&url).await? else {
             return Ok(Vec::new());
@@ -162,7 +166,7 @@ impl Forge for GitHubForge {
             .map(str::to_string)
             .collect();
 
-        Ok(rank_changelog_paths(paths, pkg))
+        Ok(rank_changelog_paths(paths, pkg, directory))
     }
 
     async fn read_file(&self, path: &str) -> Result<Option<String>> {

@@ -99,7 +99,11 @@ impl Forge for MockForge {
         Ok(st.releases.iter().take(pages * 2).cloned().collect())
     }
 
-    async fn changelog_candidates(&self, pkg: &PackageName) -> Result<Vec<String>> {
+    async fn changelog_candidates(
+        &self,
+        pkg: &PackageName,
+        directory: Option<&str>,
+    ) -> Result<Vec<String>> {
         let mut st = self.inner.lock().unwrap();
         st.tree_calls += 1;
         if st.rate_limit_on {
@@ -111,7 +115,7 @@ impl Forge for MockForge {
             .filter(|p| crate::forge::is_changelog_path(p))
             .cloned()
             .collect();
-        Ok(rank_changelog_paths(paths, pkg))
+        Ok(rank_changelog_paths(paths, pkg, directory))
     }
 
     async fn read_file(&self, path: &str) -> Result<Option<String>> {
