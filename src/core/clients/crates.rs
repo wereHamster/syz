@@ -106,6 +106,7 @@ impl Crates {
 
         Ok(crate::core::engine::PackageInfo {
             repo_url: data.crate_data.repository,
+            repo_directory: None,
         })
     }
 

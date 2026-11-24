@@ -35,6 +35,7 @@ pub async fn run(
         return Ok(DependencyUpdateOption {
             package_info: PackageInfo {
                 repo_url: Some(repo.url),
+                repo_directory: None,
             },
             bumps,
         });
@@ -58,6 +59,7 @@ pub async fn run(
         return Ok(DependencyUpdateOption {
             package_info: PackageInfo {
                 repo_url: Some(location.url),
+                repo_directory: None,
             },
             bumps,
         });
@@ -67,7 +69,7 @@ pub async fn run(
         Some(r) => r,
         None => {
             return Ok(DependencyUpdateOption {
-                package_info: PackageInfo { repo_url: None },
+                package_info: PackageInfo::default(),
                 bumps: Vec::new(),
             })
         }
@@ -91,7 +93,10 @@ pub async fn run(
     };
 
     Ok(DependencyUpdateOption {
-        package_info: PackageInfo { repo_url },
+        package_info: PackageInfo {
+            repo_url,
+            repo_directory: None,
+        },
         bumps,
     })
 }

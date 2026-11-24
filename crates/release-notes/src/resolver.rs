@@ -31,6 +31,10 @@ use crate::types::{
 pub struct Request {
     pub package: PackageName,
     pub version: String,
+    /// The package's directory in the repository (npm's
+    /// `repository.directory`), if known. Changelog files inside it are
+    /// tried first.
+    pub directory: Option<String>,
 }
 
 /// Resolution options; defaults preserve legacy behavior.
@@ -100,8 +104,13 @@ impl Resolver {
     /// empty. `Ok(None)` = no notes found. `Err` only for real failures
     /// (rate limit, transport).
     pub async fn resolve(&self, pkg: &PackageName, version: &str) -> Result<Option<ReleaseNotes>> {
+        let request = Request {
+            package: pkg.clone(),
+            version: version.to_string(),
+            directory: None,
+        };
         let mut state = self.state.lock().await;
-        self.resolve_locked(pkg, version, &mut state).await
+        self.resolve_locked(&request, &mut state).await
     }
 
     /// The sticky first-success strategy learned so far, if any. Reads the
@@ -120,20 +129,17 @@ impl Resolver {
         let mut state = self.state.lock().await;
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
-            results.push(
-                self.resolve_locked(&request.package, &request.version, &mut state)
-                    .await,
-            );
+            results.push(self.resolve_locked(request, &mut state).await);
         }
         results
     }
 
     async fn resolve_locked(
         &self,
-        pkg: &PackageName,
-        version: &str,
+        request: &Request,
         state: &mut BatchState,
     ) -> Result<Option<ReleaseNotes>> {
+        let (pkg, version) = (&request.package, request.version.as_str());
         let base = base_version(version);
         let mut needles: Vec<&str> = vec![version];
         if base != version {
@@ -166,7 +172,7 @@ impl Resolver {
                 None
             };
             if let Some(notes) = self
-                .resolve_via_changelog_file(pkg, version, &cands, &needles, list.as_deref(), state)
+                .resolve_via_changelog_file(request, &cands, &needles, list.as_deref(), state)
                 .await?
             {
                 return Ok(Some(notes));
@@ -189,7 +195,7 @@ impl Resolver {
 
         if try_changelog && !(changelog_first) {
             if let Some(notes) = self
-                .resolve_via_changelog_file(pkg, version, &cands, &needles, list.as_deref(), state)
+                .resolve_via_changelog_file(request, &cands, &needles, list.as_deref(), state)
                 .await?
             {
                 return Ok(Some(notes));
@@ -242,15 +248,17 @@ impl Resolver {
     /// files, fetching them lazily (memoized per path).
     async fn resolve_via_changelog_file(
         &self,
-        pkg: &PackageName,
-        version: &str,
+        request: &Request,
         cands: &[Candidate],
         needles: &[&str],
         releases: Option<&[ReleaseInfo]>,
         state: &mut BatchState,
     ) -> Result<Option<ReleaseNotes>> {
+        let (pkg, directory) = (&request.package, request.directory.as_deref());
         let paths = state
-            .candidates(pkg, || self.forge.changelog_candidates(pkg))
+            .candidates(pkg, directory, || {
+                self.forge.changelog_candidates(pkg, directory)
+            })
             .await?;
 
         // A matched release tag is only known if the list was already
@@ -264,7 +272,7 @@ impl Resolver {
             let Some(content) = state.file(path, || self.forge.read_file(path)).await? else {
                 continue;
             };
-            let Some(section) = markdown::extract_section(&content, version) else {
+            let Some(section) = markdown::extract_section(&content, &request.version) else {
                 continue;
             };
 
@@ -356,9 +364,9 @@ fn unmemo<T: Clone>(slot: &Memo<T>) -> Result<T> {
 struct BatchState {
     /// Releases list: fetched at most once per state (single slot, not a map).
     releases: Option<Memo<Vec<ReleaseInfo>>>,
-    /// Changelog candidate paths per package: the tree fetch is repo-level,
-    /// the ranking is per package.
-    candidates: HashMap<String, Memo<Vec<String>>>,
+    /// Changelog candidate paths per package and package directory: the
+    /// tree fetch is repo-level, the ranking is per package.
+    candidates: HashMap<(String, Option<String>), Memo<Vec<String>>>,
     /// Per-tag deep-history probes.
     probes: HashMap<Tag, Memo<Option<ReleaseInfo>>>,
     /// Changelog-file contents, fetched lazily per path.
@@ -385,14 +393,15 @@ impl BatchState {
         unmemo(self.releases.as_ref().expect("filled above"))
     }
 
-    /// Changelog candidate paths for one package, fetched via `fetch` on
-    /// first access.
+    /// Changelog candidate paths for one package in `directory`, fetched via
+    /// `fetch` on first access.
     async fn candidates(
         &mut self,
         pkg: &PackageName,
+        directory: Option<&str>,
         fetch: impl AsyncFnOnce() -> Result<Vec<String>>,
     ) -> Result<Vec<String>> {
-        let key = pkg.as_str().to_string();
+        let key = (pkg.as_str().to_string(), directory.map(str::to_string));
         if !self.candidates.contains_key(&key) {
             let fetched = memo(fetch().await);
             self.candidates.insert(key.clone(), fetched);

@@ -49,7 +49,7 @@ pub trait Registry: Send + Sync {
 
     /// Fetches the metadata for a package, such as its source repository URL.
     async fn fetch_package_info(&self, _name: &str) -> Result<crate::core::engine::PackageInfo> {
-        Ok(crate::core::engine::PackageInfo { repo_url: None })
+        Ok(crate::core::engine::PackageInfo::default())
     }
 
     /// Fetches the timeline of releases between the current and target version.

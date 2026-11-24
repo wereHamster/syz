@@ -22,9 +22,12 @@ pub struct RequirementVersion {
 }
 
 /// Meta information about a package.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PackageInfo {
     pub repo_url: Option<String>,
+    /// The directory of the package in the repository, for packages published from a monorepo
+    /// (npm's `repository.directory`, e.g. `packages/react/tooltip`).
+    pub repo_directory: Option<String>,
 }
 
 pub struct DependencyUpdateTarget {

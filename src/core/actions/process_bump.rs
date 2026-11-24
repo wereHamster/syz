@@ -153,6 +153,7 @@ pub(super) fn build_update_targets(
                 latest_version: row.head_version,
                 package_info: PackageInfo {
                     repo_url: row.repo_url,
+                    repo_directory: None,
                 },
                 minimum_release_age: row.minimum_release_age,
             });

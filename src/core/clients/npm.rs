@@ -150,6 +150,8 @@ impl Npm {
     ) -> Result<crate::core::engine::PackageInfo> {
         let response = self.get_registry_response(package).await?;
 
+        let repo_directory = response.repository.as_ref().and_then(repository_directory);
+
         let repo_url = response.repository.and_then(|repo| {
             let raw_url = if let Some(url) = repo.as_str() {
                 Some(url.to_string())
@@ -171,7 +173,10 @@ impl Npm {
             })
         });
 
-        Ok(crate::core::engine::PackageInfo { repo_url })
+        Ok(crate::core::engine::PackageInfo {
+            repo_url,
+            repo_directory,
+        })
     }
 
     pub async fn get_versions(
@@ -299,4 +304,46 @@ fn clean_repo_url(url: &str) -> String {
     }
 
     clean_url
+}
+
+/// The `directory` of a package.json `repository` object: where in the repository a package
+/// published from a monorepo lives. The string form of `repository` has no directory.
+fn repository_directory(repository: &serde_json::Value) -> Option<String> {
+    let directory = repository.get("directory")?.as_str()?;
+    let directory = directory.trim_start_matches("./").trim_matches('/');
+    (!directory.is_empty()).then(|| directory.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repository_directory_is_read_from_the_object_form() {
+        let repository = serde_json::json!({
+            "type": "git",
+            "url": "git+https://github.com/radix-ui/primitives.git",
+            "directory": "packages/react/tooltip"
+        });
+        assert_eq!(
+            repository_directory(&repository).as_deref(),
+            Some("packages/react/tooltip")
+        );
+        assert_eq!(
+            repository_directory(&serde_json::json!({ "directory": "./packages/a/" })).as_deref(),
+            Some("packages/a")
+        );
+    }
+
+    #[test]
+    fn repository_without_directory_has_none() {
+        for repository in [
+            serde_json::json!("github:webpro-nl/knip"),
+            serde_json::json!({ "type": "git", "url": "https://github.com/webpro-nl/knip" }),
+            serde_json::json!({ "directory": "" }),
+            serde_json::json!({ "directory": 1 }),
+        ] {
+            assert_eq!(repository_directory(&repository), None, "{repository}");
+        }
+    }
 }

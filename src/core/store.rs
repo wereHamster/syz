@@ -1184,7 +1184,7 @@ mod tests {
                     minimum_release_age: None,
                 },
                 dependency_update_options: DependencyUpdateOption {
-                    package_info: PackageInfo { repo_url: None },
+                    package_info: PackageInfo::default(),
                     bumps: std::iter::once(bump(minor, false))
                         .chain(major.map(|major| bump(major, true)))
                         .collect(),

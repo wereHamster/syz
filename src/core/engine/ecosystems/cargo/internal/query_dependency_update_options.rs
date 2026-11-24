@@ -46,6 +46,7 @@ pub async fn run(
     Ok(DependencyUpdateOption {
         package_info: PackageInfo {
             repo_url: versions.repo_url,
+            repo_directory: None,
         },
         bumps,
     })

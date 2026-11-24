@@ -15,9 +15,14 @@ pub trait Forge: Send + Sync {
     async fn releases(&self, pages: usize) -> Result<Vec<ReleaseInfo>>;
 
     /// Ranked changelog file paths in the repository's default branch
-    /// (ranking via [`rank_changelog_paths`]). The `PackageName` is needed
-    /// for ranking.
-    async fn changelog_candidates(&self, pkg: &PackageName) -> Result<Vec<String>>;
+    /// (ranking via [`rank_changelog_paths`]). The `PackageName` and the
+    /// package's directory in the repository, if known, are needed for
+    /// ranking.
+    async fn changelog_candidates(
+        &self,
+        pkg: &PackageName,
+        directory: Option<&str>,
+    ) -> Result<Vec<String>>;
 
     /// Fetch one file's content as UTF-8. Missing file → `Ok(None)`.
     async fn read_file(&self, path: &str) -> Result<Option<String>>;
@@ -34,18 +39,91 @@ pub(crate) fn is_changelog_path(path: &str) -> bool {
     lower.ends_with("changelog.md") || lower.ends_with("changelog")
 }
 
-/// Legacy changelog ranking, shared by forge implementations and the mock:
-/// paths containing the package short name first, then ascending length.
-pub(crate) fn rank_changelog_paths(mut paths: Vec<String>, pkg: &PackageName) -> Vec<String> {
+/// Changelog ranking, shared by forge implementations and the mock: paths
+/// inside the package's `directory` first (the monorepo layout npm records
+/// in `repository.directory`, e.g. `packages/react/tooltip`), then paths
+/// containing the package short name, then the rest; ascending length
+/// within each group.
+pub(crate) fn rank_changelog_paths(
+    mut paths: Vec<String>,
+    pkg: &PackageName,
+    directory: Option<&str>,
+) -> Vec<String> {
     let short_name = pkg.short().to_lowercase();
-    paths.sort_by(|a, b| {
-        let a_contains = a.to_lowercase().contains(&short_name);
-        let b_contains = b.to_lowercase().contains(&short_name);
-        if a_contains == b_contains {
-            a.len().cmp(&b.len())
+    let prefix = directory
+        .map(|d| d.trim_start_matches("./").trim_matches('/'))
+        .filter(|d| !d.is_empty())
+        .map(|d| format!("{d}/"));
+    let group = |path: &str| {
+        if prefix.as_deref().is_some_and(|p| path.starts_with(p)) {
+            0
+        } else if path.to_lowercase().contains(&short_name) {
+            1
         } else {
-            b_contains.cmp(&a_contains)
+            2
         }
-    });
+    };
+    paths.sort_by_key(|p| (group(p), p.len()));
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn package_directory_ranks_first() {
+        let ranked = rank_changelog_paths(
+            paths(&[
+                "packages/react/tooltip/CHANGELOG.md",
+                "packages/react/id/CHANGELOG.md",
+                "packages/core/rect/CHANGELOG.md",
+                "packages/react/form/CHANGELOG.md",
+            ]),
+            &PackageName::new("@radix-ui/react-tooltip"),
+            Some("packages/react/tooltip"),
+        );
+        assert_eq!(ranked[0], "packages/react/tooltip/CHANGELOG.md");
+    }
+
+    #[test]
+    fn directory_forms_are_normalized() {
+        for dir in ["./packages/a/", "/packages/a", "packages/a"] {
+            let ranked = rank_changelog_paths(
+                paths(&[
+                    "CHANGELOG.md",
+                    "packages/ab/CHANGELOG.md",
+                    "packages/a/CHANGELOG.md",
+                ]),
+                &PackageName::new("x"),
+                Some(dir),
+            );
+            assert_eq!(ranked[0], "packages/a/CHANGELOG.md", "dir: {dir}");
+        }
+    }
+
+    #[test]
+    fn without_directory_short_name_then_length() {
+        let ranked = rank_changelog_paths(
+            paths(&[
+                "CHANGELOG.md",
+                "packages/knip/CHANGELOG.md",
+                "docs/CHANGELOG",
+            ]),
+            &PackageName::new("knip"),
+            None,
+        );
+        assert_eq!(
+            ranked,
+            paths(&[
+                "packages/knip/CHANGELOG.md",
+                "CHANGELOG.md",
+                "docs/CHANGELOG"
+            ])
+        );
+    }
 }

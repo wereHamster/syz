@@ -80,8 +80,10 @@ pub async fn generate(
                 .repo_url
                 .clone()
                 .unwrap_or_else(|| t.name.clone());
+            // Packages of one monorepo share the URL but each has its own changelog.
+            let key = (url, t.package_info.repo_directory.clone());
 
-            let entry = unique_urls.entry(url).or_insert((
+            let entry = unique_urls.entry(key).or_insert((
                 t,
                 &t.current_version.version,
                 &t.target_version.version,
@@ -112,6 +114,7 @@ pub async fn generate(
 
     for (target, hist_current, hist_target) in history_targets {
         let mut repo_url = target.package_info.repo_url.clone().unwrap_or_default();
+        let mut repo_directory = target.package_info.repo_directory.clone();
         if repo_url.is_empty() {
             if let Ok(info) = ctx
                 .registry_router
@@ -119,6 +122,7 @@ pub async fn generate(
                 .await
             {
                 repo_url = info.repo_url.unwrap_or_default();
+                repo_directory = info.repo_directory;
             }
         }
 
@@ -201,6 +205,7 @@ pub async fn generate(
                 .map(|release| NotesRequest {
                     package: PackageName::new(&target.name),
                     version: release.version.clone(),
+                    directory: repo_directory.clone(),
                 })
                 .collect();
 
